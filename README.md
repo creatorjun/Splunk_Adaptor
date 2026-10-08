@@ -3,6 +3,8 @@
 
 Java 21로 작성한 Docker 기반 호스트 모니터링 프로그램입니다. CPU, 메모리, 지정한 디스크 경로의 사용량이 사용자 임계치에 도달하면 **이 프로젝트의 `warn/` 폴더에 개별 JSON 파일을 생성**합니다. 설정은 웹 화면에서 변경하며 재시작 없이 적용됩니다.
 
+Oracle Linux 8.10 Minimal에서 데스크톱이나 X11을 설치하지 않고 실행하는 **브라우저 GUI 대시보드**입니다. CPU·Memory·Disk 사용률을 하나의 그래프에 표시하며 서버 수집과 화면 조회는 각각 **60초 간격**입니다.
+
 ## 프로젝트 구조
 
 ```text
@@ -20,22 +22,26 @@ Splunk_Adaptor/
 ├── scripts/
 │   ├── prepare.sh
 │   ├── publish.sh
-│   └── smoke_test.py
+│   ├── smoke_test.py
+│   └── minute_dashboard_test.py
 ├── warn/
 ├── src/main/java/com/company/monitor/
 │   ├── domain/
 │   │   ├── ThresholdRule.java
 │   │   ├── MonitorSettings.java
 │   │   ├── ResourceSnapshot.java
+│   │   ├── MinuteUsage.java
 │   │   ├── ResourceEvent.java
 │   │   └── ThresholdEngine.java
 │   ├── application/
 │   │   ├── MonitorPorts.java
-│   │   └── MonitorService.java
+│   │   ├── MonitorService.java
+│   │   └── MinuteHistoryService.java
 │   ├── infrastructure/
 │   │   ├── JsonSupport.java
 │   │   ├── AtomicFiles.java
 │   │   ├── FileSettingsRepository.java
+│   │   ├── FileMinuteHistoryRepository.java
 │   │   ├── LinuxResourceCollector.java
 │   │   ├── FileEventSink.java
 │   │   └── MonitorHttpServer.java
@@ -52,10 +58,12 @@ Splunk_Adaptor/
     │   ├── ThresholdEngineTest.java
     │   └── MonitorSettingsTest.java
     ├── application/
-    │   └── MonitorServiceTest.java
+    │   ├── MonitorServiceTest.java
+    │   └── MinuteHistoryServiceTest.java
     └── infrastructure/
         ├── LinuxResourceCollectorTest.java
         ├── FilePersistenceTest.java
+        ├── FileMinuteHistoryRepositoryTest.java
         └── MonitorHttpServerTest.java
 ```
 
@@ -95,6 +103,7 @@ ssh -L 8080:127.0.0.1:8080 user@oracle-linux-host
 |---|---|---|
 | 임계치 도달·재알림 JSON | **프로젝트/warn/** | `/warn/` |
 | 저장된 임계치 설정 | Docker `monitor-data` 볼륨 | `/data/settings.json` |
+| 최근 60분의 분별 사용량 | Docker `monitor-data` 볼륨 | `/data/minute-history.json` |
 | 도달·복구 이벤트 통합 로그 | Docker `monitor-data` 볼륨 | `/data/logs/events.jsonl` |
 
 `MONITOR_WARN_HOST_DIR=./warn`이 기본값입니다. 프로젝트를 이동하면 그 프로젝트 위치를 기준으로 새 `warn/` 폴더를 사용합니다. 다른 경로를 지정하는 경우 해당 경로를 미리 만들고 UID/GID `10001:10001`의 쓰기 권한을 부여해야 합니다. 준비 스크립트는 기본 `./warn`만 준비합니다.
@@ -159,7 +168,7 @@ ssh -L 8080:127.0.0.1:8080 user@oracle-linux-host
 
 예를 들어 CPU 임계치가 80%, 여유폭이 5%p이면 80% 이상에서 도달 이벤트를 만들고 75% 미만에서 복구됩니다. 복구 전 지속 초과 상태는 재알림 주기에 맞춰 추가 JSON을 생성합니다. 여유폭 구간에서는 경보를 유지하지만 도달 임계치 미만이라면 재알림을 생성하지 않습니다.
 
-설정 저장은 디스크에 성공한 뒤 메모리 설정을 교체합니다. 250ms 간격의 백그라운드 실행 루프가 다음 측정을 요청하므로 종전 측정 주기가 길어도 설정 반영을 위해 그 주기를 기다리지 않습니다. 실제 반영 시각은 호스트 파일 읽기·쓰기 완료 시간에 영향을 받습니다. 연속 도달 횟수가 2 이상이면 새 설정으로 해당 횟수만큼 측정한 뒤 도달 이벤트를 생성합니다. 웹 화면은 1초마다 최신 상태를 조회합니다.
+설정 저장은 디스크에 성공한 뒤 메모리 설정을 교체합니다. 250ms 간격의 백그라운드 실행 루프가 다음 측정을 요청하므로 종전 측정 주기가 길어도 설정 반영을 위해 그 주기를 기다리지 않습니다. 실제 반영 시각은 호스트 파일 읽기·쓰기 완료 시간에 영향을 받습니다. 연속 도달 횟수가 2 이상이면 새 설정으로 해당 횟수만큼 측정한 뒤 도달 이벤트를 생성합니다. 웹 화면은 60초마다 최신 상태와 분별 기록을 조회하며, 설정을 저장하면 응답의 새 설정을 즉시 표시합니다.
 
 여러 화면에서 동시에 수정하면 설정 버전으로 충돌을 감지하고 HTTP 409를 반환합니다. 이미 편집 중인 값은 자동 갱신으로 덮어쓰지 않습니다. 자원 알림을 해제하면 기존 경보 상태를 해제합니다. 프로세스 재시작 시 경보 상태와 최근 화면 이벤트는 초기화되며, 지속 도달 중인 자원은 다시 이벤트를 생성할 수 있습니다. JSON과 통합 로그는 보존됩니다.
 
@@ -175,6 +184,16 @@ Compose는 `/proc`와 `/`를 읽기 전용으로 마운트합니다. Oracle Linu
 
 Linux 커널 5.12 이전에서는 Docker의 읽기 전용 재귀 bind mount 하위 마운트가 읽기·쓰기로 연결될 수 있습니다. 이 프로그램의 수집기는 읽기 동작만 수행하지만 하위 마운트까지 읽기 전용 격리가 필요하면 5.12 이상 커널을 사용하거나 모니터링 경로별 독립 읽기 전용 마운트 구성으로 조정해야 합니다. Docker Desktop에서의 테스트는 Linux VM 자원을 읽으므로 Windows 호스트나 Oracle Linux 실서버 사용량 검증과 구분해야 합니다.
 
+## 분별 사용량 그래프
+
+CPU·Memory·Disk를 색으로 구분한 세 선으로 표시하며 공통 세로축은 0~100%, 가로축은 측정 시각입니다. 범례를 누르면 자원별 표시를 선택할 수 있고 그래프 위에 포인터를 올리면 해당 시각의 수치를 확인할 수 있습니다. 최근 60분의 최대 60개 측정값을 보관합니다.
+
+분별 기록은 서버에서 독립적으로 60초마다 수집하므로 브라우저를 닫아도 계속 쌓입니다. Docker의 데이터 볼륨에 `/data/minute-history.json`으로 저장해 컨테이너 재시작 후에도 복원합니다. 재시작 직전 기록과 60초 이내의 새 기록은 중복으로 추가하지 않습니다. 서버가 중단된 동안의 데이터나 읽지 못한 자원은 그래프의 빈 구간으로 표시합니다.
+
+CPU 그래프는 직전 수집 이후의 평균 사용률이며 최초 기록은 약 1초의 기준 측정 후 생성합니다. Memory와 Disk는 수집 시점의 사용률입니다. Disk 선에는 설정한 경로 중 최대 사용률을 기록하고 경로별 용량은 상단 카드에 표시합니다. 디스크 경로 설정이 바뀌면 이후 기록부터 변경된 경로를 반영합니다.
+
+그래프 수집·브라우저 조회 주기는 60초로 고정하고, 경보 판정 주기는 기본 5초로 별도 운영합니다. 임계치를 바꿔도 1분을 기다리지 않고 다음 경보 측정부터 반영합니다. 화면의 카운트다운은 다음 조회까지 남은 시간이며 프런트엔드는 외부 CDN 없이 애플리케이션에서 제공합니다.
+
 ## API
 
 관리 API는 `Authorization: Bearer <MONITOR_API_TOKEN>` 헤더가 필요합니다. `/health`는 Docker 상태 확인용으로 인증 없이 응답합니다.
@@ -182,6 +201,7 @@ Linux 커널 5.12 이전에서는 Docker의 읽기 전용 재귀 bind mount 하�
 | 메서드 | 경로 | 기능 |
 |---|---|---|
 | GET | `/api/status` | 설정, 측정값, 경보 상태, 최근 100개 이벤트, 오류 |
+| GET | `/api/history` | 60초 간격의 최근 60분 사용률, 수집 주기, 저장 오류 |
 | PUT | `/api/settings` | 검증·영속 저장 후 즉시 적용 |
 | GET | `/health` | 정상 수집 200, 준비·수집·파일 저장 오류 503 |
 
@@ -226,12 +246,18 @@ java -jar target/resource-monitor.jar
 
 도메인에는 순수 임계치 정책과 데이터 모델, 애플리케이션에는 수집·저장 포트와 처리 흐름만 둡니다. Linux 파일시스템, JSON 직렬화, HTTP, 영속 저장은 외부 어댑터에 구현합니다. bootstrap이 객체 구성과 스레드·HTTP 서버의 시작·종료를 소유합니다. 파일과 채널은 try-with-resources로 닫습니다. 코드 주석은 파일 첫 줄의 경로/파일명만 작성합니다.
 
-테스트는 경계값 도달, 연속 확인, 복구 여유폭, 재알림, 측정 누락, 디스크별 판정, 설정 실패·버전 충돌, 저장 실패 후 동일 ID 재시도, Linux 카운터 계산, JSON 저장·순환 로그, API 인증·검증, 아키텍처 의존 방향을 확인합니다. Oracle Linux 8.10 테스트 VM에서 자동 테스트 19개와 실제 호스트 동작 검사를 통과했습니다. 환경과 검증 범위는 [Oracle Linux VM 검증 결과](docs/ORACLE_LINUX_VM_TEST.md)에 기록했습니다.
+테스트는 경계값 도달, 연속 확인, 복구 여유폭, 재알림, 측정 누락, 디스크별 판정, 설정 실패·버전 충돌, 저장 실패 후 동일 ID 재시도, Linux 카운터 계산, JSON 저장·순환 로그, API 인증·검증, 아키텍처 의존 방향을 확인합니다. 분별 기록의 60초 간격, 60분 보관, 누락 값, 저장 실패 복구, 재시작 중복 방지와 영속 저장도 검사합니다. 자동 테스트는 27개이며 실제 VM 검증 범위는 [Oracle Linux VM 검증 결과](docs/ORACLE_LINUX_VM_TEST.md)에 기록했습니다.
 
 Linux 테스트 서버에서 Python 3.6 이상으로 실행 중인 컨테이너의 동작을 검사할 수 있습니다. 호스트의 `/proc`와 파일시스템 용량을 대조하고, CPU·메모리·디스크의 도달 및 재알림 JSON 생성, 복구 로그, 설정 충돌, 재시작 후 설정과 파일 보존을 확인합니다. 검사 중 임계치를 일시적으로 낮춰 경고 파일을 생성하고 마지막에 기존 설정으로 복원합니다. 모니터 컨테이너를 한 번 재시작하므로 테스트 환경에서 실행하세요. 경고 파일은 검사 증거로 `warn/`에 남기며 결과는 `verification/oracle-vm/smoke-report.json`에 저장합니다.
 
 ```bash
 sudo python3 scripts/smoke_test.py
+```
+
+분별 그래프 검사는 실제 60초 간격의 새 기록을 기다린 뒤 모니터 컨테이너를 한 번 재시작하여 보존과 중복 방지를 확인합니다. 설정은 변경하지 않으며 실행에는 약 1~2분이 걸립니다. 결과는 `verification/oracle-vm/minute-dashboard-report.json`에 저장합니다.
+
+```bash
+sudo python3 scripts/minute_dashboard_test.py
 ```
 
 GitHub 저장소: [creatorjun/Splunk_Adaptor](https://github.com/creatorjun/Splunk_Adaptor). Git 자격 증명과 커밋 작성자가 설정된 환경에서는 아래 스크립트로 변경 사항을 커밋하고 푸시합니다. `.env`, 경고 파일, 로컬 검증 자료와 빌드 산출물은 `.gitignore`로 제외합니다.

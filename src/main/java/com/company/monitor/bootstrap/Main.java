@@ -2,9 +2,11 @@
 package com.company.monitor.bootstrap;
 
 import com.company.monitor.application.MonitorService;
+import com.company.monitor.application.MinuteHistoryService;
 import com.company.monitor.domain.ThresholdEngine;
 import com.company.monitor.infrastructure.FileEventSink;
 import com.company.monitor.infrastructure.FileSettingsRepository;
+import com.company.monitor.infrastructure.FileMinuteHistoryRepository;
 import com.company.monitor.infrastructure.JsonSupport;
 import com.company.monitor.infrastructure.LinuxResourceCollector;
 import com.company.monitor.infrastructure.MonitorHttpServer;
@@ -31,14 +33,20 @@ public final class Main {
         var repository = new FileSettingsRepository(data.resolve("settings.json"), mapper);
         var sink = new FileEventSink(Path.of(env("MONITOR_WARN_DIR", "./warn")), data.resolve("logs"), mapper, 10 * 1024 * 1024);
         var service = new MonitorService(collector, repository, sink, new ThresholdEngine(), Clock.systemUTC());
+        var minuteCollector = new LinuxResourceCollector(Path.of(env("MONITOR_PROC_ROOT", "/host/proc")),
+                Path.of(env("MONITOR_DISK_ROOT", "/host/root")), hostname);
+        var history = new MinuteHistoryService(minuteCollector,
+                new FileMinuteHistoryRepository(data.resolve("minute-history.json"), mapper), Clock.systemUTC());
         var scheduler = Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().name("host-sampler").factory());
+        var minuteScheduler = Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().name("minute-sampler").factory());
         var webExecutor = Executors.newVirtualThreadPerTaskExecutor();
         MonitorHttpServer web;
         try {
             web = new MonitorHttpServer(new InetSocketAddress(env("MONITOR_HTTP_ADDRESS", "0.0.0.0"),
-                    Integer.parseInt(env("MONITOR_HTTP_PORT", "8080"))), service, mapper, token, webExecutor);
+                    Integer.parseInt(env("MONITOR_HTTP_PORT", "8080"))), service, history, mapper, token, webExecutor);
         } catch (Exception exception) {
             scheduler.shutdownNow();
+            minuteScheduler.shutdownNow();
             webExecutor.close();
             throw exception;
         }
@@ -48,10 +56,14 @@ public final class Main {
                 return;
             }
             scheduler.shutdown();
+            minuteScheduler.shutdown();
             web.close();
             try {
                 if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
                     scheduler.shutdownNow();
+                }
+                if (!minuteScheduler.awaitTermination(5, TimeUnit.SECONDS)) {
+                    minuteScheduler.shutdownNow();
                 }
                 webExecutor.shutdown();
                 if (!webExecutor.awaitTermination(3, TimeUnit.SECONDS)) {
@@ -59,6 +71,7 @@ public final class Main {
                 }
             } catch (InterruptedException exception) {
                 scheduler.shutdownNow();
+                minuteScheduler.shutdownNow();
                 webExecutor.shutdownNow();
                 Thread.currentThread().interrupt();
             }
@@ -66,6 +79,8 @@ public final class Main {
         Runtime.getRuntime().addShutdownHook(new Thread(shutdown, "monitor-shutdown"));
         try {
             scheduler.scheduleWithFixedDelay(() -> service.tick(System.nanoTime()), 0, 250, TimeUnit.MILLISECONDS);
+            minuteScheduler.scheduleWithFixedDelay(() -> history.tick(System.nanoTime(), service.status().settings()),
+                    0, 250, TimeUnit.MILLISECONDS);
             web.start();
             System.out.println("Resource monitor listening on port " + web.port() + "; warning directory=" + env("MONITOR_WARN_DIR", "./warn"));
         } catch (Exception exception) {

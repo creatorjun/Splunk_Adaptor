@@ -2,6 +2,7 @@
 package com.company.monitor.infrastructure;
 
 import com.company.monitor.application.MonitorService;
+import com.company.monitor.application.MinuteHistoryService;
 import com.company.monitor.domain.MonitorSettings;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -21,12 +22,14 @@ public final class MonitorHttpServer implements AutoCloseable {
 
     private final HttpServer server;
     private final MonitorService service;
+    private final MinuteHistoryService history;
     private final ObjectMapper mapper;
     private final byte[] token;
 
-    public MonitorHttpServer(InetSocketAddress address, MonitorService service, ObjectMapper mapper,
+    public MonitorHttpServer(InetSocketAddress address, MonitorService service, MinuteHistoryService history, ObjectMapper mapper,
                              String apiToken, Executor executor) throws IOException {
         this.service = service;
+        this.history = history;
         this.mapper = mapper;
         this.token = ("Bearer " + apiToken).getBytes(StandardCharsets.UTF_8);
         this.server = HttpServer.create(address, 64);
@@ -52,7 +55,7 @@ public final class MonitorHttpServer implements AutoCloseable {
             String method = exchange.getRequestMethod();
             if ("/health".equals(path) && "GET".equals(method)) {
                 MonitorService.Status status = service.status();
-                boolean ready = status.lastError() == null && status.snapshot() != null
+                boolean ready = status.lastError() == null && history.history().lastError() == null && status.snapshot() != null
                         && status.snapshot().errors().isEmpty() && status.snapshot().cpuPercent() != null
                         && status.lastCycleAt() != null
                         && Duration.between(status.lastCycleAt(), Instant.now()).getSeconds() <= status.settings().sampleIntervalSeconds() * 2L + 5;
@@ -67,6 +70,8 @@ public final class MonitorHttpServer implements AutoCloseable {
                 }
                 if ("/api/status".equals(path) && "GET".equals(method)) {
                     sendJson(exchange, 200, service.status());
+                } else if ("/api/history".equals(path) && "GET".equals(method)) {
+                    sendJson(exchange, 200, history.history());
                 } else if ("/api/settings".equals(path) && "PUT".equals(method)) {
                     updateSettings(exchange);
                 } else {
