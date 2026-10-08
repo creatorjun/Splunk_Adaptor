@@ -1,0 +1,9 @@
+# .dockerignore
+target
+.git
+.env
+data
+warn
+verification
+dist
+.idea

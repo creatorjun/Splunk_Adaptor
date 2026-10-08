@@ -1,0 +1,60 @@
+# compose.yaml
+name: oracle-resource-monitor
+services:
+  monitor:
+    build: .
+    image: oracle-resource-monitor:1.0.0
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+      - label=disable
+    ports:
+      - "${MONITOR_BIND_ADDRESS:-127.0.0.1}:${MONITOR_PORT:-8080}:8080"
+    environment:
+      MONITOR_API_TOKEN: "${MONITOR_API_TOKEN:?Set MONITOR_API_TOKEN in .env}"
+      MONITOR_HOST_NAME: "${MONITOR_HOST_NAME:?Set MONITOR_HOST_NAME to the Oracle Linux hostname}"
+      MONITOR_PROC_ROOT: /host/proc
+      MONITOR_DISK_ROOT: /host/root
+      MONITOR_DATA_DIR: /data
+      MONITOR_WARN_DIR: /warn
+    volumes:
+      - type: bind
+        source: /proc
+        target: /host/proc
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /
+        target: /host/root
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${MONITOR_WARN_HOST_DIR:-./warn}
+        target: /warn
+        bind:
+          create_host_path: false
+      - monitor-data:/data
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 100
+    stop_grace_period: 15s
+    healthcheck:
+      test: ["CMD", "java", "-cp", "/app/resource-monitor.jar", "com.company.monitor.bootstrap.HealthCheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+volumes:
+  monitor-data:

@@ -1,0 +1,46 @@
+<!-- src/main/resources/web/index.html -->
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>시스템 리소스 모니터</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="/"><span class="brand-symbol">M</span><span>Resource Monitor<small>ORACLE LINUX</small></span></a>
+      <div class="nav-label">워크스페이스</div>
+      <a class="nav-item active" href="#overview"><span>◉</span> 리소스 현황</a>
+      <a class="nav-item" href="#settings"><span>☷</span> 임계치 설정</a>
+      <a class="nav-item" href="#events"><span>▤</span> 이벤트 기록</a>
+      <div class="sidebar-bottom"><span class="status-dot"></span> 호스트 자원 수집<small>CPU · Memory · Disk</small></div>
+    </aside>
+    <main>
+      <header class="topbar"><span>시스템 / 모니터링</span><span class="connection" id="connection">연결 대기</span></header>
+      <div class="content">
+        <section class="heading" id="overview"><div><p class="eyebrow">SYSTEM OBSERVABILITY</p><h1>시스템 리소스 현황</h1><p class="subtitle">호스트의 사용량을 확인하고 임계치를 실시간으로 관리하세요.</p></div><div class="host-label"><span>모니터링 호스트</span><strong id="hostname">—</strong><small id="last-update">측정 대기 중</small></div></section>
+        <section class="auth-panel" id="auth-panel"><div><strong>관리 토큰으로 연결</strong><p>프로젝트의 .env에 지정한 MONITOR_API_TOKEN을 입력하세요.</p></div><form id="auth-form"><input id="token" type="password" autocomplete="off" placeholder="관리 토큰" aria-label="관리 토큰" required><button type="submit">연결</button></form></section>
+        <div id="message" role="status" class="message" hidden></div>
+        <div id="collection-errors" class="error-panel" hidden></div>
+        <section class="metrics">
+          <article class="metric-card"><div class="metric-title"><span class="metric-icon">▥</span> CPU <span class="pill" id="cpu-state">대기</span></div><div class="metric-value"><strong id="cpu-value">—</strong><span>%</span></div><div class="meter"><div id="cpu-meter"></div></div><div class="metric-meta"><span>임계치 <b id="cpu-threshold">80%</b></span><span>전체 CPU 평균</span></div><canvas id="cpu-chart" width="500" height="70" aria-label="CPU 사용량 추이"></canvas></article>
+          <article class="metric-card"><div class="metric-title"><span class="metric-icon">▦</span> Memory <span class="pill" id="memory-state">대기</span></div><div class="metric-value"><strong id="memory-value">—</strong><span>%</span></div><div class="meter"><div id="memory-meter"></div></div><div class="metric-meta"><span>임계치 <b id="memory-threshold">85%</b></span><span id="memory-capacity">—</span></div><canvas id="memory-chart" width="500" height="70" aria-label="메모리 사용량 추이"></canvas></article>
+          <article class="metric-card"><div class="metric-title"><span class="metric-icon">▰</span> Disk <span class="pill" id="disk-state">대기</span></div><div class="metric-value"><strong id="disk-value">—</strong><span>%</span></div><div class="meter"><div id="disk-meter"></div></div><div class="metric-meta"><span>임계치 <b id="disk-threshold">90%</b></span><span>최대 사용 경로</span></div><div id="disk-list" class="disk-list">측정 대기 중</div></article>
+        </section>
+        <section class="panel settings-panel" id="settings"><div class="panel-heading"><div><h2>임계치 설정</h2><p>저장하면 다음 측정부터 적용됩니다. 서비스 재시작이 필요하지 않습니다.</p></div><span class="badge">실시간 적용</span></div>
+          <form id="settings-form"><div class="rule-grid"><div class="field-label">모니터링 자원</div><div class="field-label">도달 임계치 (%)</div><div class="field-label">복구 여유폭 (%p)</div>
+            <label class="toggle-label"><input id="cpu-enabled" type="checkbox" checked> CPU</label><input id="cpu-limit" aria-label="CPU 임계치" type="number" min="0.01" max="100" step="0.01" value="80" required><input id="cpu-hysteresis" aria-label="CPU 복구 여유폭" type="number" min="0" max="99.99" step="0.01" value="5" required>
+            <label class="toggle-label"><input id="memory-enabled" type="checkbox" checked> Memory</label><input id="memory-limit" aria-label="메모리 임계치" type="number" min="0.01" max="100" step="0.01" value="85" required><input id="memory-hysteresis" aria-label="메모리 복구 여유폭" type="number" min="0" max="99.99" step="0.01" value="5" required>
+            <label class="toggle-label"><input id="disk-enabled" type="checkbox" checked> Disk</label><input id="disk-limit" aria-label="디스크 임계치" type="number" min="0.01" max="100" step="0.01" value="90" required><input id="disk-hysteresis" aria-label="디스크 복구 여유폭" type="number" min="0" max="99.99" step="0.01" value="5" required>
+          </div><div class="settings-extra"><label>측정 주기 (초)<input id="sample-interval" type="number" min="1" max="300" value="5" required></label><label>연속 도달 횟수<input id="consecutive" type="number" min="1" max="60" value="1" required></label><label>재알림 주기 (초)<input id="repeat-interval" type="number" min="0" max="86400" value="300" required><small>0으로 지정하면 재알림 해제</small></label></div><label class="paths-label">디스크 경로<textarea id="disk-paths" rows="2" placeholder="/&#10;/var" required>/</textarea><small>호스트의 절대 경로를 한 줄에 하나씩 입력하세요.</small></label><div class="form-footer"><span id="settings-status">관리 토큰으로 연결 후 변경할 수 있습니다.</span><div><button class="secondary" id="reload-settings" type="button" disabled>다시 불러오기</button><button id="save-settings" type="submit" disabled>설정 저장</button></div></div></form>
+        </section>
+        <section class="panel" id="events"><div class="panel-heading"><div><h2>최근 이벤트</h2><p>임계치 도달 시 프로젝트의 warn 폴더에 JSON 파일을 생성합니다.</p></div><span class="badge neutral" id="event-count">0건</span></div><div class="table-scroll"><table><thead><tr><th>발생 시각</th><th>자원</th><th>이벤트</th><th>사용량 / 임계치</th><th>파일 생성</th></tr></thead><tbody id="event-body"><tr><td colspan="5" class="empty">연결 후 이벤트를 확인할 수 있습니다.</td></tr></tbody></table></div></section>
+        <footer>Resource Monitor · Java 21 <span>JSON 파일 저장: 프로젝트/warn</span><button id="disconnect" class="text-button" type="button" hidden>연결 해제</button></footer>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

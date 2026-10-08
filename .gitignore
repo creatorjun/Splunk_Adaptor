@@ -1,0 +1,9 @@
+# .gitignore
+target/
+.env
+data/
+warn/
+.idea/
+*.iml
+verification/
+dist/
