@@ -15,6 +15,8 @@ Splunk_Adaptor/
 ├── .gitignore
 ├── .gitattributes
 ├── README.md
+├── docs/
+│   └── ORACLE_LINUX_VM_TEST.md
 ├── scripts/
 │   ├── prepare.sh
 │   ├── publish.sh
@@ -224,7 +226,7 @@ java -jar target/resource-monitor.jar
 
 도메인에는 순수 임계치 정책과 데이터 모델, 애플리케이션에는 수집·저장 포트와 처리 흐름만 둡니다. Linux 파일시스템, JSON 직렬화, HTTP, 영속 저장은 외부 어댑터에 구현합니다. bootstrap이 객체 구성과 스레드·HTTP 서버의 시작·종료를 소유합니다. 파일과 채널은 try-with-resources로 닫습니다. 코드 주석은 파일 첫 줄의 경로/파일명만 작성합니다.
 
-테스트는 경계값 도달, 연속 확인, 복구 여유폭, 재알림, 측정 누락, 디스크별 판정, 설정 실패·버전 충돌, 저장 실패 후 동일 ID 재시도, Linux 카운터 계산, JSON 저장·순환 로그, API 인증·검증, 아키텍처 의존 방향을 확인합니다. 실제 Oracle Linux 호스트의 마운트·사용량·SELinux 접근은 해당 서버에서 추가 확인해야 합니다.
+테스트는 경계값 도달, 연속 확인, 복구 여유폭, 재알림, 측정 누락, 디스크별 판정, 설정 실패·버전 충돌, 저장 실패 후 동일 ID 재시도, Linux 카운터 계산, JSON 저장·순환 로그, API 인증·검증, 아키텍처 의존 방향을 확인합니다. Oracle Linux 8.10 테스트 VM에서 자동 테스트 19개와 실제 호스트 동작 검사를 통과했습니다. 환경과 검증 범위는 [Oracle Linux VM 검증 결과](docs/ORACLE_LINUX_VM_TEST.md)에 기록했습니다.
 
 Linux 테스트 서버에서 Python 3.6 이상으로 실행 중인 컨테이너의 동작을 검사할 수 있습니다. 호스트의 `/proc`와 파일시스템 용량을 대조하고, CPU·메모리·디스크의 도달 및 재알림 JSON 생성, 복구 로그, 설정 충돌, 재시작 후 설정과 파일 보존을 확인합니다. 검사 중 임계치를 일시적으로 낮춰 경고 파일을 생성하고 마지막에 기존 설정으로 복원합니다. 모니터 컨테이너를 한 번 재시작하므로 테스트 환경에서 실행하세요. 경고 파일은 검사 증거로 `warn/`에 남기며 결과는 `verification/oracle-vm/smoke-report.json`에 저장합니다.
 
