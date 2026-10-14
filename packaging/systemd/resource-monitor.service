@@ -1,0 +1,26 @@
+# packaging/systemd/resource-monitor.service
+[Unit]
+Description=System resource monitor with JSON snapshots
+After=local-fs.target
+RequiresMountsFor=/Monitor
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=resource-monitor
+Group=resource-monitor
+ExecStart=/usr/sbin/resource-monitor --config /etc/resource-monitor/thresholds.json --output /Monitor
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=78
+TimeoutStopSec=15
+UMask=0027
+NoNewPrivileges=true
+CapabilityBoundingSet=
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=resource-monitor
+
+[Install]
+WantedBy=multi-user.target

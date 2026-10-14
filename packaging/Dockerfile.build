@@ -1,0 +1,6 @@
+# packaging/Dockerfile.build
+ARG ORACLE_VERSION=9
+FROM oraclelinux:${ORACLE_VERSION}
+RUN dnf install -y gcc-toolset-15-gcc-c++ cmake make python3 rpm-build systemd shadow-utils && dnf clean all
+ENV PATH="/opt/rh/gcc-toolset-15/root/usr/bin:${PATH}"
+WORKDIR /work

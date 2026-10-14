@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "thresholds": {
+    "cpu_usage_percent": 80.0,
+    "memory_usage_percent": 85.0,
+    "storage_usage_percent": 90.0
+  }
+}
