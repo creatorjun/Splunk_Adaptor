@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <fcntl.h>
 #include <poll.h>
+#include <sstream>
 #include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
@@ -82,17 +83,24 @@ struct SavedRecord {
     std::uint64_t missed_intervals{};
 };
 
-class SlowReader final : public IResourceReader {
+class FixtureReader final : public IResourceReader {
 public:
+    explicit FixtureReader(std::chrono::milliseconds delay = 0ms, bool cpu_available = true)
+        : delay_(delay), cpu_available_(cpu_available) {}
+
     ResourceSample read() override {
         if (reads_++ != 0) {
-            std::this_thread::sleep_for(1200ms);
+            std::this_thread::sleep_for(delay_);
         }
         ResourceSample result;
         result.timestamp = std::chrono::system_clock::now();
         result.cpu_observed_at = std::chrono::steady_clock::now();
         result.hostname = "runtime-test";
-        result.cpu.value = CpuCounters{{reads_ * 50, 0, 0, reads_ * 50, 0, 0, 0, 0}};
+        if (cpu_available_) {
+            result.cpu.value = CpuCounters{{reads_ * 50, 0, 0, reads_ * 50, 0, 0, 0, 0}};
+        } else {
+            result.cpu.error = Error{"cpu", "/proc/stat", "fixture_unavailable", "CPU counters unavailable"};
+        }
         result.memory.value = MemoryCounters{1000, 500};
         FilesystemSample filesystem;
         filesystem.device = "/dev/test";
@@ -106,13 +114,52 @@ public:
 
 private:
     std::uint64_t reads_{};
+    std::chrono::milliseconds delay_;
+    bool cpu_available_;
 };
 
 class FixedConfig final : public IThresholdConfigReader {
 public:
+    explicit FixedConfig(ThresholdPolicy policy = {40.0, 40.0, 40.0}) : policy_(policy) {}
+
     std::expected<ThresholdPolicy, Error> read() override {
-        return ThresholdPolicy{80.0, 80.0, 80.0};
+        return policy_;
     }
+
+private:
+    ThresholdPolicy policy_;
+};
+
+class RecordingStore final : public ISnapshotStore {
+public:
+    std::expected<void, Error> save(const ResourceSnapshot&) override {
+        ++calls;
+        if (fail) {
+            return std::unexpected(Error{"store", "fixture", "fixture_save_failed", "Unable to save warning"});
+        }
+        return {};
+    }
+
+    std::size_t calls{};
+    bool fail{};
+};
+
+class CapturedLogs {
+public:
+    CapturedLogs() : previous_output_(std::cout.rdbuf(output.rdbuf())), previous_errors_(std::cerr.rdbuf(errors.rdbuf())) {}
+    ~CapturedLogs() {
+        std::cout.rdbuf(previous_output_);
+        std::cerr.rdbuf(previous_errors_);
+    }
+    CapturedLogs(const CapturedLogs&) = delete;
+    CapturedLogs& operator=(const CapturedLogs&) = delete;
+
+    std::ostringstream output;
+    std::ostringstream errors;
+
+private:
+    std::streambuf* previous_output_;
+    std::streambuf* previous_errors_;
 };
 
 class PipeStore final : public ISnapshotStore {
@@ -190,7 +237,7 @@ void runtime_overrun_test() {
     if (child == 0) {
         reading.reset();
         try {
-            SlowReader reader;
+            FixtureReader reader(1200ms);
             PipeStore store(writing.get());
             FixedConfig config;
             CollectAndStore use_case(reader, store, config);
@@ -217,8 +264,45 @@ void runtime_overrun_test() {
     CHECK(WEXITSTATUS(status) == 0);
 }
 
+void once_status_tests() {
+    const auto run_case = [](double threshold, bool cpu_available, bool fail_save,
+                             const std::string& expected_event, const std::string& expected_status,
+                             int expected_exit, std::size_t expected_saves) {
+        TemporaryDirectory directory;
+        FixtureReader reader(0ms, cpu_available);
+        FixedConfig config({threshold, threshold, threshold});
+        RecordingStore store;
+        store.fail = fail_save;
+        CollectAndStore use_case(reader, store, config);
+        DaemonOptions options;
+        options.output_directory = directory.path();
+        options.interval = 1s;
+        options.once = true;
+        CapturedLogs logs;
+        CHECK(run_daemon(use_case, options) == expected_exit);
+        CHECK(store.calls == expected_saves);
+        if (expected_exit == 0) {
+            CHECK(logs.output.str().find(expected_event + " status=" + expected_status) != std::string::npos);
+            CHECK(logs.output.str().find(expected_event == "snapshot_saved" ? "snapshot_skipped" : "snapshot_saved") == std::string::npos);
+        } else {
+            CHECK(logs.output.str().find("snapshot_saved") == std::string::npos);
+            CHECK(logs.errors.str().find("fixture_save_failed") != std::string::npos);
+        }
+        if (!cpu_available) {
+            CHECK(logs.errors.str().find("fixture_unavailable") != std::string::npos);
+        }
+    };
+    run_case(80.0, true, false, "snapshot_skipped", "ok", 0, 0);
+    run_case(80.0, false, false, "snapshot_skipped", "unknown", 0, 0);
+    run_case(50.0, true, false, "snapshot_saved", "warning", 0, 1);
+    run_case(50.0, true, true, "", "", 1, 1);
+}
+
 }
 
 int main() {
-    return test::run(runtime_overrun_test);
+    return test::run([] {
+        runtime_overrun_test();
+        once_status_tests();
+    });
 }

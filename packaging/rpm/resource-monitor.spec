@@ -2,7 +2,7 @@
 %global debug_package %{nil}
 
 Name:           resource-monitor
-Version:        1.0.0
+Version:        1.0.1
 Release:        1%{?dist}
 Summary:        System resource snapshots with reloadable JSON thresholds
 License:        Proprietary
@@ -18,9 +18,9 @@ Requires(preun): systemd
 Requires(postun): systemd
 
 %description
-C++23 system resource daemon for Oracle Linux 8 and 9. Writes CPU, memory
-and local mounted filesystem snapshots every minute using configurable
-thresholds and atomic timestamped JSON files.
+C++23 system resource daemon for Oracle Linux 8 and 9. Collects CPU, memory
+and local mounted filesystem metrics every minute. Writes atomic timestamped
+JSON snapshots only when at least one configured threshold is reached.
 
 %prep
 %setup -q

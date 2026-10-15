@@ -1,7 +1,7 @@
 <!-- README.md -->
 # Resource Monitor
 
-Oracle Linux 8/9용 C++23 시스템 모니터링 데몬입니다. 기본 60초마다 CPU, 메모리, 마운트된 로컬 디스크 파일시스템을 수집하고 `/Monitor/YYYYMMDDTHHMMSSZ.json`에 저장합니다. 임계치는 `/etc/resource-monitor/thresholds.json`을 수정하면 다음 수집 주기에 반영됩니다.
+Oracle Linux 8/9용 C++23 시스템 모니터링 데몬입니다. 기본 60초마다 CPU, 메모리, 마운트된 로컬 디스크 파일시스템을 수집합니다. CPU, 메모리 또는 개별 파일시스템 중 하나라도 사용률이 임계치 이상이면 해당 주기의 전체 결과를 `/Monitor/YYYYMMDDTHHMMSSZ.json`에 저장합니다. 임계치는 `/etc/resource-monitor/thresholds.json`을 수정하면 다음 수집 주기에 반영됩니다.
 
 ## 구성
 
@@ -104,7 +104,7 @@ resource-monitor --config /etc/resource-monitor/thresholds.json --check-config
 | `filesystems` | 장치, 장치 식별자, 마운트 목록, 유형, 전체·사용·미사용·가용 bytes, 사용률, 상태 |
 | `errors` | component, target, code, message로 구성된 오류 목록 |
 
-전체 `status`는 하나라도 경고면 `warning`, 경고 없이 측정 불가가 있으면 `unknown`, 모두 정상 측정되고 임계치 미만이면 `ok`입니다. 수집 실패와 설정 오류는 별도 축입니다. 예를 들어 디스크 하나가 경고이고 다른 디스크가 수집 실패이면 `status=warning`, `collection_status=partial`입니다. 설정 오류만 발생하면 `collection_status`를 변경하지 않습니다.
+전체 `status`는 하나라도 경고면 `warning`, 경고 없이 측정 불가가 있으면 `unknown`, 모두 정상 측정되고 임계치 미만이면 `ok`입니다. JSON 파일은 전체 `status=warning`인 경우에만 기록합니다. 수집 실패와 설정 오류는 별도 축입니다. 예를 들어 디스크 하나가 경고이고 다른 디스크가 수집 실패이면 `status=warning`, `collection_status=partial`인 전체 결과를 저장합니다. 설정 오류만 발생하면 `collection_status`를 변경하지 않습니다. 경고 없이 측정 불가나 설정 오류만 발생한 경우에는 JSON을 저장하지 않고 오류를 journal에 기록합니다.
 
 측정할 수 없는 값은 0 대신 JSON null입니다. 이전 결과를 현재 측정값처럼 재사용하지 않습니다. 빈 파일시스템 목록은 모든 디스크 정상으로 취급하지 않습니다.
 
@@ -132,15 +132,15 @@ proc, sysfs, tmpfs, overlay, 네트워크 파일시스템과 FUSE는 수집 대�
 
 ## 실행과 저장 동작
 
-시작 시 CPU 기준값을 확보하고 기본 60초 후 첫 파일을 생성합니다. Linux CLOCK_MONOTONIC 타이머를 사용하므로 UTC/NTP 시간 변경이 주기를 바꾸지 않습니다. 작업 중 지나간 주기는 건너뛰고 다음 주기를 기다립니다. 실제 CPU 관측 구간은 cpu.window_seconds에 기록됩니다.
+시작 시 CPU 기준값을 확보하고 기본 60초 후 첫 수집과 임계치 판정을 수행합니다. JSON 저장 여부와 관계없이 수집과 CPU 기준값 갱신은 계속됩니다. 경고가 지속되면 매 수집 주기에 전체 결과를 저장하고, 모든 사용률이 임계치 미만으로 복구되면 저장을 중단합니다. 별도의 정상 복구 이벤트 파일은 만들지 않으며 기존 파일은 삭제하지 않습니다. Linux CLOCK_MONOTONIC 타이머를 사용하므로 UTC/NTP 시간 변경이 주기를 바꾸지 않습니다. 작업 중 지나간 주기는 건너뛰고 다음 주기를 기다립니다. 실제 CPU 관측 구간은 cpu.window_seconds에 기록됩니다.
 
 SIGTERM/SIGINT는 signalfd로 처리하며 대기 중 즉시 종료할 수 있습니다. 진행 중인 동기 파일시스템 작업은 끝난 뒤 종료 신호를 처리합니다. 저장 장치 자체가 커널에서 장시간 멈춘 경우에는 즉시 종료를 보장하지 않습니다. systemd의 종료 제한 시간은 15초입니다.
 
-임시 파일은 출력 디렉터리에 O_EXCL로 생성합니다. 모든 내용 기록과 파일 fsync 뒤 덮어쓰기 없는 원자적 이름 확정을 수행하고 디렉터리를 fsync합니다. 파일명이 이미 있으면 `_1`, `_2` 순번을 붙여 기존 파일을 보존합니다. 저장 실패는 journal에 기록하고 다음 주기에 재시도합니다. 실패한 주기를 메모리에 무한 적재하거나 과거 파일을 삭제하지 않습니다. crash로 남은 `.tmp`는 결과 파일이 아니며, 자동으로 기존 파일을 삭제하지 않습니다.
+저장 조건을 만족하면 임시 파일을 출력 디렉터리에 O_EXCL로 생성합니다. 모든 내용 기록과 파일 fsync 뒤 덮어쓰기 없는 원자적 이름 확정을 수행하고 디렉터리를 fsync합니다. 파일명이 이미 있으면 `_1`, `_2` 순번을 붙여 기존 파일을 보존합니다. 저장 실패는 journal에 기록하며, 다음 주기에 새로 수집한 결과도 경고일 때 저장을 다시 시도합니다. 실패한 과거 결과는 재전송하지 않습니다. 실패한 주기를 메모리에 무한 적재하거나 과거 파일을 삭제하지 않습니다. crash로 남은 `.tmp`는 결과 파일이 아니며, 자동으로 기존 파일을 삭제하지 않습니다.
 
 기본 결과 파일 권한은 0640이며 systemd의 umask 0027이 적용됩니다. `.resource-monitor.lock`은 동일 출력 디렉터리에 대한 중복 실행을 막는 잠금 파일입니다. 실행 중 이 파일을 삭제하거나 교체하지 마십시오.
 
-한 호스트에서 하루 1,440개 파일이 생성됩니다. 자동 삭제 기능은 없으므로 보존 기간에 맞는 별도 보관·정리 정책이 필요합니다.
+경고가 없으면 파일을 생성하지 않습니다. 기본 60초 주기에서 경고가 하루 종일 지속되면 한 호스트에서 하루 약 1,440개 파일이 생성됩니다. 자동 삭제 기능은 없으므로 보존 기간에 맞는 별도 보관·정리 정책이 필요합니다.
 
 ## 수동 진단
 
@@ -149,7 +149,7 @@ mkdir -p /tmp/resource-monitor-output
 ./build/release/resource-monitor --config ./config/thresholds.json --output /tmp/resource-monitor-output --interval-seconds 1 --once
 ```
 
-`--once`도 CPU 차분을 위해 지정한 관측 구간을 기다린 후 하나의 파일을 저장합니다. `--interval-seconds`는 1~86400 범위이며 서비스 기본값은 60입니다. `--help`와 `--version`도 제공합니다. 수동 진단은 service 계정과 동일한 권한 조건에서도 확인하십시오.
+`--once`도 CPU 차분을 위해 지정한 관측 구간을 기다린 후 한 번 수집·판정합니다. 경고가 있으면 하나의 파일을 저장하며, 경고가 없으면 파일 없이 정상 종료할 수 있습니다. `--interval-seconds`는 1~86400 범위이며 서비스 기본값은 60입니다. `--help`와 `--version`도 제공합니다. 수동 진단은 service 계정과 동일한 권한 조건에서도 확인하십시오.
 
 ## 테스트와 RPM
 
@@ -166,7 +166,7 @@ RPM은 빌드할 OL8 또는 OL9 시스템에서 다음처럼 생성합니다. So
 ```bash
 sudo dnf install -y rpm-build gcc-toolset-15-gcc-c++ cmake make python3
 mkdir -p "$HOME/rpmbuild/SOURCES" "$HOME/rpmbuild/SPECS"
-cp artifacts/resource-monitor-1.0.0.tar.gz "$HOME/rpmbuild/SOURCES/"
+cp artifacts/resource-monitor-1.0.1.tar.gz "$HOME/rpmbuild/SOURCES/"
 curl --fail --location https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz --output "$HOME/rpmbuild/SOURCES/json.tar.xz"
 cp packaging/rpm/resource-monitor.spec "$HOME/rpmbuild/SPECS/"
 rpmbuild -ba "$HOME/rpmbuild/SPECS/resource-monitor.spec"
@@ -181,4 +181,4 @@ docker build -f packaging/Dockerfile.build --build-arg ORACLE_VERSION=8 -t resou
 docker build -f packaging/Dockerfile.build --build-arg ORACLE_VERSION=9 -t resource-monitor-build:ol9 .
 ```
 
-실제 운영 승인에는 대상 서버의 OL 마이너 버전, RHCK/UEK, 마운트 구성, SELinux Enforcing 환경에서 설치·기동·60초 저장·재시작을 확인하는 절차가 필요합니다. 테스트는 CPU 경계, 임계치 재로드, 예약 공간, 부분 실패, 원자 저장 실패, 마운트 파싱, FD 정리, 종료 신호를 검증합니다.
+실제 운영 승인에는 대상 서버의 OL 마이너 버전, RHCK/UEK, 마운트 구성, SELinux Enforcing 환경에서 설치·기동·60초 수집·임계치 이상일 때 저장·경고가 없을 때 미저장·재시작을 확인하는 절차가 필요합니다. 테스트는 CPU 경계, 임계치 재로드, 조건부 저장, 예약 공간, 부분 실패, 원자 저장 실패, 마운트 파싱, FD 정리, 종료 신호를 검증합니다.

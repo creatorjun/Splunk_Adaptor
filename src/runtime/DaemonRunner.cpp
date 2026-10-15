@@ -146,7 +146,8 @@ int run_daemon(CollectAndStore& use_case, const DaemonOptions& options) {
             for (const auto& error : result->errors) {
                 log_error(error);
             }
-            std::cout << "snapshot_saved status=" << to_string(result->status)
+            std::cout << (result->status == MetricStatus::warning ? "snapshot_saved" : "snapshot_skipped")
+                      << " status=" << to_string(result->status)
                       << " collection_status=" << to_string(result->collection_status)
                       << " config_status=" << to_string(result->config_status) << std::endl;
             if (options.once) {
