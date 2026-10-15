@@ -1,5 +1,9 @@
 {
   "schema_version": 1,
+  "collection": {
+    "interval_seconds": 60,
+    "output_directory": "/Monitor"
+  },
   "thresholds": {
     "cpu_usage_percent": 80.0,
     "memory_usage_percent": 85.0,

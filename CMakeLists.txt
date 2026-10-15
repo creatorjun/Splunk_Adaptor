@@ -1,6 +1,6 @@
 # CMakeLists.txt
 cmake_minimum_required(VERSION 3.20)
-project(resource-monitor VERSION 1.0.2 LANGUAGES CXX)
+project(resource-monitor VERSION 1.1.0 LANGUAGES CXX)
 
 if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
     set(CMAKE_INSTALL_PREFIX "/usr" CACHE PATH "Installation prefix" FORCE)
@@ -61,7 +61,7 @@ target_link_libraries(monitor_application PUBLIC monitor_domain PRIVATE monitor_
 add_library(monitor_infrastructure
     src/infrastructure/linux/ProcResourceReader.cpp
     src/infrastructure/linux/MountReader.cpp
-    src/infrastructure/config/JsonThresholdConfigReader.cpp
+    src/infrastructure/config/JsonSettingsReader.cpp
     src/infrastructure/persistence/JsonSnapshotStore.cpp
 )
 target_link_libraries(monitor_infrastructure PUBLIC monitor_application PRIVATE nlohmann_json::nlohmann_json monitor_options)
@@ -75,7 +75,7 @@ target_link_libraries(resource-monitor PRIVATE monitor_runtime monitor_infrastru
 include(CTest)
 if(BUILD_TESTING)
     find_package(Threads REQUIRED)
-    foreach(test_name MetricCalculators CollectAndStore LinuxCollectors JsonSnapshotStore JsonThresholdConfigReader)
+    foreach(test_name MetricCalculators CollectAndStore LinuxCollectors JsonSnapshotStore JsonSettingsReader)
         add_executable(${test_name}Test tests/${test_name}Test.cpp)
         target_include_directories(${test_name}Test PRIVATE tests)
         if(test_name STREQUAL "MetricCalculators")
@@ -102,12 +102,25 @@ endif()
 include(GNUInstallDirs)
 install(TARGETS resource-monitor RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR})
 install(FILES packaging/systemd/resource-monitor.service DESTINATION lib/systemd/system)
-install(FILES config/thresholds.json DESTINATION share/resource-monitor)
+install(FILES config/settings.json DESTINATION share/resource-monitor)
 install(FILES README.md DESTINATION share/doc/resource-monitor)
 install(FILES packaging/THIRD_PARTY_NOTICES.txt DESTINATION share/doc/resource-monitor)
 install(CODE "
     set(config_dir \"\$ENV{DESTDIR}/etc/resource-monitor\")
-    if(NOT EXISTS \"\${config_dir}/thresholds.json\")
-        file(INSTALL DESTINATION \"/etc/resource-monitor\" TYPE FILE FILES \"${CMAKE_SOURCE_DIR}/config/thresholds.json\")
+    set(settings_file \"\${config_dir}/settings.json\")
+    set(legacy_file \"\${config_dir}/thresholds.json\")
+    if(EXISTS \"\${settings_file}\" OR IS_SYMLINK \"\${settings_file}\")
+        execute_process(COMMAND /usr/bin/test -f \"\${settings_file}\" RESULT_VARIABLE settings_is_regular)
+        if(IS_SYMLINK \"\${settings_file}\" OR NOT settings_is_regular EQUAL 0)
+            message(FATAL_ERROR \"Existing settings.json must be a regular file and not a symbolic link\")
+        endif()
+    elseif(EXISTS \"\${legacy_file}\" OR IS_SYMLINK \"\${legacy_file}\")
+        execute_process(COMMAND /usr/bin/test -f \"\${legacy_file}\" RESULT_VARIABLE legacy_is_regular)
+        if(IS_SYMLINK \"\${legacy_file}\" OR NOT legacy_is_regular EQUAL 0)
+            message(FATAL_ERROR \"Legacy thresholds.json must be a regular file and not a symbolic link\")
+        endif()
+        configure_file(\"\${legacy_file}\" \"\${settings_file}\" COPYONLY)
+    else()
+        file(INSTALL DESTINATION \"/etc/resource-monitor\" TYPE FILE FILES \"${CMAKE_SOURCE_DIR}/config/settings.json\")
     endif()
 ")

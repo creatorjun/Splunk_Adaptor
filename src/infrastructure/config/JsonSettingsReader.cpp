@@ -1,10 +1,11 @@
-// src/infrastructure/config/JsonThresholdConfigReader.cpp
-#include "infrastructure/config/JsonThresholdConfigReader.hpp"
+// src/infrastructure/config/JsonSettingsReader.cpp
+#include "infrastructure/config/JsonSettingsReader.hpp"
 
 #include <nlohmann/json.hpp>
 
 #include <array>
 #include <cerrno>
+#include <cstdint>
 #include <fcntl.h>
 #include <set>
 #include <stdexcept>
@@ -30,7 +31,7 @@ private:
 };
 
 Error config_error(const std::filesystem::path& path, std::string code, std::string message) {
-    return {"threshold_config", path.string(), std::move(code), std::move(message)};
+    return {"settings_config", path.string(), std::move(code), std::move(message)};
 }
 
 Error io_error(const std::filesystem::path& path, const char* operation, int error) {
@@ -38,12 +39,30 @@ Error io_error(const std::filesystem::path& path, const char* operation, int err
         std::error_code(error, std::generic_category()).message());
 }
 
+bool has_control_characters(const std::string& value) {
+    for (std::size_t index = 0; index < value.size(); ++index) {
+        const auto character = static_cast<unsigned char>(value[index]);
+        if (character < 0x20 || character == 0x7f) return true;
+        if (character == 0xc2 && index + 1 < value.size()) {
+            const auto next = static_cast<unsigned char>(value[index + 1]);
+            if (next >= 0x80 && next <= 0x9f) return true;
+        }
+    }
+    return false;
 }
 
-JsonThresholdConfigReader::JsonThresholdConfigReader(std::filesystem::path path)
+}
+
+JsonSettingsReader::JsonSettingsReader(std::filesystem::path path)
     : path_(std::move(path)) {}
 
-std::expected<ThresholdPolicy, Error> JsonThresholdConfigReader::read() {
+std::expected<ThresholdPolicy, Error> JsonSettingsReader::read() {
+    auto settings = read_settings();
+    if (!settings) return std::unexpected(std::move(settings.error()));
+    return settings->thresholds;
+}
+
+std::expected<MonitorSettings, Error> JsonSettingsReader::read_settings() {
     constexpr std::size_t maximum_bytes = 64 * 1024;
     const ConfigFd file(::open(path_.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW));
     if (file.get() < 0) {
@@ -91,9 +110,14 @@ std::expected<ThresholdPolicy, Error> JsonThresholdConfigReader::read() {
             return true;
         };
         const auto json = nlohmann::json::parse(document, callback);
-        if (!json.is_object() || json.size() != 2 || !json.contains("schema_version") ||
+        if (!json.is_object() || !json.contains("schema_version") ||
             !json.contains("thresholds")) {
-            return std::unexpected(config_error(path_, "invalid_schema", "Expected only schema_version and thresholds"));
+            return std::unexpected(config_error(path_, "invalid_schema", "Expected schema_version, thresholds, and optional collection"));
+        }
+        for (const auto& [key, value] : json.items()) {
+            if (key != "schema_version" && key != "thresholds" && key != "collection") {
+                return std::unexpected(config_error(path_, "invalid_schema", "Unknown configuration key: " + key));
+            }
         }
         if (!json["schema_version"].is_number_integer() || json["schema_version"] != 1) {
             return std::unexpected(config_error(path_, "invalid_schema", "schema_version must be the integer 1"));
@@ -115,11 +139,54 @@ std::expected<ThresholdPolicy, Error> JsonThresholdConfigReader::read() {
         };
         if (auto valid = validate_thresholds(policy); !valid) {
             auto error = valid.error();
-            error.component = "threshold_config";
+            error.component = "settings_config";
             error.target = path_.string();
             return std::unexpected(std::move(error));
         }
-        return policy;
+        MonitorSettings settings{policy};
+        if (json.contains("collection")) {
+            const auto& collection = json["collection"];
+            if (!collection.is_object()) {
+                return std::unexpected(config_error(path_, "invalid_schema", "collection must be an object"));
+            }
+            for (const auto& [key, value] : collection.items()) {
+                if (key != "interval_seconds" && key != "output_directory") {
+                    return std::unexpected(config_error(path_, "invalid_schema", "Unknown collection key: " + key));
+                }
+            }
+            if (collection.contains("interval_seconds")) {
+                const auto& interval = collection["interval_seconds"];
+                if (!interval.is_number_integer()) {
+                    return std::unexpected(config_error(path_, "invalid_interval", "interval_seconds must be an integer between 1 and 86400"));
+                }
+                std::int64_t seconds{};
+                if (interval.is_number_unsigned()) {
+                    const auto value = interval.get<std::uint64_t>();
+                    if (value < 1 || value > 86400) {
+                        return std::unexpected(config_error(path_, "invalid_interval", "interval_seconds must be an integer between 1 and 86400"));
+                    }
+                    seconds = static_cast<std::int64_t>(value);
+                } else {
+                    seconds = interval.get<std::int64_t>();
+                    if (seconds < 1 || seconds > 86400) {
+                        return std::unexpected(config_error(path_, "invalid_interval", "interval_seconds must be an integer between 1 and 86400"));
+                    }
+                }
+                settings.collection_interval = std::chrono::seconds{seconds};
+            }
+            if (collection.contains("output_directory")) {
+                const auto& output = collection["output_directory"];
+                if (!output.is_string()) {
+                    return std::unexpected(config_error(path_, "invalid_output_directory", "output_directory must be an absolute path without control characters"));
+                }
+                const auto& value = output.get_ref<const std::string&>();
+                if (value.empty() || has_control_characters(value) || !std::filesystem::path(value).is_absolute()) {
+                    return std::unexpected(config_error(path_, "invalid_output_directory", "output_directory must be an absolute path without control characters"));
+                }
+                settings.output_directory = value;
+            }
+        }
+        return settings;
     } catch (const nlohmann::json::exception& error) {
         return std::unexpected(config_error(path_, "invalid_json", error.what()));
     } catch (const std::invalid_argument& error) {

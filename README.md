@@ -1,7 +1,7 @@
 <!-- README.md -->
 # Resource Monitor
 
-Oracle Linux 8/9용 C++23 시스템 모니터링 데몬입니다. 기본 60초마다 CPU, 메모리, 마운트된 로컬 디스크 파일시스템을 수집하고 매 수집 주기의 전체 결과를 `/Monitor/YYYYMMDDTHHMMSSZ.json`에 저장합니다. 임계치는 `status` 판정에만 적용하며, `/etc/resource-monitor/thresholds.json`을 수정하면 다음 수집 주기에 반영됩니다.
+Oracle Linux 8/9용 C++23 시스템 모니터링 데몬입니다. 기본 60초마다 CPU, 메모리, 마운트된 로컬 디스크 파일시스템을 수집하고 매 수집 주기의 전체 결과를 `/Monitor/YYYYMMDDTHHMMSSZ.json`에 저장합니다. `/etc/resource-monitor/settings.json`에서 수집 주기, 저장 경로와 임계치를 관리합니다. 임계치는 `status` 판정에만 적용합니다.
 
 ## 구성
 
@@ -10,7 +10,7 @@ Oracle Linux 8/9용 C++23 시스템 모니터링 데몬입니다. 기본 60초�
 | `src/domain` | 측정 모델, 계산식, 임계치 규칙, 상태 집계 |
 | `src/application` | 수집·설정 적용·저장 유스케이스와 포트 |
 | `src/infrastructure/linux` | procfs, mountinfo, 파일시스템 용량 수집 |
-| `src/infrastructure/config` | 임계치 JSON 파싱 |
+| `src/infrastructure/config` | 사용자 설정 JSON 파싱·검증과 임계치 포트 구현 |
 | `src/infrastructure/persistence` | JSON 직렬화, 원자적 파일 저장 |
 | `src/runtime` | 단조 시계 타이머, 종료 신호, 실행 잠금 |
 | `src/main.cpp` | 구성 객체 생성과 의존성 주입 |
@@ -55,17 +55,21 @@ systemctl status resource-monitor
 journalctl -u resource-monitor -f
 ```
 
-기존 임계치 파일은 CMake 재설치와 RPM 업그레이드 시 보존합니다. 기본 예제는 `/usr/share/resource-monitor/thresholds.json`에 별도로 설치됩니다. `/Monitor`는 로컬 파일시스템에 두고 서비스 계정이 쓰기 가능해야 합니다. 설치 명령은 관리자 권한이 필요하지만 데몬은 전용 계정으로 실행됩니다.
+기존 `settings.json`은 CMake 재설치와 RPM 업그레이드 시 보존합니다. 새 파일이 없고 이전 `thresholds.json`만 있으면 기존 내용을 `settings.json`으로 복사합니다. 기존 파일의 값이 잘못되어 있어도 기본값으로 바꾸지 않습니다. 기본 예제는 `/usr/share/resource-monitor/settings.json`에 별도로 설치됩니다. `/Monitor`는 로컬 파일시스템에 두고 서비스 계정이 쓰기 가능해야 합니다. 설치 명령은 관리자 권한이 필요하지만 데몬은 전용 계정으로 실행됩니다.
 
 SELinux가 Enforcing인 실제 서버에서 파일 쓰기와 디렉터리 접근을 검증하십시오. 이 패키지는 SELinux를 해제하거나 별도 정책을 자동 적용하지 않습니다. 모니터링 대상 경로를 서비스 계정이 탐색할 수 없으면 해당 항목에 접근 오류가 기록됩니다. systemd 단위는 마운트 네임스페이스를 격리하는 옵션을 사용하지 않습니다.
 
-## 임계치 수정
+## 사용자 설정 수정
 
-`/etc/resource-monitor/thresholds.json`의 예시입니다.
+`/etc/resource-monitor/settings.json`의 예시입니다.
 
 ```json
 {
   "schema_version": 1,
+  "collection": {
+    "interval_seconds": 60,
+    "output_directory": "/Monitor"
+  },
   "thresholds": {
     "cpu_usage_percent": 80.0,
     "memory_usage_percent": 85.0,
@@ -74,16 +78,28 @@ SELinux가 Enforcing인 실제 서버에서 파일 쓰기와 디렉터리 접근
 }
 ```
 
-세 값은 유한한 숫자이며 0 이상 100 이하입니다. 0은 항상 경고를 발생시킵니다. 문자열, 불리언, null, 필수 키 누락, 중복 키, 알 수 없는 키, 지원하지 않는 스키마 버전은 거부합니다. 설정은 최대 64KiB의 일반 파일이어야 하며 심볼릭 링크와 FIFO는 허용하지 않습니다.
+| 설정 | 허용 값과 기본값 | 변경 적용 시점 |
+| --- | --- | --- |
+| `collection.interval_seconds` | 1~86400의 정수, 기본 60초 | 서비스 재시작 |
+| `collection.output_directory` | 제어문자가 없는 절대 경로, 기본 `/Monitor` | 서비스 재시작 |
+| `thresholds.cpu_usage_percent` | 0~100의 숫자 | 다음 수집 주기 |
+| `thresholds.memory_usage_percent` | 0~100의 숫자 | 다음 수집 주기 |
+| `thresholds.storage_usage_percent` | 0~100의 숫자 | 다음 수집 주기 |
+
+세 임계치는 필수이며 유한한 숫자여야 합니다. 0은 항상 경고를 발생시킵니다. `collection`이나 그 하위 설정을 생략하면 해당 기본값을 사용하므로 이전 임계치 전용 JSON도 읽을 수 있습니다. 잘못된 자료형, null, 필수 키 누락, 중복 키, 알 수 없는 키, 지원하지 않는 스키마 버전은 거부합니다. 설정은 최대 64KiB의 일반 파일이어야 하며 심볼릭 링크와 FIFO는 허용하지 않습니다. 새로운 동작 설정은 이름·자료형·검증 규칙을 정의해 추가합니다.
+
+수집 주기나 저장 경로를 바꾼 뒤에는 `systemctl restart resource-monitor`를 실행합니다. 실행 중에는 기존 주기와 경로를 유지하며 임계치만 다시 적용합니다. 명시한 `--interval-seconds`와 `--output` 옵션은 각각 JSON의 값을 덮어씁니다. 기본 systemd 서비스는 이 옵션들을 지정하지 않아 파일 설정을 사용합니다.
+
+저장 경로를 바꾸려면 먼저 로컬 디렉터리를 만들고 `resource-monitor` 계정에 쓰기·탐색 권한을 부여해야 합니다. 데몬은 임의의 새 경로를 자동 생성하지 않습니다. 별도 마운트에 저장한다면 `systemctl edit resource-monitor`의 `[Unit]`에 `RequiresMountsFor=/새/저장/경로`도 추가하고 SELinux 접근을 확인하십시오. 기본 단위 파일의 마운트 의존성은 `/Monitor`입니다.
 
 사용률이 임계치 이상이면 `warning`, 미만이면 `ok`, 측정 불가면 `unknown`입니다. 표시를 위해 값을 먼저 반올림하지 않습니다. 스토리지는 파일시스템 각각에 같은 임계치를 적용합니다. 임계치 아래로 내려오면 다음 측정부터 즉시 `ok`로 돌아옵니다.
 
-매 수집 시작 시 설정 전체를 읽고 검증합니다. 한 결과의 모든 자원에는 동일한 설정을 적용합니다. 실행 중 잘못된 설정은 전체를 기각하고 마지막 정상 설정을 유지합니다. 이후 파일이 정상화되면 다음 주기에 복구합니다. 시작부터 설정이 잘못된 경우 종료 코드 78로 실패하며 systemd는 이 코드로 반복 재시작하지 않습니다.
+매 수집 시작 시 설정 전체를 읽고 검증합니다. 한 결과의 모든 자원에는 동일한 임계치를 적용합니다. 실행 중 `collection`을 포함해 설정이 잘못되면 새 문서 전체를 기각하고 마지막 정상 임계치를 유지합니다. 이후 파일이 정상화되면 다음 주기에 임계치를 다시 적용합니다. 시작부터 설정이 잘못된 경우 종료 코드 78로 실패하며 systemd는 이 코드로 반복 재시작하지 않습니다.
 
 사용자가 수정한 파일을 데몬이 덮어쓰지 않습니다. 편집 중간의 일시적 파싱 실패를 줄이려면 같은 디렉터리에 새 파일을 작성·검증한 뒤 원자적으로 교체하십시오. 별도 검증 명령은 다음과 같습니다.
 
 ```bash
-resource-monitor --config /etc/resource-monitor/thresholds.json --check-config
+resource-monitor --config /etc/resource-monitor/settings.json --check-config
 ```
 
 ## JSON 계약
@@ -146,7 +162,7 @@ SIGTERM/SIGINT는 signalfd로 처리하며 대기 중 즉시 종료할 수 있�
 
 ```bash
 mkdir -p /tmp/resource-monitor-output
-./build/release/resource-monitor --config ./config/thresholds.json --output /tmp/resource-monitor-output --interval-seconds 1 --once
+./build/release/resource-monitor --config ./config/settings.json --output /tmp/resource-monitor-output --interval-seconds 1 --once
 ```
 
 `--once`도 CPU 차분을 위해 지정한 관측 구간을 기다린 후 한 번 수집·판정하고 전체 결과를 하나의 JSON 파일로 저장합니다. `--interval-seconds`는 1~86400 범위이며 서비스 기본값은 60입니다. `--help`와 `--version`도 제공합니다. 수동 진단은 service 계정과 동일한 권한 조건에서도 확인하십시오.
@@ -166,13 +182,13 @@ RPM은 빌드할 OL8 또는 OL9 시스템에서 다음처럼 생성합니다. So
 ```bash
 sudo dnf install -y rpm-build gcc-toolset-15-gcc-c++ cmake make python3
 mkdir -p "$HOME/rpmbuild/SOURCES" "$HOME/rpmbuild/SPECS"
-cp artifacts/resource-monitor-1.0.2.tar.gz "$HOME/rpmbuild/SOURCES/"
+cp artifacts/resource-monitor-1.1.0.tar.gz "$HOME/rpmbuild/SOURCES/"
 curl --fail --location https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz --output "$HOME/rpmbuild/SOURCES/json.tar.xz"
 cp packaging/rpm/resource-monitor.spec "$HOME/rpmbuild/SPECS/"
 rpmbuild -ba "$HOME/rpmbuild/SPECS/resource-monitor.spec"
 ```
 
-RPM 설치는 전용 계정과 `/Monitor` 디렉터리를 생성합니다. 서비스 자동 시작은 설치 후 관리자가 `systemctl enable --now resource-monitor`로 선택합니다. 사용자 임계치는 `%config(noreplace)`로 보존하며 `/Monitor`의 결과 파일은 패키지 소유 파일로 등록하지 않습니다.
+RPM 설치는 전용 계정과 `/Monitor` 디렉터리를 생성합니다. 서비스 자동 시작은 설치 후 관리자가 `systemctl enable --now resource-monitor`로 선택합니다. 사용자 설정은 `%config(noreplace)`로 보존하며 `/Monitor`의 결과 파일은 패키지 소유 파일로 등록하지 않습니다. 이전 파일을 이전할 때 `thresholds.json.legacy`에 원본도 보관하며 기존 백업은 덮어쓰지 않습니다. 이후 편집 대상은 `settings.json`입니다. 패키지 기본 예제가 `.rpmnew`로 남을 수 있으므로 필요한 새 항목만 참고해 기존 설정에 추가하십시오.
 
 Docker 개발 환경은 다음처럼 만들 수 있습니다. 컨테이너 테스트는 Oracle Linux 커널 및 실제 systemd 부팅 검증과 구분해야 합니다.
 
