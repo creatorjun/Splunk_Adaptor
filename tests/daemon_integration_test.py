@@ -1,4 +1,6 @@
 # tests/daemon_integration_test.py
+import contextlib
+import fcntl
 import json
 import os
 import pathlib
@@ -25,7 +27,11 @@ def write_config(path, cpu=0, memory=0, storage=0, collection=None):
     os.replace(temporary, path)
 
 
-def wait_snapshot(output, seen, predicate, process, seconds=8):
+def collection(interval, output):
+    return {'interval_seconds': interval, 'output_directory': str(output)}
+
+
+def wait_snapshot(output, seen, predicate, process, seconds=7):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         assert process.poll() is None, 'daemon exited unexpectedly'
@@ -42,7 +48,31 @@ def wait_snapshot(output, seen, predicate, process, seconds=8):
             if predicate(payload):
                 return payload
         time.sleep(0.03)
-    raise AssertionError('expected snapshot did not arrive')
+    raise AssertionError('expected snapshot did not arrive in ' + str(output))
+
+
+def wait_log(path, marker, process, offset=0, seconds=5):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        text = path.read_text(encoding='utf-8')
+        if marker in text[offset:]:
+            return text
+        assert process.poll() is None, text
+        time.sleep(0.03)
+    raise AssertionError('missing log marker ' + marker + '\n' + path.read_text(encoding='utf-8'))
+
+
+@contextlib.contextmanager
+def running_daemon(command, log_path):
+    with log_path.open('w', encoding='utf-8') as log:
+        process = subprocess.Popen(command, stdout=log, stderr=log)
+        try:
+            wait_log(log_path, 'resource-monitor started', process)
+            yield process
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=3)
 
 
 def cycle_events(text):
@@ -59,124 +89,193 @@ def assert_cycle_action(event):
     assert event['event'] == 'snapshot_saved', event
 
 
+def validate_settings(executable, config, output):
+    base = [executable, '--config', str(config)]
+    for fields in (None, {}, {'interval_seconds': 1}, {'output_directory': str(output)}):
+        write_config(config, collection=fields)
+        result = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
+        assert result.returncode == 0, result.stderr
+    for fields in ({'interval_seconds': 0}, {'output_directory': 123}):
+        write_config(config, collection=fields)
+        result = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
+        assert result.returncode == 78, result.stderr
+        assert 'component=settings_config' in result.stderr
+    config.write_text('{', encoding='utf-8')
+    result = subprocess.run(base + ['--once'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
+    assert result.returncode == 78, result.stderr
+    assert 'component=settings_config' in result.stderr
+    assert not list(output.glob('*.json'))
+
+
+def hot_reload_test(executable, root, config, output):
+    other = root / 'other-snapshots'
+    other.mkdir()
+    missing = root / 'created-later'
+    locked = root / 'locked-snapshots'
+    locked.mkdir()
+    log_path = root / 'daemon.log'
+    base = [executable, '--config', str(config)]
+    write_config(config, collection=collection(60, output))
+    with running_daemon(base, log_path) as process:
+        original_pid = process.pid
+        assert not list(output.glob('*.json')), 'first sample must wait for its CPU window'
+        changed_at = time.monotonic()
+        write_config(config, collection=collection(1, output))
+        seen = set()
+        first = wait_snapshot(output, seen, lambda value: value['config_status'] == 'ok', process, seconds=4)
+        assert time.monotonic() - changed_at < 4, '60-second interval was not reloaded promptly'
+        assert first['status'] == 'warning'
+        assert first['cpu']['status'] == 'warning'
+        assert first['memory']['status'] == 'warning'
+        steady = wait_snapshot(output, seen, lambda value: value['config_status'] == 'ok', process)
+        assert 0.7 <= steady['cpu']['window_seconds'] < 1.8
+        assert steady['thresholds_applied_at'] == first['thresholds_applied_at']
+        duplicate = subprocess.run(base + ['--once'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
+        assert duplicate.returncode != 0 and 'lock' in duplicate.stderr, duplicate.stderr
+        config.write_text('{"schema_version": 1,', encoding='utf-8')
+        fallback = wait_snapshot(output, seen, lambda value: value['config_status'] == 'using_last_valid', process)
+        assert fallback['applied_thresholds']['cpu_usage_percent'] == 0
+        assert any(error['component'] == 'settings_config' for error in fallback['errors'])
+        log_offset = len(log_path.read_text(encoding='utf-8'))
+        write_config(config, collection=collection(1, output))
+        wait_log(log_path, 'settings_recovered', process, offset=log_offset)
+        recovered = wait_snapshot(output, seen, lambda value: value['config_status'] == 'ok', process)
+        assert recovered['thresholds_applied_at'] == first['thresholds_applied_at']
+        write_config(config, 100, 100, 100, collection=collection(1, output))
+        high = wait_snapshot(output, seen, lambda value: value['config_status'] == 'ok' and value['applied_thresholds']['cpu_usage_percent'] == 100, process)
+        assert high['thresholds_applied_at'] != first['thresholds_applied_at']
+        assert 0.7 <= high['cpu']['window_seconds'] < 1.8
+        write_config(config, 100, 100, 100, collection=collection(3, output))
+        wait_log(log_path, 'settings_reloaded interval_seconds=3', process)
+        before_path_change = wait_snapshot(output, seen, lambda value: value['cpu']['window_seconds'] >= 2.5, process)
+        assert before_path_change['thresholds_applied_at'] == high['thresholds_applied_at']
+        time.sleep(0.15)
+        write_config(config, 100, 100, 100, collection=collection(3, other))
+        other_seen = set()
+        moved = wait_snapshot(other, other_seen, lambda value: value['config_status'] == 'ok', process, seconds=4)
+        assert 2.5 <= moved['cpu']['window_seconds'] < 3.8, 'output-only update reset the collection timer'
+        assert moved['thresholds_applied_at'] == high['thresholds_applied_at']
+        output_count = len(list(output.glob('*.json')))
+        with (output / '.resource-monitor.lock').open('a') as old_lock:
+            fcntl.flock(old_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(old_lock.fileno(), fcntl.LOCK_UN)
+        write_config(config, collection=collection(1, other))
+        current = wait_snapshot(other, other_seen, lambda value: value['config_status'] == 'ok' and value['applied_thresholds']['cpu_usage_percent'] == 0, process)
+        assert current['status'] == 'warning'
+        write_config(config, 100, 100, 100, collection=collection(2, missing))
+        rejected = wait_snapshot(other, other_seen, lambda value: value['config_status'] == 'using_last_valid', process)
+        assert rejected['applied_thresholds']['cpu_usage_percent'] == 0
+        assert rejected['thresholds_applied_at'] == current['thresholds_applied_at']
+        assert 0.7 <= rejected['cpu']['window_seconds'] < 1.8, 'failed output change changed the interval'
+        assert rejected['errors']
+        assert not missing.exists()
+        unchanged_config = config.read_bytes()
+        missing.mkdir()
+        missing_seen = set()
+        retried = wait_snapshot(missing, missing_seen, lambda value: value['config_status'] == 'ok' and value['applied_thresholds']['cpu_usage_percent'] == 100, process, seconds=5)
+        assert config.read_bytes() == unchanged_config, 'retry required a configuration rewrite'
+        assert retried['thresholds_applied_at'] != rejected['thresholds_applied_at']
+        assert retried['cpu']['window_seconds'] >= 1.7
+        other_count = len(list(other.glob('*.json')))
+        with (locked / '.resource-monitor.lock').open('a') as held_lock:
+            fcntl.flock(held_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            write_config(config, collection=collection(1, locked))
+            blocked = wait_snapshot(missing, missing_seen, lambda value: value['config_status'] == 'using_last_valid', process)
+            assert blocked['applied_thresholds']['cpu_usage_percent'] == 100
+            assert blocked['thresholds_applied_at'] == retried['thresholds_applied_at']
+            assert 1.7 <= blocked['cpu']['window_seconds'] < 2.8
+            assert not list(locked.glob('*.json'))
+            unchanged_config = config.read_bytes()
+            fcntl.flock(held_lock.fileno(), fcntl.LOCK_UN)
+        locked_seen = set()
+        unlocked = wait_snapshot(locked, locked_seen, lambda value: value['config_status'] == 'ok' and value['applied_thresholds']['cpu_usage_percent'] == 0, process, seconds=4)
+        assert config.read_bytes() == unchanged_config
+        assert unlocked['status'] == 'warning'
+        log_offset = len(log_path.read_text(encoding='utf-8'))
+        write_config(config, collection=collection(1, str(locked) + '/.'))
+        wait_log(log_path, 'output=' + str(locked) + '/.', process, offset=log_offset)
+        alias = wait_snapshot(locked, locked_seen, lambda value: value['config_status'] == 'ok', process)
+        assert alias['thresholds_applied_at'] == unlocked['thresholds_applied_at']
+        assert 0.7 <= alias['cpu']['window_seconds'] < 1.8
+        write_config(config, collection=collection(1, output))
+        returned = wait_snapshot(output, seen, lambda value: value['config_status'] == 'ok' and value['applied_thresholds']['cpu_usage_percent'] == 0, process)
+        assert returned['status'] == 'warning'
+        assert len(list(output.glob('*.json'))) == output_count + 1
+        assert len(list(other.glob('*.json'))) == other_count
+        assert process.pid == original_pid and process.poll() is None
+        for directory in (output, other, missing, locked):
+            assert not list(directory.glob('*.tmp'))
+        started_stop = time.monotonic()
+        process.send_signal(signal.SIGTERM)
+        assert process.wait(timeout=3) == 0
+        assert time.monotonic() - started_stop < 3
+        count = len(list(output.glob('*.json')))
+        time.sleep(0.15)
+        assert len(list(output.glob('*.json'))) == count
+    log_text = log_path.read_text(encoding='utf-8')
+    for event in cycle_events(log_text):
+        assert_cycle_action(event)
+    assert log_text.count('resource-monitor started') == 1
+    assert 'snapshot_skipped' not in log_text
+
+
+def override_and_once_tests(executable, root, config):
+    interval_output = root / 'interval-override-first'
+    interval_other = root / 'interval-override-next'
+    output_override = root / 'output-override'
+    ignored_output = root / 'ignored-output'
+    once_output = root / 'once-output'
+    for directory in (interval_output, interval_other, output_override, ignored_output, once_output):
+        directory.mkdir()
+    write_config(config, collection=collection(60, interval_output))
+    interval_command = [executable, '--interval-seconds', '1', '--config', str(config)]
+    with running_daemon(interval_command, root / 'interval-override.log') as process:
+        wait_snapshot(interval_output, set(), lambda value: value['config_status'] == 'ok', process)
+        write_config(config, 100, 100, 100, collection=collection(30, interval_other))
+        changed = wait_snapshot(interval_other, set(), lambda value: value['applied_thresholds']['cpu_usage_percent'] == 100, process, seconds=3)
+        assert 0.7 <= changed['cpu']['window_seconds'] < 1.8
+    write_config(config, collection=collection(60, ignored_output))
+    output_command = [executable, '--output', str(output_override), '--config', str(config)]
+    with running_daemon(output_command, root / 'output-override.log') as process:
+        write_config(config, 100, 100, 100, collection=collection(1, interval_other))
+        changed = wait_snapshot(output_override, set(), lambda value: value['applied_thresholds']['cpu_usage_percent'] == 100, process, seconds=4)
+        assert changed['config_status'] == 'ok'
+        assert not list(ignored_output.glob('*.json'))
+    write_config(config, collection=collection(60, once_output))
+    once_command = [executable, '--config', str(config), '--once']
+    once_log = root / 'once.log'
+    with running_daemon(once_command, once_log) as process:
+        write_config(config, collection=collection(1, once_output))
+        assert process.wait(timeout=4) == 0, once_log.read_text(encoding='utf-8')
+    once_files = list(once_output.glob('*.json'))
+    assert len(once_files) == 1
+    assert json.loads(once_files[0].read_text(encoding='utf-8'))['status'] == 'warning'
+    events = list(cycle_events(once_log.read_text(encoding='utf-8')))
+    assert len(events) == 1
+    assert_cycle_action(events[0])
+    legacy_config = root / 'thresholds.json'
+    write_config(legacy_config, 100, 100, 100)
+    overridden = subprocess.run([executable, '--interval-seconds', '1', '--output', str(once_output), '--config', str(legacy_config), '--once'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
+    assert overridden.returncode == 0, overridden.stderr
+    assert 'interval_seconds=1' in overridden.stdout
+    assert 'output=' + str(once_output) in overridden.stdout
+    assert len(list(once_output.glob('*.json'))) == 2
+    events = list(cycle_events(overridden.stdout))
+    assert len(events) == 1
+    assert_cycle_action(events[0])
+
+
 def main():
     executable = str(pathlib.Path(sys.argv[1]).resolve())
     with tempfile.TemporaryDirectory(prefix='resource-monitor-integration-') as temporary:
         root = pathlib.Path(temporary)
         output = root / 'snapshots'
         output.mkdir()
-        restarted_output = root / 'restarted-snapshots'
-        restarted_output.mkdir()
-        override_output = root / 'override-snapshots'
-        override_output.mkdir()
         config = root / 'settings.json'
-        initial_collection = {'interval_seconds': 1, 'output_directory': str(output)}
-        changed_collection = {'interval_seconds': 60, 'output_directory': str(restarted_output)}
-        restart_collection = {'interval_seconds': 2, 'output_directory': str(restarted_output)}
-        write_config(config, collection=initial_collection)
-        base = [executable, '--config', str(config)]
-        check = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
-        assert check.returncode == 0, check.stderr
-        for collection in (None, {}, {'interval_seconds': 1}, {'output_directory': str(output)}):
-            write_config(config, collection=collection)
-            defaults = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
-            assert defaults.returncode == 0, defaults.stderr
-        for collection in ({'interval_seconds': 0}, {'output_directory': 123}):
-            write_config(config, collection=collection)
-            invalid_collection = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
-            assert invalid_collection.returncode == 78, invalid_collection.stderr
-            assert 'component=settings_config' in invalid_collection.stderr
-        config.write_text('{', encoding='utf-8')
-        invalid = subprocess.run(base + ['--once'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
-        assert invalid.returncode == 78, invalid.stderr
-        assert 'component=settings_config' in invalid.stderr
-        assert not list(output.glob('*.json'))
-        write_config(config, collection=initial_collection)
-        log_path = root / 'daemon.log'
-        with log_path.open('w+', encoding='utf-8') as log:
-            process = subprocess.Popen(base, stdout=log, stderr=log)
-            try:
-                time.sleep(0.15)
-                assert not list(output.glob('*.json')), 'first sample must wait for its CPU window'
-                seen = set()
-                first = wait_snapshot(output, seen, lambda value: value['config_status'] == 'ok', process)
-                assert first['status'] == 'warning'
-                assert first['cpu']['status'] == 'warning'
-                assert first['memory']['status'] == 'warning'
-                duplicate = subprocess.run(base + ['--once'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
-                assert duplicate.returncode != 0 and 'lock' in duplicate.stderr
-                config.write_text('{"schema_version": 1,', encoding='utf-8')
-                fallback = wait_snapshot(output, seen, lambda value: value['config_status'] == 'using_last_valid', process)
-                assert fallback['applied_thresholds']['cpu_usage_percent'] == 0
-                assert fallback['collection_status'] == first['collection_status']
-                assert fallback['errors']
-                assert any(error['component'] == 'settings_config' for error in fallback['errors'])
-                write_config(config, 100, 100, 100, collection=changed_collection)
-                recovered = wait_snapshot(output, seen, lambda value: value['config_status'] == 'ok' and value['applied_thresholds']['cpu_usage_percent'] == 100, process)
-                assert recovered['thresholds_applied_at'] != first['thresholds_applied_at']
-                continuous = wait_snapshot(output, seen, lambda value: value['config_status'] == 'ok' and value['applied_thresholds']['cpu_usage_percent'] == 100, process)
-                assert continuous['timestamp'] != recovered['timestamp']
-                assert continuous['thresholds_applied_at'] == recovered['thresholds_applied_at']
-                assert not list(restarted_output.glob('*.json')), 'live collection settings must wait for restart'
-                seen.update(path.name for path in output.glob('*.json'))
-                write_config(config, collection=restart_collection)
-                resumed = wait_snapshot(output, seen, lambda value: value['config_status'] == 'ok' and value['applied_thresholds']['cpu_usage_percent'] == 0, process)
-                assert resumed['status'] == 'warning'
-                assert resumed['thresholds_applied_at'] != recovered['thresholds_applied_at']
-                assert not list(restarted_output.glob('*.json')), 'live output directory changed before restart'
-                assert not list(output.glob('*.tmp'))
-                started_stop = time.monotonic()
-                process.send_signal(signal.SIGTERM)
-                assert process.wait(timeout=3) == 0
-                assert time.monotonic() - started_stop < 3
-                count = len(list(output.glob('*.json')))
-                time.sleep(0.15)
-                assert len(list(output.glob('*.json'))) == count
-            finally:
-                if process.poll() is None:
-                    process.kill()
-                    process.wait(timeout=3)
-        started_restart = time.monotonic()
-        restarted = subprocess.run(base + ['--once'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=8)
-        assert restarted.returncode == 0, restarted.stderr
-        assert time.monotonic() - started_restart >= 1.8, restarted.stdout
-        assert 'interval_seconds=2' in restarted.stdout, restarted.stdout
-        assert 'output=' + str(restarted_output) in restarted.stdout, restarted.stdout
-        restarted_files = list(restarted_output.glob('*.json'))
-        assert len(restarted_files) == 1
-        assert json.loads(restarted_files[0].read_text(encoding='utf-8'))['cpu']['window_seconds'] >= 1.5
-        assert len(list(output.glob('*.json'))) == count
-        overridden = subprocess.run([executable, '--interval-seconds', '1', '--output', str(override_output), '--config', str(config), '--once'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
-        assert overridden.returncode == 0, overridden.stderr
-        assert 'interval_seconds=1' in overridden.stdout, overridden.stdout
-        assert 'output=' + str(override_output) in overridden.stdout, overridden.stdout
-        assert len(list(override_output.glob('*.json'))) == 1
-        assert len(list(restarted_output.glob('*.json'))) == 1
-        assert len(list(output.glob('*.json'))) == count
-        write_config(config, 100, 100, 100, collection=initial_collection)
-        once_high = subprocess.run(base + ['--once'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
-        assert once_high.returncode == 0, once_high.stderr
-        events = list(cycle_events(once_high.stdout))
-        assert len(events) == 1, once_high.stdout
-        assert_cycle_action(events[0])
-        assert len(list(output.glob('*.json'))) == count + 1
-        count += 1
-        write_config(config, collection=initial_collection)
-        once_warning = subprocess.run(base + ['--once'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
-        assert once_warning.returncode == 0, once_warning.stderr
-        assert 'snapshot_saved status=warning' in once_warning.stdout, once_warning.stdout
-        assert len(list(output.glob('*.json'))) == count + 1
-        for path in output.glob('*.json'):
-            assert json.loads(path.read_text(encoding='utf-8'))['status'] in ('ok', 'warning', 'unknown')
-        for event in cycle_events(log_path.read_text(encoding='utf-8')):
-            assert_cycle_action(event)
-        assert 'interval_seconds=1' in log_path.read_text(encoding='utf-8')
-        legacy_config = root / 'thresholds.json'
-        write_config(legacy_config)
-        legacy = subprocess.run([executable, '--config', str(legacy_config), '--output', str(override_output), '--interval-seconds', '1', '--once'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
-        assert legacy.returncode == 0, legacy.stderr
-        assert len(list(override_output.glob('*.json'))) == 2
-    print('Settings defaults, validation, configured collection, restart-only changes, CLI overrides, legacy config, reload, saves and SIGTERM passed')
+        validate_settings(executable, config, output)
+        hot_reload_test(executable, root, config, output)
+        override_and_once_tests(executable, root, config)
+    print('Settings validation, atomic live interval/output/threshold reload, retry, aliases, CLI overrides, legacy config, once saves and SIGTERM passed')
 
 
 if __name__ == '__main__':

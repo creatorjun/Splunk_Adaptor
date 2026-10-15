@@ -12,6 +12,8 @@ struct MonitorSettings {
     ThresholdPolicy thresholds;
     std::chrono::seconds collection_interval{60};
     std::string output_directory{"/Monitor"};
+
+    bool operator==(const MonitorSettings&) const = default;
 };
 
 }

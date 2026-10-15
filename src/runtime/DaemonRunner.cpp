@@ -1,20 +1,20 @@
 // src/runtime/DaemonRunner.cpp
 #include "runtime/DaemonRunner.hpp"
 
+#include "application/SettingsController.hpp"
 #include "infrastructure/linux/UniqueFd.hpp"
 
 #include <cerrno>
 #include <csignal>
 #include <cstring>
-#include <fcntl.h>
 #include <iostream>
+#include <optional>
 #include <poll.h>
 #include <stdexcept>
 #include <string>
-#include <sys/file.h>
 #include <sys/signalfd.h>
-#include <sys/stat.h>
 #include <sys/timerfd.h>
+#include <unistd.h>
 
 namespace monitor {
 namespace {
@@ -62,30 +62,12 @@ void log_error(const Error& error) {
               << " message=" << safe_log_text(error.message) << '\n';
 }
 
-int run_daemon(CollectAndStore& use_case, const DaemonOptions& options) {
+int run_daemon(CollectAndStore& use_case, const DaemonOptions& options,
+    SettingsController* settings) {
     SignalMask signal_mask;
     UniqueFd signals(::signalfd(-1, signal_mask.get(), SFD_CLOEXEC | SFD_NONBLOCK));
     if (!signals) {
         return system_failure("signalfd");
-    }
-    UniqueFd directory(::open(options.output_directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
-    if (!directory) {
-        return system_failure("open output directory");
-    }
-    UniqueFd lock(::openat(directory.get(), ".resource-monitor.lock", O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0640));
-    if (!lock) {
-        return system_failure("open lock file");
-    }
-    struct stat lock_stat{};
-    if (::fstat(lock.get(), &lock_stat) != 0) {
-        return system_failure("stat lock file");
-    }
-    if (!S_ISREG(lock_stat.st_mode) || lock_stat.st_nlink != 1) {
-        log_error({"runtime", ".resource-monitor.lock", "invalid_lock", "Lock must be a regular file with one link"});
-        return 1;
-    }
-    if (::flock(lock.get(), LOCK_EX | LOCK_NB) != 0) {
-        return system_failure("acquire single-instance lock");
     }
     const auto initialized = use_case.initialize();
     if (!initialized) {
@@ -96,18 +78,35 @@ int run_daemon(CollectAndStore& use_case, const DaemonOptions& options) {
     if (!timer) {
         return system_failure("timerfd_create");
     }
-    itimerspec schedule{};
-    schedule.it_value.tv_sec = options.interval.count();
-    schedule.it_interval.tv_sec = options.interval.count();
-    if (::timerfd_settime(timer.get(), 0, &schedule, nullptr) != 0) {
+    auto interval = settings ? settings->current().collection_interval : options.interval;
+    const auto arm_timer = [](int descriptor, std::chrono::seconds seconds) {
+        itimerspec schedule{};
+        schedule.it_value.tv_sec = seconds.count();
+        schedule.it_interval.tv_sec = seconds.count();
+        return ::timerfd_settime(descriptor, 0, &schedule, nullptr);
+    };
+    if (arm_timer(timer.get(), interval) != 0) {
         return system_failure("timerfd_settime");
     }
-    std::cout << "resource-monitor started interval_seconds=" << options.interval.count()
-              << " output=" << safe_log_text(options.output_directory.string()) << std::endl;
-    pollfd descriptors[]{{signals.get(), POLLIN, 0}, {timer.get(), POLLIN, 0}};
+    UniqueFd reload_timer;
+    if (settings) {
+        reload_timer.reset(::timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK));
+        if (!reload_timer) {
+            return system_failure("create settings timer");
+        }
+        if (arm_timer(reload_timer.get(), std::chrono::seconds{1}) != 0) {
+            return system_failure("arm settings timer");
+        }
+    }
+    std::cout << "resource-monitor started interval_seconds=" << interval.count()
+              << " output=" << safe_log_text(settings ? settings->current().output_directory
+                  : options.output_directory.string()) << std::endl;
+    pollfd descriptors[]{{signals.get(), POLLIN, 0}, {timer.get(), POLLIN, 0},
+        {reload_timer.get(), POLLIN, 0}};
     std::uint64_t skipped_intervals{};
+    std::optional<Error> reload_error;
     for (;;) {
-        const int ready = ::poll(descriptors, 2, -1);
+        const int ready = ::poll(descriptors, 3, -1);
         if (ready < 0) {
             if (errno == EINTR) {
                 continue;
@@ -121,9 +120,51 @@ int run_daemon(CollectAndStore& use_case, const DaemonOptions& options) {
                 return 0;
             }
         }
-        if ((descriptors[0].revents | descriptors[1].revents) & (POLLERR | POLLHUP | POLLNVAL)) {
+        if ((descriptors[0].revents | descriptors[1].revents | descriptors[2].revents) &
+            (POLLERR | POLLHUP | POLLNVAL)) {
             log_error({"runtime", "poll", "descriptor_failure", "Event descriptor failed"});
             return 1;
+        }
+        if (settings && (descriptors[2].revents & POLLIN) != 0) {
+            std::uint64_t checks{};
+            ssize_t count{};
+            do {
+                count = ::read(reload_timer.get(), &checks, sizeof(checks));
+            } while (count < 0 && errno == EINTR);
+            if (count == sizeof(checks)) {
+                const auto changed = settings->reload();
+                if (!changed) {
+                    const auto& error = changed.error();
+                    if (!reload_error || reload_error->component != error.component ||
+                        reload_error->target != error.target || reload_error->code != error.code ||
+                        reload_error->message != error.message) {
+                        log_error(error);
+                    }
+                    reload_error = error;
+                } else {
+                    const bool recovered = reload_error.has_value();
+                    reload_error.reset();
+                    const auto& current = settings->current();
+                    const bool interval_changed = interval != current.collection_interval;
+                    if (interval_changed) {
+                        if (arm_timer(timer.get(), current.collection_interval) != 0) {
+                            return system_failure("rearm collection timer");
+                        }
+                        interval = current.collection_interval;
+                        skipped_intervals = 0;
+                    }
+                    if (*changed || recovered) {
+                        std::cout << (*changed ? "settings_reloaded" : "settings_recovered")
+                                  << " interval_seconds=" << interval.count()
+                                  << " output=" << safe_log_text(current.output_directory) << std::endl;
+                    }
+                    if (interval_changed) {
+                        continue;
+                    }
+                }
+            } else if (count >= 0 || errno != EAGAIN) {
+                return system_failure("read settings timer");
+            }
         }
         if ((descriptors[1].revents & POLLIN) == 0) {
             continue;

@@ -9,6 +9,8 @@
 #include <ctime>
 #include <fcntl.h>
 #include <linux/fs.h>
+#include <sys/file.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <system_error>
 #include <unistd.h>
@@ -24,6 +26,7 @@ public:
     FileDescriptor(const FileDescriptor&) = delete;
     FileDescriptor& operator=(const FileDescriptor&) = delete;
     int get() const noexcept { return value_; }
+    int release() noexcept { return std::exchange(value_, -1); }
     int close() noexcept { return value_ < 0 ? 0 : ::close(std::exchange(value_, -1)); }
 
 private:
@@ -51,6 +54,53 @@ Error store_error(const std::filesystem::path& path, std::string code, std::stri
 Error io_error(const std::filesystem::path& path, const char* operation, int error) {
     return store_error(path, "io_error", std::string(operation) + ": " +
         std::error_code(error, std::generic_category()).message());
+}
+
+std::expected<int, Error> create_temporary_file(int directory, const std::filesystem::path& path,
+    std::string& name) {
+    static std::atomic<std::uint64_t> sequence{};
+    for (unsigned attempt = 0; attempt < 128; ++attempt) {
+        name = ".resource-monitor." + std::to_string(::getpid()) + "." +
+            std::to_string(sequence.fetch_add(1, std::memory_order_relaxed)) + ".tmp";
+        const auto file = ::openat(directory, name.c_str(),
+            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0640);
+        if (file >= 0) return file;
+        if (errno != EEXIST) return std::unexpected(io_error(path, "create temporary file", errno));
+    }
+    return std::unexpected(store_error(path, "name_collision", "Unable to allocate a temporary filename"));
+}
+
+std::expected<void, Error> write_document(int file, const std::string& document,
+    const std::filesystem::path& path) {
+    std::size_t written = 0;
+    while (written < document.size()) {
+        const auto count = ::write(file, document.data() + written, document.size() - written);
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            return std::unexpected(io_error(path, "write temporary file", errno));
+        }
+        if (count == 0) return std::unexpected(io_error(path, "write temporary file", EIO));
+        written += static_cast<std::size_t>(count);
+    }
+    if (::fsync(file) < 0) return std::unexpected(io_error(path, "fsync temporary file", errno));
+    return {};
+}
+
+std::expected<void, Error> validate_writable_directory(int directory, const std::filesystem::path& path) {
+    std::string name;
+    const auto created = create_temporary_file(directory, path, name);
+    if (!created) return std::unexpected(created.error());
+    FileDescriptor file(*created);
+    TemporaryFile cleanup(directory, name);
+    const auto written = write_document(file.get(), std::string(64, '\n'), path);
+    if (!written) return written;
+    if (file.close() < 0) return std::unexpected(io_error(path, "close temporary file", errno));
+    if (::unlinkat(directory, name.c_str(), 0) < 0) {
+        return std::unexpected(io_error(path, "unlink temporary file", errno));
+    }
+    cleanup.release();
+    if (::fsync(directory) < 0) return std::unexpected(io_error(path, "fsync directory", errno));
+    return {};
 }
 
 std::expected<std::string, Error> format_time(std::chrono::system_clock::time_point timestamp,
@@ -145,7 +195,72 @@ int commit_file(int directory, const char* temporary_name, const char* final_nam
 
 JsonSnapshotStore::JsonSnapshotStore(std::filesystem::path directory) : directory_(std::move(directory)) {}
 
+JsonSnapshotStore::~JsonSnapshotStore() {
+    if (lock_fd_ >= 0) ::close(lock_fd_);
+    if (directory_fd_ >= 0) ::close(directory_fd_);
+}
+
+std::expected<void, Error> JsonSnapshotStore::configure_output(const std::string& directory) {
+    const std::lock_guard guard(mutex_);
+    return configure_output_locked(directory);
+}
+
+std::expected<void, Error> JsonSnapshotStore::configure_output_locked(std::filesystem::path directory) {
+    FileDescriptor candidate(::open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+    if (candidate.get() < 0) return std::unexpected(io_error(directory, "open directory", errno));
+    struct stat candidate_stat{};
+    if (::fstat(candidate.get(), &candidate_stat) < 0) {
+        return std::unexpected(io_error(directory, "stat directory", errno));
+    }
+    if (directory_fd_ >= 0) {
+        struct stat current_stat{};
+        if (::fstat(directory_fd_, &current_stat) < 0) {
+            return std::unexpected(io_error(directory_, "stat directory", errno));
+        }
+        if (candidate_stat.st_dev == current_stat.st_dev && candidate_stat.st_ino == current_stat.st_ino) {
+            const auto validated = validate_writable_directory(directory_fd_, directory);
+            if (!validated) return validated;
+            directory_.swap(directory);
+            return {};
+        }
+    }
+    FileDescriptor candidate_lock(::openat(candidate.get(), ".resource-monitor.lock",
+        O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0640));
+    if (candidate_lock.get() < 0) return std::unexpected(io_error(directory, "open lock file", errno));
+    struct stat lock_stat{};
+    if (::fstat(candidate_lock.get(), &lock_stat) < 0) {
+        return std::unexpected(io_error(directory, "stat lock file", errno));
+    }
+    if (!S_ISREG(lock_stat.st_mode) || lock_stat.st_nlink != 1) {
+        return std::unexpected(store_error(directory, "invalid_lock", "Lock must be a regular file with one link"));
+    }
+    if (::flock(candidate_lock.get(), LOCK_EX | LOCK_NB) < 0) {
+        return std::unexpected(io_error(directory, "acquire single-instance lock", errno));
+    }
+    struct stat named_lock{};
+    if (::fstatat(candidate.get(), ".resource-monitor.lock", &named_lock, AT_SYMLINK_NOFOLLOW) < 0) {
+        return std::unexpected(io_error(directory, "stat lock pathname", errno));
+    }
+    if (!S_ISREG(named_lock.st_mode) || named_lock.st_nlink != 1 ||
+        named_lock.st_dev != lock_stat.st_dev || named_lock.st_ino != lock_stat.st_ino) {
+        return std::unexpected(store_error(directory, "invalid_lock", "Lock pathname changed during acquisition"));
+    }
+    const auto validated = validate_writable_directory(candidate.get(), directory);
+    if (!validated) return validated;
+    const FileDescriptor previous_directory(directory_fd_);
+    const FileDescriptor previous_lock(lock_fd_);
+    directory_.swap(directory);
+    directory_fd_ = candidate.release();
+    lock_fd_ = candidate_lock.release();
+    return {};
+}
+
 std::expected<void, Error> JsonSnapshotStore::save(const ResourceSnapshot& snapshot) {
+    const std::lock_guard guard(mutex_);
+    if (directory_fd_ < 0) {
+        const auto configured = configure_output_locked(directory_);
+        if (!configured) return configured;
+    }
     const auto timestamp = format_time(snapshot.timestamp, "%Y-%m-%dT%H:%M:%SZ", directory_);
     if (!timestamp) return std::unexpected(timestamp.error());
     auto applied_at = format_time(snapshot.thresholds_applied_at, "%Y-%m-%dT%H:%M:%S", directory_);
@@ -162,50 +277,27 @@ std::expected<void, Error> JsonSnapshotStore::save(const ResourceSnapshot& snaps
     } catch (const nlohmann::json::exception& error) {
         return std::unexpected(store_error(directory_, "serialization_error", error.what()));
     }
-    const FileDescriptor directory(::open(directory_.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
-    if (directory.get() < 0) return std::unexpected(io_error(directory_, "open directory", errno));
-
-    static std::atomic<std::uint64_t> temporary_sequence{};
     std::string temporary_name;
-    int temporary_fd = -1;
-    for (unsigned attempt = 0; attempt < 128; ++attempt) {
-        temporary_name = ".resource-monitor." + std::to_string(::getpid()) + "." +
-            std::to_string(temporary_sequence.fetch_add(1, std::memory_order_relaxed)) + ".tmp";
-        temporary_fd = ::openat(directory.get(), temporary_name.c_str(),
-            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0640);
-        if (temporary_fd >= 0) break;
-        if (errno != EEXIST) return std::unexpected(io_error(directory_, "create temporary file", errno));
-    }
-    if (temporary_fd < 0) {
-        return std::unexpected(store_error(directory_, "name_collision", "Unable to allocate a temporary filename"));
-    }
-    FileDescriptor file(temporary_fd);
-    TemporaryFile cleanup(directory.get(), temporary_name);
-    std::size_t written = 0;
-    while (written < document.size()) {
-        const auto count = ::write(file.get(), document.data() + written, document.size() - written);
-        if (count < 0) {
-            if (errno == EINTR) continue;
-            return std::unexpected(io_error(directory_, "write temporary file", errno));
-        }
-        if (count == 0) return std::unexpected(io_error(directory_, "write temporary file", EIO));
-        written += static_cast<std::size_t>(count);
-    }
-    if (::fsync(file.get()) < 0) return std::unexpected(io_error(directory_, "fsync temporary file", errno));
+    const auto created = create_temporary_file(directory_fd_, directory_, temporary_name);
+    if (!created) return std::unexpected(created.error());
+    FileDescriptor file(*created);
+    TemporaryFile cleanup(directory_fd_, temporary_name);
+    const auto written = write_document(file.get(), document, directory_);
+    if (!written) return written;
     if (file.close() < 0) return std::unexpected(io_error(directory_, "close temporary file", errno));
 
     for (unsigned collision = 0; collision < 10000; ++collision) {
         const auto final_name = *basename + (collision == 0 ? "" : "_" + std::to_string(collision)) + ".json";
         bool linked = false;
-        if (commit_file(directory.get(), temporary_name.c_str(), final_name.c_str(), linked) < 0) {
+        if (commit_file(directory_fd_, temporary_name.c_str(), final_name.c_str(), linked) < 0) {
             if (errno == EEXIST) continue;
             return std::unexpected(io_error(directory_ / final_name, "publish snapshot", errno));
         }
-        if (linked && ::unlinkat(directory.get(), temporary_name.c_str(), 0) < 0) {
+        if (linked && ::unlinkat(directory_fd_, temporary_name.c_str(), 0) < 0) {
             return std::unexpected(io_error(directory_, "unlink temporary file", errno));
         }
         cleanup.release();
-        if (::fsync(directory.get()) < 0) return std::unexpected(io_error(directory_, "fsync directory", errno));
+        if (::fsync(directory_fd_) < 0) return std::unexpected(io_error(directory_, "fsync directory", errno));
         return {};
     }
     return std::unexpected(store_error(directory_, "name_collision", "Snapshot filename collision limit exceeded"));

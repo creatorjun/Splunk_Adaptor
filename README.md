@@ -8,11 +8,11 @@ Oracle Linux 8/9용 C++23 시스템 모니터링 데몬입니다. 기본 60초�
 | 위치 | 책임 |
 | --- | --- |
 | `src/domain` | 측정 모델, 계산식, 임계치 규칙, 상태 집계 |
-| `src/application` | 수집·설정 적용·저장 유스케이스와 포트 |
+| `src/application` | 수집·설정 전체 적용·실패 시 기존 설정 유지·저장 유스케이스와 포트 |
 | `src/infrastructure/linux` | procfs, mountinfo, 파일시스템 용량 수집 |
-| `src/infrastructure/config` | 사용자 설정 JSON 파싱·검증과 임계치 포트 구현 |
-| `src/infrastructure/persistence` | JSON 직렬화, 원자적 파일 저장 |
-| `src/runtime` | 단조 시계 타이머, 종료 신호, 실행 잠금 |
+| `src/infrastructure/config` | 사용자 설정 JSON 파싱·검증과 설정 포트 구현 |
+| `src/infrastructure/persistence` | 저장 경로 검증·잠금·전환, JSON 직렬화와 원자적 파일 저장 |
+| `src/runtime` | 단조 시계 수집·설정 확인 타이머, 종료 신호 |
 | `src/main.cpp` | 구성 객체 생성과 의존성 주입 |
 | `tests` | 계산·설정·저장·실행 통합·의존성 검사 |
 | `packaging` | systemd 서비스, RPM 명세, Docker 빌드 환경 |
@@ -80,21 +80,25 @@ SELinux가 Enforcing인 실제 서버에서 파일 쓰기와 디렉터리 접근
 
 | 설정 | 허용 값과 기본값 | 변경 적용 시점 |
 | --- | --- | --- |
-| `collection.interval_seconds` | 1~86400의 정수, 기본 60초 | 서비스 재시작 |
-| `collection.output_directory` | 제어문자가 없는 절대 경로, 기본 `/Monitor` | 서비스 재시작 |
-| `thresholds.cpu_usage_percent` | 0~100의 숫자 | 다음 수집 주기 |
-| `thresholds.memory_usage_percent` | 0~100의 숫자 | 다음 수집 주기 |
-| `thresholds.storage_usage_percent` | 0~100의 숫자 | 다음 수집 주기 |
+| `collection.interval_seconds` | 1~86400의 정수, 기본 60초 | 다음 설정 확인 후 새 주기 시작 |
+| `collection.output_directory` | 제어문자가 없는 절대 경로, 기본 `/Monitor` | 다음 설정 확인 후 저장부터 |
+| `thresholds.cpu_usage_percent` | 0~100의 숫자 | 다음 설정 확인 후 수집부터 |
+| `thresholds.memory_usage_percent` | 0~100의 숫자 | 다음 설정 확인 후 수집부터 |
+| `thresholds.storage_usage_percent` | 0~100의 숫자 | 다음 설정 확인 후 수집부터 |
 
 세 임계치는 필수이며 유한한 숫자여야 합니다. 0은 항상 경고를 발생시킵니다. `collection`이나 그 하위 설정을 생략하면 해당 기본값을 사용하므로 이전 임계치 전용 JSON도 읽을 수 있습니다. 잘못된 자료형, null, 필수 키 누락, 중복 키, 알 수 없는 키, 지원하지 않는 스키마 버전은 거부합니다. 설정은 최대 64KiB의 일반 파일이어야 하며 심볼릭 링크와 FIFO는 허용하지 않습니다. 새로운 동작 설정은 이름·자료형·검증 규칙을 정의해 추가합니다.
 
-수집 주기나 저장 경로를 바꾼 뒤에는 `systemctl restart resource-monitor`를 실행합니다. 실행 중에는 기존 주기와 경로를 유지하며 임계치만 다시 적용합니다. 명시한 `--interval-seconds`와 `--output` 옵션은 각각 JSON의 값을 덮어씁니다. 기본 systemd 서비스는 이 옵션들을 지정하지 않아 파일 설정을 사용합니다.
+데몬은 수집 주기와 별도로 1초마다 설정 파일 전체를 확인하므로 재시작 없이 모든 항목을 자동 반영합니다. 파일을 직접 수정하는 방식과 새 파일로 원자 교체하는 방식 모두 지원합니다. 진행 중인 동기 수집·파일 작업이 오래 걸리면 확인도 그 작업이 끝난 뒤 수행됩니다. 명시한 `--interval-seconds`와 `--output` 옵션은 실행 중에도 각각 JSON의 값을 덮어씁니다. 기본 systemd 서비스는 이 옵션들을 지정하지 않아 파일 설정을 사용합니다.
+
+수집 주기가 바뀌면 적용한 시점부터 새 주기만큼 기다린 뒤 다음 JSON을 저장합니다. 예를 들어 60초에서 5초로 변경하면 다음 설정 확인 후 약 5초 뒤 수집합니다. CPU 기준 샘플을 버리지 않으므로 전환 직후 `cpu.window_seconds`는 직전 샘플부터의 실제 관측 시간이며 새 주기와 다를 수 있습니다. 저장 경로나 임계치만 바뀌거나 문서 내용이 동일하면 수집 타이머를 다시 시작하지 않습니다.
 
 저장 경로를 바꾸려면 먼저 로컬 디렉터리를 만들고 `resource-monitor` 계정에 쓰기·탐색 권한을 부여해야 합니다. 데몬은 임의의 새 경로를 자동 생성하지 않습니다. 별도 마운트에 저장한다면 `systemctl edit resource-monitor`의 `[Unit]`에 `RequiresMountsFor=/새/저장/경로`도 추가하고 SELinux 접근을 확인하십시오. 기본 단위 파일의 마운트 의존성은 `/Monitor`입니다.
 
 사용률이 임계치 이상이면 `warning`, 미만이면 `ok`, 측정 불가면 `unknown`입니다. 표시를 위해 값을 먼저 반올림하지 않습니다. 스토리지는 파일시스템 각각에 같은 임계치를 적용합니다. 임계치 아래로 내려오면 다음 측정부터 즉시 `ok`로 돌아옵니다.
 
-매 수집 시작 시 설정 전체를 읽고 검증합니다. 한 결과의 모든 자원에는 동일한 임계치를 적용합니다. 실행 중 `collection`을 포함해 설정이 잘못되면 새 문서 전체를 기각하고 마지막 정상 임계치를 유지합니다. 이후 파일이 정상화되면 다음 주기에 임계치를 다시 적용합니다. 시작부터 설정이 잘못된 경우 종료 코드 78로 실패하며 systemd는 이 코드로 반복 재시작하지 않습니다.
+설정 파일 검증과 새 저장 경로 준비를 모두 성공한 경우에만 수집 주기·경로·임계치를 한 번에 적용합니다. 새 경로는 디렉터리 잠금을 확보하고 실제 임시파일 쓰기·동기화·정리를 확인한 뒤 전환합니다. 기존 경로의 잠금은 전환 완료 시 해제합니다. 같은 디렉터리를 가리키는 경로 별칭은 기존 잠금을 재사용합니다.
+
+문서 오류, 없는 경로, 권한 부족, 다른 데몬의 잠금 등으로 변경을 적용하지 못하면 기존 설정 전체로 수집을 계속하고 JSON에 `config_status=using_last_valid`와 오류를 기록합니다. 실패 원인은 journal에도 남깁니다. 매초 다시 시도하므로 디렉터리를 준비하거나 잠금을 해제하면 파일을 다시 수정하지 않아도 자동 반영합니다. 시작부터 설정 문서가 잘못된 경우 종료 코드 78로 실패하며 systemd는 이 코드로 반복 재시작하지 않습니다. `--check-config`는 문서 형식을 검증하고 실제 저장 경로 준비는 실행 시 검증합니다.
 
 사용자가 수정한 파일을 데몬이 덮어쓰지 않습니다. 편집 중간의 일시적 파싱 실패를 줄이려면 같은 디렉터리에 새 파일을 작성·검증한 뒤 원자적으로 교체하십시오. 별도 검증 명령은 다음과 같습니다.
 
@@ -154,7 +158,7 @@ SIGTERM/SIGINT는 signalfd로 처리하며 대기 중 즉시 종료할 수 있�
 
 매 수집 주기에 임시 파일을 출력 디렉터리에 O_EXCL로 생성합니다. 모든 내용 기록과 파일 fsync 뒤 덮어쓰기 없는 원자적 이름 확정을 수행하고 디렉터리를 fsync합니다. 파일명이 이미 있으면 `_1`, `_2` 순번을 붙여 기존 파일을 보존합니다. 저장 실패는 journal에 기록하며, 다음 주기에 새로 수집한 결과의 저장을 다시 시도합니다. 실패한 과거 결과는 재전송하지 않습니다. 실패한 주기를 메모리에 무한 적재하거나 과거 파일을 삭제하지 않습니다. crash로 남은 `.tmp`는 결과 파일이 아니며, 자동으로 기존 파일을 삭제하지 않습니다.
 
-기본 결과 파일 권한은 0640이며 systemd의 umask 0027이 적용됩니다. `.resource-monitor.lock`은 동일 출력 디렉터리에 대한 중복 실행을 막는 잠금 파일입니다. 실행 중 이 파일을 삭제하거나 교체하지 마십시오.
+기본 결과 파일 권한은 0640이며 systemd의 umask 0027이 적용됩니다. `.resource-monitor.lock`은 동일 출력 디렉터리에 대한 중복 실행을 막는 잠금 파일입니다. 저장기는 잠금을 확보한 디렉터리 FD에 결과를 기록하며, 경로가 외부에서 교체되어도 다른 디렉터리를 임의로 따라가지 않습니다. 실행 중 잠금 파일을 삭제하거나 교체하지 마십시오. 이전·준비 실패 경로의 잠금 파일은 남을 수 있으며 파일 존재 자체가 잠금 보유를 뜻하지는 않습니다.
 
 기본 60초 주기로 정상 실행되고 저장에 성공하면 한 호스트에서 하루 약 1,440개 파일이 생성됩니다. 자동 삭제 기능은 없으므로 보존 기간에 맞는 별도 보관·정리 정책이 필요합니다.
 
@@ -182,7 +186,7 @@ RPM은 빌드할 OL8 또는 OL9 시스템에서 다음처럼 생성합니다. So
 ```bash
 sudo dnf install -y rpm-build gcc-toolset-15-gcc-c++ cmake make python3
 mkdir -p "$HOME/rpmbuild/SOURCES" "$HOME/rpmbuild/SPECS"
-cp artifacts/resource-monitor-1.1.0.tar.gz "$HOME/rpmbuild/SOURCES/"
+cp artifacts/resource-monitor-1.2.0.tar.gz "$HOME/rpmbuild/SOURCES/"
 curl --fail --location https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz --output "$HOME/rpmbuild/SOURCES/json.tar.xz"
 cp packaging/rpm/resource-monitor.spec "$HOME/rpmbuild/SPECS/"
 rpmbuild -ba "$HOME/rpmbuild/SPECS/resource-monitor.spec"

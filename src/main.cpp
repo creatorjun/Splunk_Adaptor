@@ -1,5 +1,6 @@
 // src/main.cpp
 #include "application/CollectAndStore.hpp"
+#include "application/SettingsController.hpp"
 #include "infrastructure/config/JsonSettingsReader.hpp"
 #include "infrastructure/linux/ProcResourceReader.hpp"
 #include "infrastructure/persistence/JsonSnapshotStore.hpp"
@@ -24,11 +25,12 @@ int main(int argc, char* argv[]) {
                           << "                        [--check-config] [--version]\n"
                           << "Default config: /etc/resource-monitor/settings.json\n"
                           << "Explicit output and interval options override the configuration.\n"
+                          << "Settings are reloaded every second without restarting.\n"
                           << "First snapshot follows one full configured interval.\n";
                 return 0;
             }
             if (argument == "--version") {
-                std::cout << "resource-monitor 1.1.0\n";
+                std::cout << "resource-monitor 1.2.0\n";
                 return 0;
             }
             if (argument == "--once") {
@@ -69,25 +71,31 @@ int main(int argc, char* argv[]) {
             }
         }
         monitor::JsonSettingsReader config{config_path};
-        const auto settings = config.read_settings();
-        if (!settings) {
-            monitor::log_error(settings.error());
-            return 78;
-        }
         if (check_config) {
+            const auto parsed = config.read_settings();
+            if (!parsed) {
+                monitor::log_error(parsed.error());
+                return 78;
+            }
             std::cout << "Configuration is valid\n";
             return 0;
         }
-        if (!output_overridden) {
-            options.output_directory = settings->output_directory;
+        monitor::SettingsOverrides overrides;
+        if (output_overridden) {
+            overrides.output_directory = options.output_directory.string();
         }
-        if (!interval_overridden) {
-            options.interval = settings->collection_interval;
+        if (interval_overridden) {
+            overrides.interval = options.interval;
+        }
+        monitor::JsonSnapshotStore store{options.output_directory};
+        monitor::SettingsController settings{config, store, overrides};
+        if (const auto initialized = settings.initialize(); !initialized) {
+            monitor::log_error(initialized.error());
+            return initialized.error().component == "settings_config" ? 78 : 1;
         }
         monitor::ProcResourceReader reader;
-        monitor::JsonSnapshotStore store{options.output_directory};
-        monitor::CollectAndStore use_case{reader, store, config};
-        return monitor::run_daemon(use_case, options);
+        monitor::CollectAndStore use_case{reader, store, settings};
+        return monitor::run_daemon(use_case, options, &settings);
     } catch (const std::exception& error) {
         monitor::log_error({"runtime", "main", "unhandled_exception", error.what()});
         return 1;

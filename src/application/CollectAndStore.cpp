@@ -50,6 +50,10 @@ std::expected<ResourceSnapshot, Error> CollectAndStore::run(std::uint64_t missed
         policy_ = *configured;
         policy_changed = true;
     }
+    if (const auto reload_error = config_.reload_error()) {
+        snapshot.config_status = ConfigStatus::using_last_valid;
+        snapshot.errors.push_back(*reload_error);
+    }
     auto sample = reader_.read();
     if (policy_changed) {
         policy_applied_at_ = sample.timestamp;

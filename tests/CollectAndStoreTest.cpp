@@ -1,6 +1,7 @@
 // tests/CollectAndStoreTest.cpp
 #include "TestSupport.hpp"
 #include "application/CollectAndStore.hpp"
+#include "application/SettingsController.hpp"
 
 #include <algorithm>
 #include <functional>
@@ -61,6 +62,24 @@ struct Config final : IThresholdConfigReader {
     std::expected<ThresholdPolicy, Error> read() override {
         ++reads;
         return next;
+    }
+};
+
+struct SettingsReader final : ISettingsReader {
+    std::expected<MonitorSettings, Error> next =
+        MonitorSettings{ThresholdPolicy{80.0, 80.0, 80.0}, std::chrono::seconds{60}, "/Monitor"};
+
+    std::expected<MonitorSettings, Error> read_settings() override {
+        return next;
+    }
+};
+
+struct OutputDirectory final : IOutputDirectory {
+    std::string active;
+
+    std::expected<void, Error> configure_output(const std::string& directory) override {
+        active = directory;
+        return {};
     }
 };
 
@@ -466,6 +485,56 @@ void every_snapshot_keeps_cpu_baseline_test() {
     CHECK(store.attempts.back().status == MetricStatus::ok);
 }
 
+void accepted_settings_survive_later_failure_test() {
+    for (const bool restore_original : {false, true}) {
+        Reader reader;
+        Store store;
+        SettingsReader settings_reader;
+        OutputDirectory output;
+        SettingsController controller(settings_reader, output);
+        CHECK(controller.initialize());
+        CollectAndStore use_case(reader, store, controller);
+        CHECK(use_case.initialize());
+        MonitorSettings accepted{ThresholdPolicy{0.0, 0.0, 0.0},
+            std::chrono::seconds{5}, "/updated"};
+        settings_reader.next = accepted;
+        CHECK(controller.reload());
+        if (restore_original) {
+            accepted.thresholds = ThresholdPolicy{80.0, 80.0, 80.0};
+            settings_reader.next = accepted;
+            CHECK(controller.reload());
+        }
+        settings_reader.next = std::unexpected(Error{
+            "settings_config", "settings.json", "invalid_json", "Truncated JSON"});
+        CHECK(!controller.reload());
+        CHECK(controller.current() == accepted);
+        CHECK(output.active == accepted.output_directory);
+        reader.next = sample(1);
+        const auto snapshot = use_case.run();
+        CHECK(snapshot);
+        CHECK(snapshot->applied_thresholds == accepted.thresholds);
+        CHECK(snapshot->config_status == ConfigStatus::using_last_valid);
+        CHECK(has_error(*snapshot, "invalid_json"));
+        CHECK(snapshot->errors.size() == 1);
+        CHECK(snapshot->collection_status == CollectionStatus::ok);
+        CHECK(snapshot->status == (restore_original ? MetricStatus::ok : MetricStatus::warning));
+        const auto applied_at = restore_original ? sample(0).timestamp : sample(1).timestamp;
+        CHECK(snapshot->thresholds_applied_at == applied_at);
+
+        settings_reader.next = accepted;
+        const auto recovered = controller.reload();
+        CHECK(recovered);
+        CHECK(!*recovered);
+        reader.next = sample(2);
+        const auto next_snapshot = use_case.run();
+        CHECK(next_snapshot);
+        CHECK(next_snapshot->applied_thresholds == accepted.thresholds);
+        CHECK(next_snapshot->config_status == ConfigStatus::ok);
+        CHECK(next_snapshot->errors.empty());
+        CHECK(next_snapshot->thresholds_applied_at == applied_at);
+    }
+}
+
 }
 
 int main() {
@@ -480,5 +549,6 @@ int main() {
         errors_without_warning_are_saved_test();
         normal_write_failure_test();
         every_snapshot_keeps_cpu_baseline_test();
+        accepted_settings_survive_later_failure_test();
     });
 }

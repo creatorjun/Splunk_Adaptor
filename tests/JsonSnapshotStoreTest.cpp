@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <sys/stat.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <thread>
@@ -40,6 +41,21 @@ public:
 nlohmann::json read_json(const std::filesystem::path& path) {
     std::ifstream input(path, std::ios::binary);
     return nlohmann::json::parse(input);
+}
+
+std::size_t count_descriptors() {
+    std::size_t count{};
+    for (const auto& entry : std::filesystem::directory_iterator("/proc/self/fd")) {
+        static_cast<void>(entry);
+        ++count;
+    }
+    return count;
+}
+
+void check_no_temporary_files(const std::filesystem::path& path) {
+    for (const auto& entry : std::filesystem::directory_iterator(path)) {
+        CHECK(entry.path().extension() != ".tmp");
+    }
 }
 
 monitor::ResourceSnapshot make_snapshot() {
@@ -83,6 +99,7 @@ int main() {
     return test::run([] {
         TemporaryDirectory directory;
         monitor::JsonSnapshotStore store(directory.path);
+        CHECK(std::filesystem::is_empty(directory.path));
         auto snapshot = make_snapshot();
         CHECK(store.save(snapshot));
         const auto path = directory.path / "20261014T123400Z.json";
@@ -124,6 +141,7 @@ int main() {
         CHECK(successful == 8);
         std::size_t entries = 0;
         for (const auto& entry : std::filesystem::directory_iterator(directory.path)) {
+            if (entry.path().filename() == ".resource-monitor.lock") continue;
             CHECK(entry.path().extension() == ".json");
             CHECK(read_json(entry.path())["schema_version"] == 1);
             ++entries;
@@ -170,6 +188,138 @@ int main() {
         CHECK(waited == child);
         CHECK(WIFEXITED(child_status));
         CHECK(WEXITSTATUS(child_status) == 0);
-        CHECK(std::filesystem::is_empty(failed_directory));
+        CHECK(std::filesystem::is_regular_file(failed_directory / ".resource-monitor.lock"));
+        check_no_temporary_files(failed_directory);
+
+        TemporaryDirectory first_directory;
+        TemporaryDirectory second_directory;
+        TemporaryDirectory blocked_directory;
+        monitor::JsonSnapshotStore switching(first_directory.path);
+        auto moving_snapshot = make_snapshot();
+        CHECK(switching.configure_output(first_directory.path.string()));
+        CHECK(switching.save(moving_snapshot));
+        const auto initial_descriptors = count_descriptors();
+        CHECK(switching.configure_output((first_directory.path / ".").string()));
+        CHECK(count_descriptors() == initial_descriptors);
+        CHECK(switching.save(moving_snapshot));
+        CHECK(std::filesystem::is_regular_file(first_directory.path / "20261014T123400Z_1.json"));
+        CHECK(switching.configure_output(second_directory.path.string()));
+        CHECK(count_descriptors() == initial_descriptors);
+        moving_snapshot.timestamp += std::chrono::seconds(1);
+        CHECK(switching.save(moving_snapshot));
+        CHECK(std::filesystem::is_regular_file(second_directory.path / "20261014T123401Z.json"));
+        CHECK(!std::filesystem::exists(first_directory.path / "20261014T123401Z.json"));
+        {
+            monitor::JsonSnapshotStore released(first_directory.path);
+            CHECK(released.configure_output(first_directory.path.string()));
+            monitor::JsonSnapshotStore blocked(blocked_directory.path);
+            CHECK(blocked.configure_output(blocked_directory.path.string()));
+            const auto active_descriptors = count_descriptors();
+            for (unsigned attempt = 0; attempt < 32; ++attempt) {
+                CHECK(!switching.configure_output((first_directory.path / "missing").string()));
+                CHECK(!switching.configure_output(blocked_directory.path.string()));
+                CHECK(count_descriptors() == active_descriptors);
+            }
+            moving_snapshot.timestamp += std::chrono::seconds(1);
+            CHECK(switching.save(moving_snapshot));
+            CHECK(std::filesystem::is_regular_file(second_directory.path / "20261014T123402Z.json"));
+            CHECK(!std::filesystem::exists(blocked_directory.path / "20261014T123402Z.json"));
+        }
+        CHECK(switching.configure_output(blocked_directory.path.string()));
+        moving_snapshot.timestamp += std::chrono::seconds(1);
+        CHECK(switching.save(moving_snapshot));
+        CHECK(std::filesystem::is_regular_file(blocked_directory.path / "20261014T123403Z.json"));
+        CHECK(!std::filesystem::exists(second_directory.path / "20261014T123403Z.json"));
+        CHECK(count_descriptors() == initial_descriptors);
+
+        TemporaryDirectory invalid_directory;
+        const auto invalid_lock = invalid_directory.path / ".resource-monitor.lock";
+        const auto lock_target = invalid_directory.path / "lock-target";
+        {
+            std::ofstream file(lock_target);
+            file << "preserve target";
+        }
+        std::filesystem::create_symlink(lock_target, invalid_lock);
+        CHECK(!switching.configure_output(invalid_directory.path.string()));
+        CHECK(std::filesystem::is_symlink(invalid_lock));
+        std::filesystem::remove(invalid_lock);
+        CHECK(::mkfifo(invalid_lock.c_str(), 0600) == 0);
+        CHECK(!switching.configure_output(invalid_directory.path.string()));
+        CHECK(std::filesystem::is_fifo(invalid_lock));
+        std::filesystem::remove(invalid_lock);
+        std::filesystem::create_directory(invalid_lock);
+        CHECK(!switching.configure_output(invalid_directory.path.string()));
+        CHECK(std::filesystem::is_directory(invalid_lock));
+        std::filesystem::remove(invalid_lock);
+        std::filesystem::create_hard_link(lock_target, invalid_lock);
+        const auto invalid_result = switching.configure_output(invalid_directory.path.string());
+        CHECK(!invalid_result);
+        CHECK(invalid_result.error().code == "invalid_lock");
+        CHECK(std::filesystem::hard_link_count(lock_target) == 2);
+        CHECK(count_descriptors() == initial_descriptors);
+        moving_snapshot.timestamp += std::chrono::seconds(1);
+        CHECK(switching.save(moving_snapshot));
+        CHECK(std::filesystem::is_regular_file(blocked_directory.path / "20261014T123404Z.json"));
+        CHECK(!std::filesystem::exists(invalid_directory.path / "20261014T123404Z.json"));
+        std::filesystem::remove(invalid_lock);
+        CHECK(switching.configure_output(invalid_directory.path.string()));
+        CHECK(switching.save(moving_snapshot));
+        CHECK(std::filesystem::is_regular_file(invalid_directory.path / "20261014T123404Z.json"));
+        CHECK(count_descriptors() == initial_descriptors);
+
+        const auto rollback_child = ::fork();
+        CHECK(rollback_child >= 0);
+        if (rollback_child == 0) {
+            struct rlimit original_limit{};
+            if (::getrlimit(RLIMIT_FSIZE, &original_limit) != 0) ::_exit(2);
+            auto restricted_limit = original_limit;
+            restricted_limit.rlim_cur = 32;
+            if (std::signal(SIGXFSZ, SIG_IGN) == SIG_ERR || ::setrlimit(RLIMIT_FSIZE, &restricted_limit) != 0) {
+                ::_exit(2);
+            }
+            const auto rejected = switching.configure_output(failed_directory.string());
+            const auto alias_rejected = switching.configure_output((invalid_directory.path / ".").string());
+            const auto write_rejected = switching.save(moving_snapshot);
+            const bool original_path_kept = !write_rejected &&
+                write_rejected.error().target == invalid_directory.path.string();
+            if (::setrlimit(RLIMIT_FSIZE, &original_limit) != 0) ::_exit(2);
+            moving_snapshot.timestamp += std::chrono::seconds(1);
+            const auto saved = switching.save(moving_snapshot);
+            ::_exit(!rejected && !alias_rejected && original_path_kept && saved &&
+                count_descriptors() == initial_descriptors ? 0 : 1);
+        }
+        do {
+            waited = ::waitpid(rollback_child, &child_status, 0);
+        } while (waited < 0 && errno == EINTR);
+        CHECK(waited == rollback_child);
+        CHECK(WIFEXITED(child_status));
+        CHECK(WEXITSTATUS(child_status) == 0);
+        CHECK(std::filesystem::is_regular_file(invalid_directory.path / "20261014T123405Z.json"));
+        CHECK(!std::filesystem::exists(failed_directory / "20261014T123405Z.json"));
+        check_no_temporary_files(failed_directory);
+
+        TemporaryDirectory rename_parent;
+        const auto named_directory = rename_parent.path / "current";
+        const auto renamed_directory = rename_parent.path / "accepted";
+        std::filesystem::create_directory(named_directory);
+        {
+            monitor::JsonSnapshotStore pinned(named_directory);
+            CHECK(pinned.configure_output(named_directory.string()));
+            std::filesystem::rename(named_directory, renamed_directory);
+            std::filesystem::create_directory(named_directory);
+            CHECK(pinned.save(moving_snapshot));
+            CHECK(std::filesystem::is_regular_file(renamed_directory / "20261014T123404Z.json"));
+            CHECK(std::filesystem::is_empty(named_directory));
+            CHECK(pinned.configure_output(renamed_directory.string()));
+            CHECK(pinned.configure_output(named_directory.string()));
+            CHECK(pinned.save(moving_snapshot));
+            CHECK(std::filesystem::is_regular_file(named_directory / "20261014T123404Z.json"));
+            CHECK(!std::filesystem::exists(renamed_directory / "20261014T123404Z_1.json"));
+        }
+        CHECK(count_descriptors() == initial_descriptors);
+        check_no_temporary_files(first_directory.path);
+        check_no_temporary_files(second_directory.path);
+        check_no_temporary_files(blocked_directory.path);
+        check_no_temporary_files(invalid_directory.path);
     });
 }

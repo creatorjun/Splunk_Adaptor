@@ -1,6 +1,6 @@
 # CMakeLists.txt
 cmake_minimum_required(VERSION 3.20)
-project(resource-monitor VERSION 1.1.0 LANGUAGES CXX)
+project(resource-monitor VERSION 1.2.0 LANGUAGES CXX)
 
 if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
     set(CMAKE_INSTALL_PREFIX "/usr" CACHE PATH "Installation prefix" FORCE)
@@ -55,16 +55,17 @@ add_library(monitor_domain
 target_include_directories(monitor_domain PUBLIC src)
 target_link_libraries(monitor_domain PRIVATE monitor_options)
 
-add_library(monitor_application src/application/CollectAndStore.cpp)
+add_library(monitor_application src/application/CollectAndStore.cpp src/application/SettingsController.cpp)
 target_link_libraries(monitor_application PUBLIC monitor_domain PRIVATE monitor_options)
 
+find_package(Threads REQUIRED)
 add_library(monitor_infrastructure
     src/infrastructure/linux/ProcResourceReader.cpp
     src/infrastructure/linux/MountReader.cpp
     src/infrastructure/config/JsonSettingsReader.cpp
     src/infrastructure/persistence/JsonSnapshotStore.cpp
 )
-target_link_libraries(monitor_infrastructure PUBLIC monitor_application PRIVATE nlohmann_json::nlohmann_json monitor_options)
+target_link_libraries(monitor_infrastructure PUBLIC monitor_application PRIVATE nlohmann_json::nlohmann_json monitor_options Threads::Threads)
 
 add_library(monitor_runtime src/runtime/DaemonRunner.cpp)
 target_link_libraries(monitor_runtime PUBLIC monitor_application PRIVATE monitor_options)
@@ -74,13 +75,12 @@ target_link_libraries(resource-monitor PRIVATE monitor_runtime monitor_infrastru
 
 include(CTest)
 if(BUILD_TESTING)
-    find_package(Threads REQUIRED)
-    foreach(test_name MetricCalculators CollectAndStore LinuxCollectors JsonSnapshotStore JsonSettingsReader)
+    foreach(test_name MetricCalculators CollectAndStore SettingsController LinuxCollectors JsonSnapshotStore JsonSettingsReader)
         add_executable(${test_name}Test tests/${test_name}Test.cpp)
         target_include_directories(${test_name}Test PRIVATE tests)
         if(test_name STREQUAL "MetricCalculators")
             target_link_libraries(${test_name}Test PRIVATE monitor_domain monitor_options)
-        elseif(test_name STREQUAL "CollectAndStore")
+        elseif(test_name STREQUAL "CollectAndStore" OR test_name STREQUAL "SettingsController")
             target_link_libraries(${test_name}Test PRIVATE monitor_application monitor_options)
         else()
             target_link_libraries(${test_name}Test PRIVATE monitor_infrastructure nlohmann_json::nlohmann_json monitor_options Threads::Threads)
@@ -96,7 +96,7 @@ if(BUILD_TESTING)
     add_test(NAME Architecture COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/architecture_test.py ${CMAKE_SOURCE_DIR})
     add_test(NAME DaemonIntegration COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/daemon_integration_test.py $<TARGET_FILE:resource-monitor>)
     add_test(NAME Installation COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/installation_test.py ${CMAKE_COMMAND} ${CMAKE_BINARY_DIR})
-    set_tests_properties(DaemonIntegration PROPERTIES TIMEOUT 45)
+    set_tests_properties(DaemonIntegration PROPERTIES TIMEOUT 90)
 endif()
 
 include(GNUInstallDirs)
