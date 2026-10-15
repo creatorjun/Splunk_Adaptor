@@ -98,7 +98,9 @@ void initialization_tests() {
     CHECK(result->hostname == "test-host");
     CHECK(result->collection_status == CollectionStatus::ok);
     CHECK(result->thresholds_applied_at == sample(0).timestamp);
-    CHECK(store.attempts.empty());
+    CHECK(store.attempts.size() == 1);
+    CHECK(store.attempts.front().status == MetricStatus::ok);
+    CHECK(store.attempts.front().timestamp == sample(1).timestamp);
 }
 
 void reload_tests() {
@@ -153,7 +155,8 @@ void reload_tests() {
     CHECK(recovered->config_status == ConfigStatus::ok);
     CHECK(recovered->thresholds_applied_at == sample(5).timestamp);
     CHECK(recovered->errors.empty());
-    CHECK(store.attempts.size() == 4);
+    CHECK(store.attempts.size() == 5);
+    CHECK(store.attempts.back().status == MetricStatus::ok);
 
     reader.next = sample(6);
     reader.before_read = [&] { config.next = ThresholdPolicy{0.0, 0.0, 0.0}; };
@@ -161,7 +164,7 @@ void reload_tests() {
     CHECK(in_flight);
     CHECK(in_flight->status == MetricStatus::ok);
     CHECK(in_flight->applied_thresholds.cpu_usage_percent == 80.0);
-    CHECK(store.attempts.size() == 4);
+    CHECK(store.attempts.size() == 6);
     reader.before_read = {};
     reader.next = sample(7);
     auto next_cycle = use_case.run();
@@ -169,7 +172,10 @@ void reload_tests() {
     CHECK(next_cycle->cpu.status == MetricStatus::warning);
     CHECK(next_cycle->memory.status == MetricStatus::warning);
     CHECK(next_cycle->filesystems.front().status == MetricStatus::warning);
-    CHECK(store.attempts.size() == 5);
+    CHECK(store.attempts.size() == 7);
+    for (std::size_t index = 0; index < store.attempts.size(); ++index) {
+        CHECK(store.attempts[index].timestamp == sample(index + 1).timestamp);
+    }
 }
 
 void partial_failure_tests() {
@@ -205,14 +211,17 @@ void partial_failure_tests() {
     CHECK(baseline->cpu.status == MetricStatus::unknown);
     CHECK(baseline->status == MetricStatus::unknown);
     CHECK(has_error(*baseline, "insufficient_baseline"));
-    CHECK(store.attempts.size() == 1);
+    CHECK(store.attempts.size() == 2);
+    CHECK(store.attempts.back().status == MetricStatus::unknown);
+    CHECK(has_error(store.attempts.back(), "insufficient_baseline"));
 
     reader.next = sample(3);
     auto recovered = use_case.run();
     CHECK(recovered);
     CHECK(recovered->cpu.status == MetricStatus::ok);
     CHECK(test::near(*recovered->cpu.window_seconds, 60.0));
-    CHECK(store.attempts.size() == 1);
+    CHECK(store.attempts.size() == 3);
+    CHECK(store.attempts.back().status == MetricStatus::ok);
 
     reader.next = sample(4);
     reader.next.filesystems.clear();
@@ -221,7 +230,8 @@ void partial_failure_tests() {
     CHECK(empty->status == MetricStatus::unknown);
     CHECK(empty->collection_status == CollectionStatus::partial);
     CHECK(has_error(*empty, "no_filesystems"));
-    CHECK(store.attempts.size() == 1);
+    CHECK(store.attempts.size() == 4);
+    CHECK(has_error(store.attempts.back(), "no_filesystems"));
 
     reader.next = sample(5);
     reader.next.cpu.value.reset();
@@ -231,7 +241,10 @@ void partial_failure_tests() {
     CHECK(unavailable);
     CHECK(unavailable->collection_status == CollectionStatus::error);
     CHECK(unavailable->status == MetricStatus::unknown);
-    CHECK(store.attempts.size() == 1);
+    CHECK(store.attempts.size() == 5);
+    CHECK(store.attempts.back().status == MetricStatus::unknown);
+    CHECK(store.attempts.back().collection_status == CollectionStatus::error);
+    CHECK(has_error(store.attempts.back(), "missing_reading"));
 }
 
 void write_failure_baseline_test() {
@@ -262,7 +275,8 @@ void write_failure_baseline_test() {
     CHECK(recovered);
     CHECK(recovered->cpu.usage_percent == 0.0);
     CHECK(recovered->cpu.window_seconds == 60.0);
-    CHECK(store.attempts.size() == 1);
+    CHECK(store.attempts.size() == 2);
+    CHECK(store.attempts.back().status == MetricStatus::ok);
 }
 
 void storage_warning_and_unknown_test() {
@@ -309,14 +323,16 @@ void counter_regression_recovery_test() {
     CHECK(regressed);
     CHECK(regressed->cpu.status == MetricStatus::unknown);
     CHECK(has_error(*regressed, "counter_regression"));
-    CHECK(store.attempts.empty());
+    CHECK(store.attempts.size() == 1);
+    CHECK(has_error(store.attempts.back(), "counter_regression"));
     reader.next = sample(12);
     reader.next.cpu.value = CpuCounters{{51, 0, 0, 51, 0, 0, 0, 0}};
     auto recovered = use_case.run();
     CHECK(recovered);
     CHECK(recovered->cpu.usage_percent == 50.0);
     CHECK(recovered->cpu.window_seconds == 60.0);
-    CHECK(store.attempts.empty());
+    CHECK(store.attempts.size() == 2);
+    CHECK(store.attempts.back().status == MetricStatus::ok);
 }
 
 void individual_resource_boundary_tests() {
@@ -355,13 +371,12 @@ void individual_resource_boundary_tests() {
     }
 }
 
-void errors_without_warning_are_not_saved_test() {
+void errors_without_warning_are_saved_test() {
     Reader reader;
     Store store;
     Config config;
     CollectAndStore use_case(reader, store, config);
     CHECK(use_case.initialize());
-    store.failure = Error{"store", "/Monitor", "disk_full", "No free space"};
     config.next = std::unexpected(Error{"thresholds", "config", "invalid_json", "Incomplete JSON"});
     reader.next = sample(1);
     auto invalid_config = use_case.run();
@@ -369,7 +384,9 @@ void errors_without_warning_are_not_saved_test() {
     CHECK(invalid_config->status == MetricStatus::ok);
     CHECK(invalid_config->config_status == ConfigStatus::using_last_valid);
     CHECK(has_error(*invalid_config, "invalid_json"));
-    CHECK(store.attempts.empty());
+    CHECK(store.attempts.size() == 1);
+    CHECK(store.attempts.back().status == MetricStatus::ok);
+    CHECK(has_error(store.attempts.back(), "invalid_json"));
 
     reader.next = sample(2);
     reader.next.memory.value.reset();
@@ -381,10 +398,39 @@ void errors_without_warning_are_not_saved_test() {
     CHECK(unknown->config_status == ConfigStatus::using_last_valid);
     CHECK(has_error(*unknown, "invalid_json"));
     CHECK(has_error(*unknown, "read_failed"));
-    CHECK(store.attempts.empty());
+    CHECK(store.attempts.size() == 2);
+    CHECK(store.attempts.back().status == MetricStatus::unknown);
+    CHECK(has_error(store.attempts.back(), "read_failed"));
 }
 
-void skipped_snapshot_keeps_cpu_baseline_test() {
+void normal_write_failure_test() {
+    Reader reader;
+    Store store;
+    Config config;
+    CollectAndStore use_case(reader, store, config);
+    CHECK(use_case.initialize());
+    reader.next = sample(1);
+    store.failure = Error{"store", "/Monitor", "disk_full", "No free space"};
+    const auto failed = use_case.run();
+    CHECK(!failed);
+    CHECK(failed.error().code == "disk_full");
+    CHECK(store.attempts.size() == 1);
+    CHECK(store.attempts.front().status == MetricStatus::ok);
+    CHECK(store.attempts.front().collection_status == CollectionStatus::ok);
+
+    reader.next = sample(2);
+    reader.next.cpu.value = CpuCounters{{50, 0, 0, 150, 0, 0, 0, 0}};
+    store.failure.reset();
+    const auto recovered = use_case.run();
+    CHECK(recovered);
+    CHECK(recovered->status == MetricStatus::ok);
+    CHECK(recovered->cpu.usage_percent == 0.0);
+    CHECK(recovered->cpu.window_seconds == 60.0);
+    CHECK(store.attempts.size() == 2);
+    CHECK(store.attempts.back().timestamp == sample(2).timestamp);
+}
+
+void every_snapshot_keeps_cpu_baseline_test() {
     Reader reader;
     Store store;
     Config config;
@@ -392,11 +438,12 @@ void skipped_snapshot_keeps_cpu_baseline_test() {
     CHECK(use_case.initialize());
     reader.next = sample(1);
     reader.next.cpu.value = CpuCounters{{20, 0, 0, 80, 0, 0, 0, 0}};
-    auto skipped = use_case.run();
-    CHECK(skipped);
-    CHECK(skipped->status == MetricStatus::ok);
-    CHECK(skipped->cpu.usage_percent == 20.0);
-    CHECK(store.attempts.empty());
+    auto normal = use_case.run();
+    CHECK(normal);
+    CHECK(normal->status == MetricStatus::ok);
+    CHECK(normal->cpu.usage_percent == 20.0);
+    CHECK(store.attempts.size() == 1);
+    CHECK(store.attempts.back().status == MetricStatus::ok);
 
     reader.next = sample(2);
     reader.next.cpu.value = CpuCounters{{100, 0, 0, 100, 0, 0, 0, 0}};
@@ -405,7 +452,8 @@ void skipped_snapshot_keeps_cpu_baseline_test() {
     CHECK(warning->cpu.usage_percent == 80.0);
     CHECK(warning->cpu.window_seconds == 60.0);
     CHECK(warning->status == MetricStatus::warning);
-    CHECK(store.attempts.size() == 1);
+    CHECK(store.attempts.size() == 2);
+    CHECK(store.attempts.back().status == MetricStatus::warning);
 
     reader.next = sample(3);
     reader.next.cpu.value = CpuCounters{{100, 0, 0, 200, 0, 0, 0, 0}};
@@ -414,7 +462,8 @@ void skipped_snapshot_keeps_cpu_baseline_test() {
     CHECK(recovered->status == MetricStatus::ok);
     CHECK(recovered->cpu.usage_percent == 0.0);
     CHECK(recovered->cpu.window_seconds == 60.0);
-    CHECK(store.attempts.size() == 1);
+    CHECK(store.attempts.size() == 3);
+    CHECK(store.attempts.back().status == MetricStatus::ok);
 }
 
 }
@@ -428,7 +477,8 @@ int main() {
         storage_warning_and_unknown_test();
         counter_regression_recovery_test();
         individual_resource_boundary_tests();
-        errors_without_warning_are_not_saved_test();
-        skipped_snapshot_keeps_cpu_baseline_test();
+        errors_without_warning_are_saved_test();
+        normal_write_failure_test();
+        every_snapshot_keeps_cpu_baseline_test();
     });
 }

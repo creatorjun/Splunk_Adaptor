@@ -120,7 +120,7 @@ private:
 
 class FixedConfig final : public IThresholdConfigReader {
 public:
-    explicit FixedConfig(ThresholdPolicy policy = {40.0, 40.0, 40.0}) : policy_(policy) {}
+    explicit FixedConfig(ThresholdPolicy policy = {80.0, 80.0, 80.0}) : policy_(policy) {}
 
     std::expected<ThresholdPolicy, Error> read() override {
         return policy_;
@@ -135,7 +135,7 @@ public:
     std::expected<void, Error> save(const ResourceSnapshot&) override {
         ++calls;
         if (fail) {
-            return std::unexpected(Error{"store", "fixture", "fixture_save_failed", "Unable to save warning"});
+            return std::unexpected(Error{"store", "fixture", "fixture_save_failed", "Unable to save snapshot"});
         }
         return {};
     }
@@ -266,8 +266,7 @@ void runtime_overrun_test() {
 
 void once_status_tests() {
     const auto run_case = [](double threshold, bool cpu_available, bool fail_save,
-                             const std::string& expected_event, const std::string& expected_status,
-                             int expected_exit, std::size_t expected_saves) {
+                             const std::string& expected_status, int expected_exit) {
         TemporaryDirectory directory;
         FixtureReader reader(0ms, cpu_available);
         FixedConfig config({threshold, threshold, threshold});
@@ -280,10 +279,10 @@ void once_status_tests() {
         options.once = true;
         CapturedLogs logs;
         CHECK(run_daemon(use_case, options) == expected_exit);
-        CHECK(store.calls == expected_saves);
+        CHECK(store.calls == 1);
+        CHECK(logs.output.str().find("snapshot_skipped") == std::string::npos);
         if (expected_exit == 0) {
-            CHECK(logs.output.str().find(expected_event + " status=" + expected_status) != std::string::npos);
-            CHECK(logs.output.str().find(expected_event == "snapshot_saved" ? "snapshot_skipped" : "snapshot_saved") == std::string::npos);
+            CHECK(logs.output.str().find("snapshot_saved status=" + expected_status) != std::string::npos);
         } else {
             CHECK(logs.output.str().find("snapshot_saved") == std::string::npos);
             CHECK(logs.errors.str().find("fixture_save_failed") != std::string::npos);
@@ -292,10 +291,11 @@ void once_status_tests() {
             CHECK(logs.errors.str().find("fixture_unavailable") != std::string::npos);
         }
     };
-    run_case(80.0, true, false, "snapshot_skipped", "ok", 0, 0);
-    run_case(80.0, false, false, "snapshot_skipped", "unknown", 0, 0);
-    run_case(50.0, true, false, "snapshot_saved", "warning", 0, 1);
-    run_case(50.0, true, true, "", "", 1, 1);
+    run_case(80.0, true, false, "ok", 0);
+    run_case(80.0, false, false, "unknown", 0);
+    run_case(50.0, true, false, "warning", 0);
+    run_case(80.0, true, true, "", 1);
+    run_case(50.0, true, true, "", 1);
 }
 
 }

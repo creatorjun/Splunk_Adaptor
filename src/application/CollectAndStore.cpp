@@ -126,9 +126,6 @@ std::expected<ResourceSnapshot, Error> CollectAndStore::run(std::uint64_t missed
         }
     }
     summarize(snapshot, sample.filesystem_enumeration_error.has_value());
-    if (snapshot.status != MetricStatus::warning) {
-        return snapshot;
-    }
     if (auto saved = store_.save(snapshot); !saved) {
         auto error = saved.error();
         for (const auto& cycle_error : snapshot.errors) {

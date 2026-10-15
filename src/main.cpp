@@ -24,7 +24,7 @@ int main(int argc, char* argv[]) {
                 return 0;
             }
             if (argument == "--version") {
-                std::cout << "resource-monitor 1.0.1\n";
+                std::cout << "resource-monitor 1.0.2\n";
                 return 0;
             }
             if (argument == "--once") {
