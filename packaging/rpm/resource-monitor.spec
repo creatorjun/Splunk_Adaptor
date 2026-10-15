@@ -2,7 +2,7 @@
 %global debug_package %{nil}
 
 Name:           resource-monitor
-Version:        1.2.0
+Version:        1.3.0
 Release:        1%{?dist}
 Summary:        System resource snapshots with JSON settings
 License:        Proprietary
@@ -12,6 +12,8 @@ BuildRequires:  gcc-toolset-15-gcc-c++
 BuildRequires:  cmake
 BuildRequires:  make
 BuildRequires:  python3
+BuildRequires:  pkgconf-pkg-config
+BuildRequires:  mariadb-connector-c-devel
 Requires(pre):  shadow-utils
 Requires(pre):  coreutils
 Requires(post): coreutils
@@ -23,7 +25,8 @@ Requires(postun): systemd
 C++23 system resource daemon for Oracle Linux 8 and 9. Collects CPU, memory
 and local mounted filesystem metrics at a configurable interval. Writes an
 atomic timestamped JSON snapshot every collection cycle. Collection interval,
-output directory and status thresholds reload without restarting the daemon.
+output directory, status thresholds and optional MySQL connections reload
+without restarting the daemon. Database credentials are stored separately.
 
 %prep
 %setup -q
@@ -43,6 +46,7 @@ ctest --test-dir build --output-on-failure
 %install
 DESTDIR=%{buildroot} cmake --install build
 install -d -m 0750 %{buildroot}/Monitor
+install -d -m 0750 %{buildroot}/etc/resource-monitor/secrets
 
 %pre
 settings_file=/etc/resource-monitor/settings.json
@@ -102,6 +106,7 @@ fi
 %attr(0755,root,root) /usr/sbin/resource-monitor
 /usr/lib/systemd/system/resource-monitor.service
 %dir /etc/resource-monitor
+%dir %attr(0750,root,resource-monitor) /etc/resource-monitor/secrets
 %config(noreplace) /etc/resource-monitor/settings.json
 %dir %attr(0750,resource-monitor,resource-monitor) /Monitor
 /usr/share/resource-monitor

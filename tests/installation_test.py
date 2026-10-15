@@ -30,6 +30,20 @@ def main():
         original = json.loads(config.read_text())
         assert original['collection'] == {'interval_seconds': 60, 'output_directory': '/Monitor'}
         assert original['thresholds']['cpu_usage_percent'] == 80
+        assert original['mysql']['enabled'] is False
+        assert original['mysql']['credentials_file'] == '/etc/resource-monitor/secrets/mysql.json'
+        assert original['mysql']['tls_mode'] == 'verify_identity'
+        assert original['mysql']['tls_ca_file'] == '/etc/resource-monitor/secrets/mysql-ca.pem'
+        example = fresh / 'usr/share/resource-monitor/mysql.example.json'
+        assert json.loads(example.read_text()) == {
+            'username': 'replace-with-database-user',
+            'password': 'replace-with-database-password',
+        }
+        secrets = fresh / 'etc/resource-monitor/secrets'
+        assert secrets.is_dir()
+        assert stat.S_IMODE(secrets.stat().st_mode) == 0o750
+        credentials = secrets / 'mysql.json'
+        assert not credentials.exists()
         assert shared.read_bytes() == config.read_bytes()
         assert not list(fresh.rglob('thresholds.json'))
         assert len(list(fresh.rglob('settings.json'))) == 2
@@ -37,8 +51,13 @@ def main():
         original['collection'] = {'interval_seconds': 17, 'output_directory': '/custom-monitor'}
         existing_settings = (json.dumps(original, indent=4) + '\n').encode('utf-8')
         config.write_bytes(existing_settings)
+        existing_credentials = b'{"username":"installation-fixture","password":"preserve-fixture"}\n'
+        credentials.write_bytes(existing_credentials)
+        credentials.chmod(0o640)
         install(fresh)
         assert config.read_bytes() == existing_settings
+        assert credentials.read_bytes() == existing_credentials
+        assert stat.S_IMODE(credentials.stat().st_mode) == 0o640
         assert (fresh / 'usr/sbin/resource-monitor').is_file()
         assert (fresh / 'usr/lib/systemd/system/resource-monitor.service').is_file()
         assert (fresh / 'usr/share/doc/resource-monitor/THIRD_PARTY_NOTICES.txt').is_file()
@@ -86,6 +105,25 @@ def main():
         assert malformed_legacy.read_bytes() == malformed_bytes
         assert malformed_legacy.with_name('settings.json').read_bytes() == malformed_bytes
 
+        secret_link_stage = root / 'secrets-symlink'
+        secret_link = secret_link_stage / 'etc/resource-monitor/secrets'
+        secret_link.parent.mkdir(parents=True)
+        secret_target = secret_link_stage / 'existing-credentials'
+        secret_target.mkdir()
+        preserved_secret = secret_target / 'mysql.json'
+        preserved_secret.write_bytes(existing_credentials)
+        secret_link.symlink_to(secret_target, target_is_directory=True)
+        install(secret_link_stage, succeeds=False)
+        assert secret_link.is_symlink()
+        assert preserved_secret.read_bytes() == existing_credentials
+
+        secret_file_stage = root / 'secrets-file'
+        secret_file = secret_file_stage / 'etc/resource-monitor/secrets'
+        secret_file.parent.mkdir(parents=True)
+        secret_file.write_bytes(existing_credentials)
+        install(secret_file_stage, succeeds=False)
+        assert secret_file.read_bytes() == existing_credentials
+
         for filename in ('thresholds.json', 'settings.json'):
             symlink_stage = root / (filename + '-symlink')
             linked_config = symlink_stage / 'etc/resource-monitor' / filename
@@ -112,7 +150,7 @@ def main():
             assert fifo_config.lstat().st_ino == original_fifo.st_ino
             if filename == 'thresholds.json':
                 assert not os.path.lexists(fifo_config.with_name('settings.json'))
-    print('Settings installation, byte-exact valid and malformed legacy migration, preservation, precedence and non-regular file rejection passed')
+    print('Settings and credential template installation, secret preservation, legacy migration, precedence and non-regular file rejection passed')
 
 
 if __name__ == '__main__':

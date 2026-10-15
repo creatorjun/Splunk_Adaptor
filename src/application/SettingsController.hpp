@@ -2,6 +2,7 @@
 #pragma once
 
 #include "application/ports/IOutputDirectory.hpp"
+#include "application/ports/IMySqlConfiguration.hpp"
 #include "application/ports/ISettingsReader.hpp"
 #include "application/ports/IThresholdConfigReader.hpp"
 
@@ -17,7 +18,7 @@ struct SettingsOverrides {
 class SettingsController final : public IThresholdConfigReader {
 public:
     SettingsController(ISettingsReader& reader, IOutputDirectory& output,
-        SettingsOverrides overrides = {});
+        SettingsOverrides overrides = {}, IMySqlConfiguration* mysql = nullptr);
     std::expected<void, Error> initialize();
     std::expected<bool, Error> reload();
     const MonitorSettings& current() const;
@@ -30,6 +31,7 @@ private:
     ISettingsReader& reader_;
     IOutputDirectory& output_;
     SettingsOverrides overrides_;
+    IMySqlConfiguration* mysql_;
     std::optional<MonitorSettings> settings_;
     std::optional<Error> last_error_;
 };

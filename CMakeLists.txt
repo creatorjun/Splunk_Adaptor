@@ -1,6 +1,6 @@
 # CMakeLists.txt
 cmake_minimum_required(VERSION 3.20)
-project(resource-monitor VERSION 1.2.0 LANGUAGES CXX)
+project(resource-monitor VERSION 1.3.0 LANGUAGES CXX)
 
 if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
     set(CMAKE_INSTALL_PREFIX "/usr" CACHE PATH "Installation prefix" FORCE)
@@ -59,13 +59,18 @@ add_library(monitor_application src/application/CollectAndStore.cpp src/applicat
 target_link_libraries(monitor_application PUBLIC monitor_domain PRIVATE monitor_options)
 
 find_package(Threads REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(MARIADB REQUIRED IMPORTED_TARGET libmariadb>=3.1)
 add_library(monitor_infrastructure
     src/infrastructure/linux/ProcResourceReader.cpp
     src/infrastructure/linux/MountReader.cpp
     src/infrastructure/config/JsonSettingsReader.cpp
+    src/infrastructure/config/JsonMySqlCredentialsReader.cpp
+    src/infrastructure/database/MariaDbConnectionFactory.cpp
+    src/infrastructure/database/MySqlConfiguration.cpp
     src/infrastructure/persistence/JsonSnapshotStore.cpp
 )
-target_link_libraries(monitor_infrastructure PUBLIC monitor_application PRIVATE nlohmann_json::nlohmann_json monitor_options Threads::Threads)
+target_link_libraries(monitor_infrastructure PUBLIC monitor_application PRIVATE nlohmann_json::nlohmann_json monitor_options Threads::Threads PkgConfig::MARIADB)
 
 add_library(monitor_runtime src/runtime/DaemonRunner.cpp)
 target_link_libraries(monitor_runtime PUBLIC monitor_application PRIVATE monitor_options)
@@ -75,7 +80,7 @@ target_link_libraries(resource-monitor PRIVATE monitor_runtime monitor_infrastru
 
 include(CTest)
 if(BUILD_TESTING)
-    foreach(test_name MetricCalculators CollectAndStore SettingsController LinuxCollectors JsonSnapshotStore JsonSettingsReader)
+    foreach(test_name MetricCalculators CollectAndStore SettingsController LinuxCollectors JsonSnapshotStore JsonSettingsReader JsonMySqlCredentialsReader MySqlConfiguration)
         add_executable(${test_name}Test tests/${test_name}Test.cpp)
         target_include_directories(${test_name}Test PRIVATE tests)
         if(test_name STREQUAL "MetricCalculators")
@@ -103,10 +108,19 @@ include(GNUInstallDirs)
 install(TARGETS resource-monitor RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR})
 install(FILES packaging/systemd/resource-monitor.service DESTINATION lib/systemd/system)
 install(FILES config/settings.json DESTINATION share/resource-monitor)
+install(FILES config/mysql.example.json DESTINATION share/resource-monitor)
 install(FILES README.md DESTINATION share/doc/resource-monitor)
 install(FILES packaging/THIRD_PARTY_NOTICES.txt DESTINATION share/doc/resource-monitor)
 install(CODE "
     set(config_dir \"\$ENV{DESTDIR}/etc/resource-monitor\")
+    set(secrets_dir \"\${config_dir}/secrets\")
+    if(IS_SYMLINK \"\${secrets_dir}\" OR (EXISTS \"\${secrets_dir}\" AND NOT IS_DIRECTORY \"\${secrets_dir}\"))
+        message(FATAL_ERROR \"Existing secrets path must be a directory and not a symbolic link\")
+    endif()
+    if(NOT EXISTS \"\${secrets_dir}\")
+        file(MAKE_DIRECTORY \"\${secrets_dir}\")
+        file(CHMOD \"\${secrets_dir}\" PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE)
+    endif()
     set(settings_file \"\${config_dir}/settings.json\")
     set(legacy_file \"\${config_dir}/thresholds.json\")
     if(EXISTS \"\${settings_file}\" OR IS_SYMLINK \"\${settings_file}\")

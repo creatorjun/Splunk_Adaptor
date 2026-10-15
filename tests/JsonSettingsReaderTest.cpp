@@ -41,6 +41,11 @@ std::string document_with_collection(const std::string& collection) {
         + collection + "}";
 }
 
+std::string document_with_mysql(const std::string& mysql) {
+    return R"({"schema_version":1,"thresholds":{"cpu_usage_percent":80,"memory_usage_percent":85.5,"storage_usage_percent":90},"mysql":)"
+        + mysql + "}";
+}
+
 void check_failure(monitor::JsonSettingsReader& reader, const std::filesystem::path& path) {
     const auto settings = reader.read_settings();
     CHECK(!settings);
@@ -67,6 +72,7 @@ int main() {
         CHECK(settings);
         CHECK(settings->collection_interval == std::chrono::seconds{60});
         CHECK(settings->output_directory == "/Monitor");
+        CHECK(settings->mysql == monitor::MySqlSettings{});
         auto policy = reader.read();
         CHECK(policy);
         CHECK(settings->thresholds == *policy);
@@ -181,6 +187,71 @@ int main() {
         for (const auto& collection : invalid_collection) {
             write_file(path, document_with_collection(collection));
             check_failure(reader, path);
+        }
+
+        write_file(path, document_with_mysql("{}"));
+        settings = reader.read_settings();
+        CHECK(settings);
+        CHECK(settings->mysql == monitor::MySqlSettings{});
+        write_file(path, document_with_mysql(R"({"enabled":true,"host":"db.internal","port":3307,"database":"monitoring","credentials_file":"/etc/resource-monitor/secrets/custom.json","connect_timeout_seconds":1,"read_timeout_seconds":5,"write_timeout_seconds":10,"tls_mode":"verify_identity","tls_ca_file":"/etc/pki/db-ca.pem"})"));
+        settings = reader.read_settings();
+        CHECK(settings);
+        CHECK(settings->mysql.enabled);
+        CHECK(settings->mysql.host == "db.internal");
+        CHECK(settings->mysql.port == 3307);
+        CHECK(settings->mysql.database == "monitoring");
+        CHECK(settings->mysql.credentials_file == "/etc/resource-monitor/secrets/custom.json");
+        CHECK(settings->mysql.connect_timeout_seconds == 1);
+        CHECK(settings->mysql.read_timeout_seconds == 5);
+        CHECK(settings->mysql.write_timeout_seconds == 10);
+        CHECK(settings->mysql.tls_mode == "verify_identity");
+        CHECK(settings->mysql.tls_ca_file == "/etc/pki/db-ca.pem");
+        for (const auto& mysql : {
+            std::string{R"({"port":1,"tls_mode":"disabled"})"},
+            std::string{R"({"port":65535,"tls_mode":"verify_identity"})"},
+            std::string{R"({"enabled":false,"database":""})"},
+            std::string{R"({"enabled":true,"database":"monitoring","tls_mode":"disabled"})"},
+            std::string{R"({"enabled":true,"database":"monitoring","tls_ca_file":"/etc/pki/db-ca.pem"})"}
+        }) {
+            write_file(path, document_with_mysql(mysql));
+            CHECK(reader.read_settings());
+        }
+        const std::vector<std::string> invalid_mysql{
+            "null", "true", "1", "\"db\"", "[]",
+            R"({"enabled":1})", R"({"enabled":"true"})", R"({"enabled":true})",
+            R"({"enabled":true,"database":""})", R"({"host":""})", R"({"host":1})",
+            R"({"host":"db\u0000host"})", R"({"host":"db\nhost"})",
+            R"({"database":null})", R"({"database":"db\u007f"})",
+            R"({"port":0})", R"({"port":-1})", R"({"port":65536})", R"({"port":3306.0})",
+            R"({"port":true})", R"({"port":"3306"})", R"({"port":18446744073709551615})",
+            R"({"port":18446744073709551616})", R"({"port":-9223372036854775808})",
+            R"({"connect_timeout_seconds":0})", R"({"connect_timeout_seconds":11})",
+            R"({"read_timeout_seconds":-1})", R"({"read_timeout_seconds":2.5})",
+            R"({"write_timeout_seconds":"3"})", R"({"write_timeout_seconds":null})",
+            R"({"credentials_file":""})", R"({"credentials_file":"relative.json"})",
+            R"({"credentials_file":"/tmp/a\u0000.json"})", R"({"credentials_file":[]})",
+            R"({"tls_mode":"preferred"})", R"({"tls_mode":"required"})",
+            R"({"enabled":true,"database":"monitoring"})",
+            R"({"enabled":true,"database":"monitoring","tls_mode":"verify_identity","tls_ca_file":""})",
+            R"({"tls_mode":true})", R"({"tls_ca_file":"relative.pem"})",
+            R"({"tls_ca_file":"/tmp/ca\n.pem"})", R"({"tls_ca_file":null})",
+            R"({"username":"redaction-marker"})", R"({"password":"redaction-marker"})",
+            R"({"redaction-marker":"value"})", R"({"host":"db","host":"db2"})"
+        };
+        for (const auto& mysql : invalid_mysql) {
+            write_file(path, document_with_mysql(mysql));
+            check_failure(reader, path);
+            CHECK(reader.read_settings().error().message.find("redaction-marker") == std::string::npos);
+        }
+        for (const auto& content : {
+            document_with_mysql(R"({"password":"redaction-marker" INVALID})"),
+            std::string{R"({"schema_version":1,"thresholds":{"cpu_usage_percent":80,"memory_usage_percent":85,"storage_usage_percent":90},"redaction-marker":true})"},
+            document_with_collection(R"({"redaction-marker":true})")
+        }) {
+            write_file(path, content);
+            const auto result = reader.read_settings();
+            CHECK(!result);
+            CHECK(result.error().message.find("redaction-marker") == std::string::npos);
         }
         write_file(path, R"({"schema_version":1,"thresholds":{"cpu_usage_percent":0,"memory_usage_percent":100,"storage_usage_percent":12.25}})");
         policy = reader.read();

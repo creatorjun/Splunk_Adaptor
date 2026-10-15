@@ -15,8 +15,8 @@ Error not_initialized() {
 }
 
 SettingsController::SettingsController(ISettingsReader& reader, IOutputDirectory& output,
-    SettingsOverrides overrides)
-    : reader_(reader), output_(output), overrides_(std::move(overrides)) {}
+    SettingsOverrides overrides, IMySqlConfiguration* mysql)
+    : reader_(reader), output_(output), overrides_(std::move(overrides)), mysql_(mysql) {}
 
 std::expected<void, Error> SettingsController::initialize() {
     if (settings_) {
@@ -67,6 +67,28 @@ std::expected<bool, Error> SettingsController::load_and_apply() {
     if (overrides_.output_directory) {
         next->output_directory = *overrides_.output_directory;
     }
+    if (!mysql_ && next->mysql.enabled) {
+        last_error_ = Error{"mysql", "connection", "unavailable", "Database adapter is unavailable"};
+        return std::unexpected(*last_error_);
+    }
+    if (mysql_) {
+        const auto prepared = mysql_->prepare(next->mysql);
+        if (!prepared || !*prepared) {
+            last_error_ = prepared ? Error{"mysql", "connection", "connection_pending",
+                "Database connection validation is pending"} : prepared.error();
+            if (!settings_) {
+                const auto configured = output_.configure_output(next->output_directory);
+                if (!configured) {
+                    last_error_ = configured.error();
+                    return std::unexpected(*last_error_);
+                }
+                next->mysql = MySqlSettings{};
+                settings_ = std::move(*next);
+                return true;
+            }
+            return std::unexpected(*last_error_);
+        }
+    }
     const bool changed = !settings_ || *settings_ != *next;
     if (!settings_ || settings_->output_directory != next->output_directory) {
         const auto configured = output_.configure_output(next->output_directory);
@@ -75,9 +97,10 @@ std::expected<bool, Error> SettingsController::load_and_apply() {
             return std::unexpected(*last_error_);
         }
     }
+    const bool database_changed = mysql_ && mysql_->commit();
     settings_ = std::move(*next);
     last_error_.reset();
-    return changed;
+    return changed || database_changed;
 }
 
 }

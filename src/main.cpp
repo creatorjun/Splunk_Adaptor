@@ -2,6 +2,9 @@
 #include "application/CollectAndStore.hpp"
 #include "application/SettingsController.hpp"
 #include "infrastructure/config/JsonSettingsReader.hpp"
+#include "infrastructure/config/JsonMySqlCredentialsReader.hpp"
+#include "infrastructure/database/MariaDbConnectionFactory.hpp"
+#include "infrastructure/database/MySqlConfiguration.hpp"
 #include "infrastructure/linux/ProcResourceReader.hpp"
 #include "infrastructure/persistence/JsonSnapshotStore.hpp"
 #include "runtime/DaemonRunner.hpp"
@@ -30,7 +33,7 @@ int main(int argc, char* argv[]) {
                 return 0;
             }
             if (argument == "--version") {
-                std::cout << "resource-monitor 1.2.0\n";
+                std::cout << "resource-monitor 1.3.0\n";
                 return 0;
             }
             if (argument == "--once") {
@@ -71,11 +74,19 @@ int main(int argc, char* argv[]) {
             }
         }
         monitor::JsonSettingsReader config{config_path};
+        monitor::JsonMySqlCredentialsReader credentials;
         if (check_config) {
             const auto parsed = config.read_settings();
             if (!parsed) {
                 monitor::log_error(parsed.error());
                 return 78;
+            }
+            if (parsed->mysql.enabled) {
+                const auto secret = credentials.read_credentials(parsed->mysql.credentials_file);
+                if (!secret) {
+                    monitor::log_error(secret.error());
+                    return 78;
+                }
             }
             std::cout << "Configuration is valid\n";
             return 0;
@@ -88,7 +99,9 @@ int main(int argc, char* argv[]) {
             overrides.interval = options.interval;
         }
         monitor::JsonSnapshotStore store{options.output_directory};
-        monitor::SettingsController settings{config, store, overrides};
+        monitor::MariaDbConnectionFactory database_factory;
+        monitor::MySqlConfiguration database{credentials, database_factory};
+        monitor::SettingsController settings{config, store, overrides, &database};
         if (const auto initialized = settings.initialize(); !initialized) {
             monitor::log_error(initialized.error());
             return initialized.error().component == "settings_config" ? 78 : 1;

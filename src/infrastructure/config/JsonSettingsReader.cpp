@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <set>
 #include <stdexcept>
+#include <string_view>
 #include <sys/stat.h>
 #include <system_error>
 #include <unistd.h>
@@ -112,11 +113,11 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::read_settings() {
         const auto json = nlohmann::json::parse(document, callback);
         if (!json.is_object() || !json.contains("schema_version") ||
             !json.contains("thresholds")) {
-            return std::unexpected(config_error(path_, "invalid_schema", "Expected schema_version, thresholds, and optional collection"));
+            return std::unexpected(config_error(path_, "invalid_schema", "Expected schema_version, thresholds, and optional collection and mysql"));
         }
         for (const auto& [key, value] : json.items()) {
-            if (key != "schema_version" && key != "thresholds" && key != "collection") {
-                return std::unexpected(config_error(path_, "invalid_schema", "Unknown configuration key: " + key));
+            if (key != "schema_version" && key != "thresholds" && key != "collection" && key != "mysql") {
+                return std::unexpected(config_error(path_, "invalid_schema", "Unknown configuration key"));
             }
         }
         if (!json["schema_version"].is_number_integer() || json["schema_version"] != 1) {
@@ -151,7 +152,7 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::read_settings() {
             }
             for (const auto& [key, value] : collection.items()) {
                 if (key != "interval_seconds" && key != "output_directory") {
-                    return std::unexpected(config_error(path_, "invalid_schema", "Unknown collection key: " + key));
+                    return std::unexpected(config_error(path_, "invalid_schema", "Unknown collection key"));
                 }
             }
             if (collection.contains("interval_seconds")) {
@@ -186,11 +187,79 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::read_settings() {
                 settings.output_directory = value;
             }
         }
+        if (json.contains("mysql")) {
+            const auto& mysql = json["mysql"];
+            if (!mysql.is_object()) {
+                return std::unexpected(config_error(path_, "invalid_mysql", "mysql must be an object"));
+            }
+            const std::set<std::string> allowed_keys{
+                "enabled", "host", "port", "database", "credentials_file", "connect_timeout_seconds",
+                "read_timeout_seconds", "write_timeout_seconds", "tls_mode", "tls_ca_file"
+            };
+            for (const auto& [key, value] : mysql.items()) {
+                if (!allowed_keys.contains(key)) {
+                    return std::unexpected(config_error(path_, "invalid_mysql", "Unknown MySQL setting; credentials must be stored in the separate credentials file"));
+                }
+            }
+            if (mysql.contains("enabled")) {
+                if (!mysql["enabled"].is_boolean()) {
+                    return std::unexpected(config_error(path_, "invalid_mysql", "mysql.enabled must be a boolean"));
+                }
+                settings.mysql.enabled = mysql["enabled"].get<bool>();
+            }
+            const std::array string_fields{
+                std::pair{"host", &settings.mysql.host},
+                std::pair{"database", &settings.mysql.database},
+                std::pair{"credentials_file", &settings.mysql.credentials_file},
+                std::pair{"tls_mode", &settings.mysql.tls_mode},
+                std::pair{"tls_ca_file", &settings.mysql.tls_ca_file}
+            };
+            for (const auto& [key, destination] : string_fields) {
+                if (!mysql.contains(key)) continue;
+                if (!mysql[key].is_string()) {
+                    return std::unexpected(config_error(path_, "invalid_mysql", std::string("mysql.") + key + " must be a string"));
+                }
+                *destination = mysql[key].get<std::string>();
+                if (has_control_characters(*destination)) {
+                    return std::unexpected(config_error(path_, "invalid_mysql", "MySQL settings must not contain control characters"));
+                }
+            }
+            const std::array numeric_fields{
+                std::pair{"port", &settings.mysql.port},
+                std::pair{"connect_timeout_seconds", &settings.mysql.connect_timeout_seconds},
+                std::pair{"read_timeout_seconds", &settings.mysql.read_timeout_seconds},
+                std::pair{"write_timeout_seconds", &settings.mysql.write_timeout_seconds}
+            };
+            for (const auto& [key, destination] : numeric_fields) {
+                if (!mysql.contains(key)) continue;
+                const auto& number = mysql[key];
+                const auto maximum = std::string_view(key) == "port" ? 65535U : 10U;
+                if (!number.is_number_integer() ||
+                    (number.is_number_unsigned() && (number.get<std::uint64_t>() < 1 || number.get<std::uint64_t>() > maximum)) ||
+                    (!number.is_number_unsigned() && (number.get<std::int64_t>() < 1 || number.get<std::int64_t>() > maximum))) {
+                    return std::unexpected(config_error(path_, "invalid_mysql", "MySQL port must be 1..65535 and timeouts must be 1..10 integer seconds"));
+                }
+                *destination = number.get<unsigned int>();
+            }
+            if (settings.mysql.host.empty() || (settings.mysql.enabled && settings.mysql.database.empty())) {
+                return std::unexpected(config_error(path_, "invalid_mysql", "MySQL host is required and database is required when enabled"));
+            }
+            if (settings.mysql.credentials_file.empty() || !std::filesystem::path(settings.mysql.credentials_file).is_absolute()) {
+                return std::unexpected(config_error(path_, "invalid_mysql", "MySQL credentials_file must be an absolute path"));
+            }
+            if (settings.mysql.tls_mode != "disabled" && settings.mysql.tls_mode != "verify_identity") {
+                return std::unexpected(config_error(path_, "invalid_mysql", "MySQL tls_mode must be disabled or verify_identity"));
+            }
+            if ((!settings.mysql.tls_ca_file.empty() && !std::filesystem::path(settings.mysql.tls_ca_file).is_absolute()) ||
+                (settings.mysql.enabled && settings.mysql.tls_mode == "verify_identity" && settings.mysql.tls_ca_file.empty())) {
+                return std::unexpected(config_error(path_, "invalid_mysql", "MySQL tls_ca_file must be absolute and is required when enabled with verify_identity"));
+            }
+        }
         return settings;
-    } catch (const nlohmann::json::exception& error) {
-        return std::unexpected(config_error(path_, "invalid_json", error.what()));
-    } catch (const std::invalid_argument& error) {
-        return std::unexpected(config_error(path_, "invalid_json", error.what()));
+    } catch (const nlohmann::json::exception&) {
+        return std::unexpected(config_error(path_, "invalid_json", "Invalid settings JSON document"));
+    } catch (const std::invalid_argument&) {
+        return std::unexpected(config_error(path_, "invalid_json", "Invalid settings JSON structure"));
     }
 }
 

@@ -40,6 +40,27 @@ struct Output final : IOutputDirectory {
     }
 };
 
+struct Database final : IMySqlConfiguration {
+    std::expected<bool, Error> prepared{true};
+    MySqlSettings candidate;
+    MySqlSettings active;
+    std::size_t commits{};
+    bool credential_changed{false};
+
+    std::expected<bool, Error> prepare(const MySqlSettings& next) override {
+        candidate = next;
+        return prepared;
+    }
+
+    bool commit() noexcept override {
+        ++commits;
+        const bool changed = active != candidate || credential_changed;
+        active = candidate;
+        credential_changed = false;
+        return changed;
+    }
+};
+
 void check_error(const Error& actual, const Error& expected) {
     CHECK(actual.component == expected.component);
     CHECK(actual.target == expected.target);
@@ -259,6 +280,86 @@ void override_tests() {
     }
 }
 
+void database_reload_tests() {
+    Reader reader;
+    Output output;
+    Database database;
+    SettingsController controller(reader, output, {}, &database);
+    CHECK(controller.initialize());
+    const auto previous = controller.current();
+    reader.next->mysql.enabled = true;
+    reader.next->mysql.database = "monitoring";
+    reader.next->collection_interval = std::chrono::seconds{2};
+    reader.next->output_directory = "/new";
+    database.prepared = false;
+    CHECK(!controller.reload());
+    CHECK(controller.current() == previous);
+    CHECK(output.active == "/Monitor");
+    CHECK(database.commits == 1);
+    CHECK(controller.reload_error()->code == "connection_pending");
+    database.prepared = std::unexpected(Error{"mysql", "connection", "connect_failed", "Connection failed"});
+    CHECK(!controller.reload());
+    CHECK(controller.current() == previous);
+    CHECK(database.commits == 1);
+    database.prepared = true;
+    output.failure = Error{"snapshot_store", "/new", "io_error", "Access denied"};
+    CHECK(!controller.reload());
+    CHECK(controller.current() == previous);
+    CHECK(!database.active.enabled);
+    CHECK(database.commits == 1);
+    output.failure.reset();
+    auto changed = controller.reload();
+    CHECK(changed && *changed);
+    CHECK(controller.current() == *reader.next);
+    CHECK(database.active == reader.next->mysql);
+    CHECK(output.active == "/new");
+    CHECK(!controller.reload_error());
+    changed = controller.reload();
+    CHECK(changed && !*changed);
+    database.credential_changed = true;
+    changed = controller.reload();
+    CHECK(changed && *changed);
+    CHECK(controller.current() == *reader.next);
+    reader.next->mysql.enabled = false;
+    changed = controller.reload();
+    CHECK(changed && *changed);
+    CHECK(!database.active.enabled);
+}
+
+void database_startup_tests() {
+    for (const bool pending : {true, false}) {
+        Reader reader;
+        reader.next->mysql.enabled = true;
+        reader.next->mysql.database = "monitoring";
+        Output output;
+        Database database;
+        if (pending) {
+            database.prepared = false;
+        } else {
+            database.prepared = std::unexpected(Error{"mysql_credentials", "credentials", "invalid_json", "Invalid credentials"});
+        }
+        SettingsController controller(reader, output, {}, &database);
+        CHECK(controller.initialize());
+        CHECK(!controller.current().mysql.enabled);
+        CHECK(controller.current().thresholds == reader.next->thresholds);
+        CHECK(output.active == "/Monitor");
+        CHECK(controller.reload_error());
+        CHECK(database.commits == 0);
+        database.prepared = true;
+        const auto changed = controller.reload();
+        CHECK(changed && *changed);
+        CHECK(controller.current().mysql.enabled);
+        CHECK(database.active.enabled);
+        CHECK(!controller.reload_error());
+    }
+    Reader reader;
+    reader.next->mysql.enabled = true;
+    Output output;
+    SettingsController controller(reader, output);
+    CHECK(!controller.initialize());
+    CHECK(output.attempts.empty());
+}
+
 }
 
 int main() {
@@ -268,5 +369,7 @@ int main() {
         read_failure_tests();
         output_failure_tests();
         override_tests();
+        database_reload_tests();
+        database_startup_tests();
     });
 }

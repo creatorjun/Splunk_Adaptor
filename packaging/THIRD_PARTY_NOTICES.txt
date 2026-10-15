@@ -27,3 +27,13 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+MariaDB Connector/C
+https://github.com/mariadb-corporation/mariadb-connector-c
+GNU Lesser General Public License, version 2.1
+https://github.com/mariadb-corporation/mariadb-connector-c/blob/3.3/COPYING.LIB
+
+The executable dynamically links the distribution-provided MariaDB Connector/C
+library. The resource-monitor package does not bundle that library. Its license,
+copyright notices and corresponding sources are provided by the distribution's
+mariadb-connector-c package and source package.

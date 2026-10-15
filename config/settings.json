@@ -8,5 +8,17 @@
     "cpu_usage_percent": 80.0,
     "memory_usage_percent": 85.0,
     "storage_usage_percent": 90.0
+  },
+  "mysql": {
+    "enabled": false,
+    "host": "127.0.0.1",
+    "port": 3306,
+    "database": "monitoring",
+    "credentials_file": "/etc/resource-monitor/secrets/mysql.json",
+    "connect_timeout_seconds": 3,
+    "read_timeout_seconds": 3,
+    "write_timeout_seconds": 3,
+    "tls_mode": "verify_identity",
+    "tls_ca_file": "/etc/resource-monitor/secrets/mysql-ca.pem"
   }
 }

@@ -3,3 +3,7 @@
 /artifacts/
 __pycache__/
 *.pyc
+secrets/
+mysql.json
+.env
+.env.*
