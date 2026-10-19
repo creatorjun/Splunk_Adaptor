@@ -3,6 +3,7 @@
 
 #include "domain/ResourceSample.hpp"
 #include "domain/ThresholdPolicy.hpp"
+#include "domain/CollectCountAnalysis.hpp"
 
 namespace monitor {
 
@@ -48,6 +49,7 @@ struct ResourceSnapshot {
     MemoryMetrics memory;
     std::vector<FilesystemMetrics> filesystems;
     std::vector<Error> errors;
+    CollectCountAnalysis collect_count;
 };
 
 }

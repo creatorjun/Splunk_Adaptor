@@ -1,6 +1,10 @@
 {
   "schema_version": 1,
   "is_analyzer": false,
+  "analyzer": {
+    "collect_count_change_percent": 10.0,
+    "comparison_day": "yesterday"
+  },
   "collection": {
     "interval_seconds": 60,
     "output_directory": "/Monitor"

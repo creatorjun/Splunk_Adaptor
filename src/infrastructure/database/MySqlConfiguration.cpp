@@ -1,6 +1,7 @@
 // src/infrastructure/database/MySqlConfiguration.cpp
 #include "infrastructure/database/MySqlConfiguration.hpp"
 
+#include <algorithm>
 #include <condition_variable>
 #include <csignal>
 #include <cstdint>
@@ -50,6 +51,11 @@ private:
 
 Error worker_error() {
     return {"mysql", "connection", "worker_failure", "Database connection operation failed"};
+}
+
+Error query_error() {
+    return {"collect_count", "CloudESM.SUM_COLLECT_INFO_1DAY", "query_failure",
+        "Database collection count query failed"};
 }
 
 }
@@ -155,10 +161,67 @@ public:
         ready_generation.reset();
         active_healthy = true;
         ++active_revision;
+        ++query_revision;
+        query_result = {};
+        query_completed_at.reset();
+        query_at = Clock::time_point{};
+        if (!active_identity->settings.enabled) {
+            desired_window.reset();
+        }
         failure.reset();
         health_at = Clock::now() + health_interval;
         wake.notify_one();
         return true;
+    }
+
+    CollectCountReading read_daily_counts(const DailyCountWindow& window,
+        std::chrono::seconds refresh_interval) {
+        if (refresh_interval.count() <= 0) {
+            CollectCountReading result;
+            result.status = CollectCountReadStatus::error;
+            result.error = Error{"collect_count", "refresh_interval", "invalid_interval",
+                "Collection count refresh interval must be positive"};
+            return result;
+        }
+        std::lock_guard lock(mutex);
+        if ((!active_identity || !active_identity->settings.enabled)
+            && (!desired || !desired->settings.enabled)) {
+            return {};
+        }
+        if (!desired_window || *desired_window != window) {
+            desired_window = window;
+            ++query_revision;
+            query_result = {};
+            query_completed_at.reset();
+            query_at = Clock::time_point{};
+        }
+        if (query_interval != refresh_interval) {
+            query_interval = refresh_interval;
+            if (query_completed_at) {
+                query_at = *query_completed_at + (query_result.status == CollectCountReadStatus::error
+                    ? std::max(std::chrono::duration_cast<Clock::duration>(query_interval),
+                        std::chrono::duration_cast<Clock::duration>(retry_interval))
+                    : std::chrono::duration_cast<Clock::duration>(query_interval));
+            }
+        }
+        wake.notify_one();
+        if (!active || !active_healthy) {
+            CollectCountReading result;
+            if (active && !active_healthy) {
+                result.status = CollectCountReadStatus::error;
+                result.error = Error{"collect_count", "connection", "connection_unavailable",
+                    "Database collection count connection is unavailable"};
+            }
+            return result;
+        }
+        const auto maximum_age = std::max(query_interval * 2, std::chrono::seconds{10});
+        if (query_result.status == CollectCountReadStatus::ready && query_completed_at
+            && Clock::now() - *query_completed_at > maximum_age) {
+            CollectCountReading result;
+            result.queried_at = query_result.queried_at;
+            return result;
+        }
+        return query_result;
     }
 
     void run() {
@@ -206,6 +269,8 @@ public:
                     health_at = Clock::now() + health_interval;
                     if (!result) {
                         active_healthy = false;
+                        query_result = {};
+                        query_completed_at.reset();
                         if (active_identity && desired && *active_identity == *desired) {
                             failure = result.error();
                             retry_at = Clock::now();
@@ -217,8 +282,41 @@ public:
                 lock.lock();
                 continue;
             }
+            if (active && active_healthy && desired_window && Clock::now() >= query_at) {
+                auto session = active;
+                const auto revision = active_revision;
+                const auto selected_query_revision = query_revision;
+                const auto window = *desired_window;
+                lock.unlock();
+                auto result = query(*session, window);
+                const auto queried_at = std::chrono::system_clock::now();
+                lock.lock();
+                if (!stopping && revision == active_revision
+                    && selected_query_revision == query_revision && desired_window
+                    && *desired_window == window) {
+                    query_result = {};
+                    query_result.queried_at = queried_at;
+                    query_completed_at = Clock::now();
+                    if (result) {
+                        query_result.status = CollectCountReadStatus::ready;
+                        query_result.counts = std::move(*result);
+                        query_at = *query_completed_at + query_interval;
+                    } else {
+                        query_result.status = CollectCountReadStatus::error;
+                        query_result.error = std::move(result.error());
+                        query_at = *query_completed_at + std::max(
+                            std::chrono::duration_cast<Clock::duration>(query_interval),
+                            std::chrono::duration_cast<Clock::duration>(retry_interval));
+                        health_at = Clock::now();
+                    }
+                }
+                lock.unlock();
+                session.reset();
+                lock.lock();
+                continue;
+            }
             if (active && active_healthy) {
-                wake.wait_until(lock, health_at);
+                wake.wait_until(lock, desired_window ? std::min(health_at, query_at) : health_at);
             } else {
                 wake.wait(lock);
             }
@@ -262,6 +360,15 @@ public:
         }
     }
 
+    static std::expected<std::vector<DailyCountPair>, Error> query(
+        IMySqlSession& session, const DailyCountWindow& window) {
+        try {
+            return session.read_daily_counts(window);
+        } catch (...) {
+            return std::unexpected(query_error());
+        }
+    }
+
     IMySqlCredentialsReader& credentials;
     IMySqlConnectionFactory& factory;
     std::chrono::milliseconds retry_interval;
@@ -287,6 +394,12 @@ public:
     Clock::time_point retry_at{};
     Clock::time_point health_at{};
     Clock::time_point ready_expires_at{};
+    std::optional<DailyCountWindow> desired_window;
+    std::chrono::seconds query_interval{60};
+    std::uint64_t query_revision{};
+    CollectCountReading query_result;
+    std::optional<Clock::time_point> query_completed_at;
+    Clock::time_point query_at{};
 };
 
 MySqlConfiguration::MySqlConfiguration(IMySqlCredentialsReader& credentials,
@@ -302,6 +415,11 @@ std::expected<bool, Error> MySqlConfiguration::prepare(const MySqlSettings& sett
 
 bool MySqlConfiguration::commit() noexcept {
     return state_->commit();
+}
+
+CollectCountReading MySqlConfiguration::read_daily_counts(const DailyCountWindow& window,
+    std::chrono::seconds refresh_interval) {
+    return state_->read_daily_counts(window, refresh_interval);
 }
 
 }

@@ -83,6 +83,21 @@ struct OutputDirectory final : IOutputDirectory {
     }
 };
 
+struct CountMonitor final : ICollectCountMonitor {
+    CollectCountAnalysis next;
+    std::vector<std::chrono::system_clock::time_point> observed;
+    std::vector<std::chrono::system_clock::time_point> settings_updates;
+
+    CollectCountAnalysis collect(std::chrono::system_clock::time_point timestamp) override {
+        observed.push_back(timestamp);
+        return next;
+    }
+
+    void settings_changed(std::chrono::system_clock::time_point timestamp) override {
+        settings_updates.push_back(timestamp);
+    }
+};
+
 bool has_error(const ResourceSnapshot& snapshot, const std::string& code) {
     return std::ranges::any_of(snapshot.errors, [&](const Error& error) {
         return error.code == code;
@@ -120,6 +135,87 @@ void initialization_tests() {
     CHECK(store.attempts.size() == 1);
     CHECK(store.attempts.front().status == MetricStatus::ok);
     CHECK(store.attempts.front().timestamp == sample(1).timestamp);
+    CHECK(result->collect_count.status == CollectCountStatus::disabled);
+}
+
+void count_analysis_tests() {
+    Reader reader;
+    Store store;
+    Config config;
+    CountMonitor monitor;
+    monitor.next.status = CollectCountStatus::pending;
+    CollectAndStore use_case(reader, store, config, &monitor);
+    CHECK(!use_case.run());
+    CHECK(monitor.observed.empty());
+    use_case.settings_changed(sample(0).timestamp);
+    CHECK(monitor.settings_updates.empty());
+    CHECK(use_case.initialize());
+    CHECK(monitor.observed == std::vector{sample(0).timestamp});
+    CHECK(store.attempts.empty());
+    const auto initial_reads = reader.reads;
+    use_case.settings_changed(sample(1).timestamp);
+    CHECK(monitor.settings_updates == std::vector{sample(1).timestamp});
+    CHECK(reader.reads == initial_reads && store.attempts.empty());
+
+    monitor.next = *analyze_collect_counts({{"10.1.0.1", 110, 100, true, true}}, 10.0);
+    monitor.next.window = {20261018, 20261017};
+    monitor.next.queried_at = sample(0).timestamp;
+    reader.next = sample(1);
+    auto result = use_case.run();
+    CHECK(result);
+    CHECK(result->status == MetricStatus::warning);
+    CHECK(result->collection_status == CollectionStatus::ok);
+    CHECK(result->cpu.status == MetricStatus::ok);
+    CHECK(result->memory.status == MetricStatus::ok);
+    CHECK(result->filesystems.front().status == MetricStatus::ok);
+    CHECK(result->collect_count.status == CollectCountStatus::warning);
+    CHECK(result->collect_count.window == monitor.next.window);
+    CHECK(result->collect_count.queried_at == monitor.next.queried_at);
+    CHECK(result->collect_count.alerts.size() == 1);
+    CHECK(result->collect_count.alerts.front().change_percent == 10.0);
+    CHECK(store.attempts.back().collect_count.alerts.front().eqp_ip == "10.1.0.1");
+
+    monitor.next.status = CollectCountStatus::error;
+    monitor.next.alerts.clear();
+    monitor.next.error = Error{"collect_count", "CloudESM.SUM_COLLECT_INFO_1DAY",
+        "query_failed", "Database unavailable"};
+    reader.next = sample(2);
+    result = use_case.run();
+    CHECK(result);
+    CHECK(result->status == MetricStatus::unknown);
+    CHECK(result->collection_status == CollectionStatus::ok);
+    CHECK(result->cpu.usage_percent == 50.0);
+    CHECK(result->memory.usage_percent == 60.0);
+    CHECK(result->collect_count.error->code == "query_failed");
+    CHECK(has_error(*result, "query_failed"));
+    CHECK(store.attempts.back().status == MetricStatus::unknown);
+    CHECK(has_error(store.attempts.back(), "query_failed"));
+
+    reader.next = sample(3);
+    reader.next.memory.value = MemoryCounters{1000, 100};
+    result = use_case.run();
+    CHECK(result);
+    CHECK(result->status == MetricStatus::warning);
+    CHECK(result->collection_status == CollectionStatus::ok);
+    CHECK(result->collect_count.status == CollectCountStatus::error);
+
+    monitor.next = {};
+    std::uint64_t minute = 4;
+    for (const auto state : {CollectCountStatus::pending, CollectCountStatus::no_data,
+        CollectCountStatus::ok, CollectCountStatus::disabled}) {
+        monitor.next.status = state;
+        reader.next = sample(minute++);
+        result = use_case.run();
+        CHECK(result);
+        CHECK(result->collection_status == CollectionStatus::ok);
+        CHECK(result->status == (state == CollectCountStatus::ok || state == CollectCountStatus::disabled
+            ? MetricStatus::ok : MetricStatus::unknown));
+        CHECK(result->collect_count.status == state);
+        CHECK(result->errors.empty());
+    }
+    CHECK(store.attempts.size() == 7);
+    CHECK(monitor.observed.size() == 8);
+    CHECK(monitor.observed.back() == sample(7).timestamp);
 }
 
 void reload_tests() {
@@ -540,6 +636,7 @@ void accepted_settings_survive_later_failure_test() {
 int main() {
     return test::run([] {
         initialization_tests();
+        count_analysis_tests();
         reload_tests();
         partial_failure_tests();
         write_failure_baseline_test();

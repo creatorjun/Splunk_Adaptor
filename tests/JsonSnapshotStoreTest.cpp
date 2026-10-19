@@ -11,6 +11,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <sys/stat.h>
 #include <sys/resource.h>
@@ -163,6 +164,74 @@ void check_timezone_snapshots() {
     check_no_temporary_files(directory.path);
 }
 
+void check_collect_count_snapshots() {
+    ScopedTimezone scoped_zone("KST-9");
+    TemporaryDirectory directory;
+    monitor::JsonSnapshotStore store(directory.path);
+    auto snapshot = make_snapshot();
+    const auto maximum = std::numeric_limits<std::uint64_t>::max();
+    snapshot.collect_count = *monitor::analyze_collect_counts({
+        {"10.1.0.1", maximum, 0, true, false},
+        {"10.1.0.2", 0, maximum, false, true},
+        {"10.1.0.3", 110, 100, true, true}}, 10.0);
+    snapshot.collect_count.window = {20261013, 20261012};
+    snapshot.collect_count.queried_at = snapshot.timestamp - std::chrono::milliseconds(123);
+    CHECK(store.save(snapshot));
+    const auto json = read_json(directory.path / "20261014T213400+0900.json");
+    const auto& analysis = json["collect_count"];
+    CHECK(analysis["source"] == "CloudESM.SUM_COLLECT_INFO_1DAY");
+    CHECK(analysis["status"] == "warning");
+    CHECK(analysis["current_day"] == 20261013);
+    CHECK(analysis["previous_day"] == 20261012);
+    CHECK(analysis["threshold_percent"] == 10.0);
+    CHECK(analysis["queried_at"] == "2026-10-14T21:33:59.877+09:00");
+    CHECK(analysis["equipment_count"] == 3);
+    CHECK(analysis["error"].is_null());
+    CHECK(analysis["alerts"].size() == 3);
+    const auto& first = analysis["alerts"][0];
+    CHECK(first["eqp_ip"] == "10.1.0.1");
+    CHECK(first["current_count"].is_number_unsigned());
+    CHECK(first["current_count"].get<std::uint64_t>() == maximum);
+    CHECK(first["previous_count"] == 0);
+    CHECK(first["current_present"] == true);
+    CHECK(first["previous_present"] == false);
+    CHECK(first["change_percent"].is_null());
+    CHECK(first["reason"] == "baseline_zero");
+    const auto& second = analysis["alerts"][1];
+    CHECK(second["current_count"] == 0);
+    CHECK(second["previous_count"].get<std::uint64_t>() == maximum);
+    CHECK(second["current_present"] == false);
+    CHECK(second["previous_present"] == true);
+    CHECK(second["change_percent"] == -100.0);
+    CHECK(second["reason"] == "decrease");
+    CHECK(analysis["alerts"][2]["change_percent"] == 10.0);
+    CHECK(analysis["alerts"][2]["reason"] == "increase");
+
+    scoped_zone.set("NST3:30");
+    CHECK(store.save(snapshot));
+    const auto shifted = read_json(directory.path / "20261014T090400-0330.json");
+    CHECK(shifted["collect_count"]["queried_at"] == "2026-10-14T09:03:59.877-03:30");
+    CHECK(shifted["collect_count"]["current_day"] == 20261013);
+    CHECK(shifted["collect_count"]["previous_day"] == 20261012);
+
+    snapshot.timestamp += std::chrono::seconds(1);
+    snapshot.collect_count.status = monitor::CollectCountStatus::error;
+    snapshot.collect_count.alerts.clear();
+    snapshot.collect_count.error = monitor::Error{"collect_count",
+        "CloudESM.SUM_COLLECT_INFO_1DAY", "query_failed", "Database unavailable"};
+    CHECK(store.save(snapshot));
+    const auto failed = read_json(directory.path / "20261014T090401-0330.json");
+    CHECK(failed["collect_count"]["status"] == "error");
+    CHECK(failed["collect_count"]["alerts"].empty());
+    const auto& error = failed["collect_count"]["error"];
+    CHECK(error["component"] == "collect_count");
+    CHECK(error["target"] == "CloudESM.SUM_COLLECT_INFO_1DAY");
+    CHECK(error["code"] == "query_failed");
+    CHECK(error["message"] == "Database unavailable");
+    CHECK(failed["cpu"]["usage_percent"] == *snapshot.cpu.usage_percent);
+    check_no_temporary_files(directory.path);
+}
+
 }
 
 int main() {
@@ -197,6 +266,16 @@ int main() {
         CHECK(json["filesystems"][1]["total_bytes"].is_null());
         CHECK(json["filesystems"][1]["usage_percent"].is_null());
         CHECK(json["errors"][0]["code"] == "statvfs_failed");
+        CHECK(json["collect_count"]["source"] == "CloudESM.SUM_COLLECT_INFO_1DAY");
+        CHECK(json["collect_count"]["status"] == "disabled");
+        CHECK(json["collect_count"]["current_day"].is_null());
+        CHECK(json["collect_count"]["previous_day"].is_null());
+        CHECK(json["collect_count"]["queried_at"].is_null());
+        CHECK(json["collect_count"]["threshold_percent"] == 10.0);
+        CHECK(json["collect_count"]["equipment_count"] == 0);
+        CHECK(json["collect_count"]["alerts"].is_array());
+        CHECK(json["collect_count"]["alerts"].empty());
+        CHECK(json["collect_count"]["error"].is_null());
 
         snapshot.hostname = "second-host";
         CHECK(store.save(snapshot));
@@ -393,5 +472,6 @@ int main() {
         check_no_temporary_files(blocked_directory.path);
         check_no_temporary_files(invalid_directory.path);
         check_timezone_snapshots();
+        check_collect_count_snapshots();
     });
 }

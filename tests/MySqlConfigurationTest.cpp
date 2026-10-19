@@ -33,6 +33,11 @@ struct Attempt {
     MySqlCredentials credentials;
 };
 
+struct QueryAttempt {
+    std::size_t session;
+    DailyCountWindow window;
+};
+
 struct Control {
     std::mutex mutex;
     std::condition_variable wake;
@@ -40,7 +45,12 @@ struct Control {
     bool fail_connect{};
     bool throw_connect{};
     bool signals_masked{};
+    bool query_blocked{};
+    bool fail_query{};
+    bool throw_query{};
+    std::uint64_t current_count{110};
     std::vector<Attempt> attempts;
+    std::vector<QueryAttempt> queries;
     std::set<std::size_t> live;
     std::set<std::size_t> closed;
     std::set<std::size_t> fail_probe;
@@ -66,6 +76,21 @@ struct Session final : IMySqlSession {
             return std::unexpected(Error{"mysql", "connection", "2006", "Database health check failed"});
         }
         return {};
+    }
+
+    std::expected<std::vector<DailyCountPair>, Error> read_daily_counts(
+        const DailyCountWindow& window) override {
+        std::unique_lock lock(state.mutex);
+        state.queries.push_back({id, window});
+        const auto current_count = state.current_count;
+        state.wake.wait_for(lock, 15s, [&] { return !state.query_blocked; });
+        if (state.throw_query) {
+            throw std::runtime_error("sensitive query exception");
+        }
+        if (state.fail_query) {
+            return std::unexpected(Error{"collect_count", "table", "query_failed", "Query failed"});
+        }
+        return std::vector<DailyCountPair>{{"192.0.2.1", current_count, 100, true, true}};
     }
 
     Control& state;
@@ -103,6 +128,14 @@ struct Factory final : IMySqlConnectionFactory {
         {
             std::lock_guard lock(state.mutex);
             state.blocked = false;
+        }
+        state.wake.notify_all();
+    }
+
+    void release_query() {
+        {
+            std::lock_guard lock(state.mutex);
+            state.query_blocked = false;
         }
         state.wake.notify_all();
     }
@@ -331,6 +364,174 @@ void exception_redaction_tests() {
     CHECK(result.error().message.find("sensitive") == std::string::npos);
 }
 
+void query_initialization_and_refresh_tests() {
+    Reader reader;
+    Factory factory;
+    factory.state.blocked = true;
+    MySqlConfiguration configuration(reader, factory, 20ms, 5s);
+    const auto settings = enabled_settings();
+    const DailyCountWindow window{20261018, 20261017};
+    CHECK(configuration.read_daily_counts(window, 1s).status == CollectCountReadStatus::pending);
+    CHECK(factory.inspect([](const Control& state) { return state.queries.empty(); }));
+    CHECK(!configuration.prepare(settings).value());
+    CHECK(configuration.read_daily_counts(window, 1s).status == CollectCountReadStatus::pending);
+    factory.release();
+    wait_ready(configuration, settings);
+    CHECK(configuration.commit());
+    wait_for([&] {
+        return configuration.read_daily_counts(window, 1s).status == CollectCountReadStatus::ready;
+    });
+    const auto first = configuration.read_daily_counts(window, 1s);
+    CHECK(first.queried_at.has_value());
+    CHECK(first.counts.size() == 1 && first.counts.front().current_count == 110);
+    factory.inspect([](Control& state) { state.current_count = 125; });
+    wait_for([&] {
+        const auto current = configuration.read_daily_counts(window, 1s);
+        return current.status == CollectCountReadStatus::ready
+            && current.counts.front().current_count == 125;
+    });
+    CHECK(factory.inspect([](const Control& state) {
+        return state.attempts.size() == 1 && state.queries.size() >= 2;
+    }));
+    CHECK(configuration.read_daily_counts(window, 0s).status == CollectCountReadStatus::error);
+}
+
+void query_disable_and_window_change_tests() {
+    Reader reader;
+    Factory factory;
+    MySqlConfiguration configuration(reader, factory, 20ms, 5s);
+    auto settings = enabled_settings();
+    wait_ready(configuration, settings);
+    CHECK(configuration.commit());
+    const DailyCountWindow first_window{20261018, 20261017};
+    const DailyCountWindow second_window{20261019, 20261018};
+    factory.inspect([](Control& state) { state.query_blocked = true; });
+    CHECK(configuration.read_daily_counts(first_window, 1s).status == CollectCountReadStatus::pending);
+    wait_for([&] { return factory.inspect([](const Control& state) { return state.queries.size() == 1; }); });
+    factory.inspect([](Control& state) { state.current_count = 140; });
+    CHECK(configuration.read_daily_counts(second_window, 1s).status == CollectCountReadStatus::pending);
+    factory.release_query();
+    wait_for([&] {
+        const auto result = configuration.read_daily_counts(second_window, 1s);
+        return result.status == CollectCountReadStatus::ready
+            && result.counts.front().current_count == 140;
+    });
+    CHECK(factory.inspect([&](const Control& state) {
+        return state.queries.size() == 2 && state.queries.back().window == second_window;
+    }));
+    factory.inspect([](Control& state) { state.query_blocked = true; });
+    CHECK(configuration.read_daily_counts(first_window, 1s).status == CollectCountReadStatus::pending);
+    wait_for([&] { return factory.inspect([](const Control& state) { return state.queries.size() == 3; }); });
+    const auto started = std::chrono::steady_clock::now();
+    settings.enabled = false;
+    CHECK(configuration.prepare(settings).value());
+    CHECK(configuration.commit());
+    CHECK(std::chrono::steady_clock::now() - started < 100ms);
+    CHECK(configuration.read_daily_counts(first_window, 1s).status == CollectCountReadStatus::pending);
+    factory.release_query();
+    wait_for([&] { return factory.inspect([](const Control& state) { return state.live.empty(); }); });
+    CHECK(configuration.read_daily_counts(first_window, 1s).counts.empty());
+    std::this_thread::sleep_for(30ms);
+    CHECK(factory.inspect([](const Control& state) { return state.queries.size() == 3; }));
+}
+
+void query_connection_rotation_tests() {
+    Reader reader;
+    Factory factory;
+    MySqlConfiguration configuration(reader, factory, 20ms, 5s);
+    auto settings = enabled_settings();
+    wait_ready(configuration, settings);
+    CHECK(configuration.commit());
+    settings.host = "new-query-host";
+    wait_ready(configuration, settings);
+    const DailyCountWindow window{20261018, 20261017};
+    factory.inspect([](Control& state) { state.query_blocked = true; });
+    CHECK(configuration.read_daily_counts(window, 1s).status == CollectCountReadStatus::pending);
+    wait_for([&] { return factory.inspect([](const Control& state) { return state.queries.size() == 1; }); });
+    CHECK(configuration.commit());
+    CHECK(configuration.read_daily_counts(window, 1s).status == CollectCountReadStatus::pending);
+    factory.inspect([](Control& state) { state.current_count = 160; });
+    factory.release_query();
+    wait_for([&] {
+        const auto result = configuration.read_daily_counts(window, 1s);
+        return result.status == CollectCountReadStatus::ready
+            && result.counts.front().current_count == 160;
+    });
+    CHECK(factory.inspect([](const Control& state) {
+        return state.queries.size() == 2 && state.queries[0].session == 1
+            && state.queries[1].session == 2;
+    }));
+}
+
+void query_error_and_recovery_tests() {
+    Reader reader;
+    Factory factory;
+    MySqlConfiguration configuration(reader, factory, 1200ms, 5s);
+    const auto settings = enabled_settings();
+    wait_ready(configuration, settings);
+    CHECK(configuration.commit());
+    const DailyCountWindow window{20261018, 20261017};
+    factory.inspect([](Control& state) { state.throw_query = true; });
+    wait_for([&] {
+        return configuration.read_daily_counts(window, 1s).status == CollectCountReadStatus::error;
+    });
+    const auto failed = configuration.read_daily_counts(window, 1s);
+    CHECK(failed.counts.empty() && failed.error.has_value());
+    CHECK(failed.error->message.find("sensitive") == std::string::npos);
+    std::this_thread::sleep_for(100ms);
+    CHECK(factory.inspect([](const Control& state) { return state.queries.size() == 1; }));
+    factory.inspect([](Control& state) { state.throw_query = false; });
+    wait_for([&] {
+        return configuration.read_daily_counts(window, 1s).status == CollectCountReadStatus::ready;
+    });
+    CHECK(!configuration.read_daily_counts(window, 1s).error.has_value());
+    CHECK(factory.inspect([](const Control& state) { return state.attempts.size() == 1; }));
+}
+
+void query_stale_cache_tests() {
+    Reader reader;
+    Factory factory;
+    MySqlConfiguration configuration(reader, factory, 20ms, 20s);
+    const auto settings = enabled_settings();
+    wait_ready(configuration, settings);
+    CHECK(configuration.commit());
+    const DailyCountWindow window{20261018, 20261017};
+    wait_for([&] {
+        return configuration.read_daily_counts(window, 1s).status == CollectCountReadStatus::ready;
+    });
+    factory.inspect([](Control& state) { state.query_blocked = true; });
+    wait_for([&] { return factory.inspect([](const Control& state) { return state.queries.size() == 2; }); });
+    std::this_thread::sleep_for(10s);
+    const auto started = std::chrono::steady_clock::now();
+    const auto stale = configuration.read_daily_counts(window, 1s);
+    CHECK(std::chrono::steady_clock::now() - started < 100ms);
+    CHECK(stale.status == CollectCountReadStatus::pending && stale.counts.empty());
+    CHECK(stale.queried_at.has_value());
+    factory.release_query();
+    wait_for([&] {
+        return configuration.read_daily_counts(window, 1s).status == CollectCountReadStatus::ready;
+    });
+}
+
+void query_interval_reload_tests() {
+    Reader reader;
+    Factory factory;
+    MySqlConfiguration configuration(reader, factory, 20ms, 20s);
+    const auto settings = enabled_settings();
+    wait_ready(configuration, settings);
+    CHECK(configuration.commit());
+    const DailyCountWindow window{20261018, 20261017};
+    wait_for([&] {
+        return configuration.read_daily_counts(window, 1s).status == CollectCountReadStatus::ready;
+    });
+    CHECK(configuration.read_daily_counts(window, 86400s).status == CollectCountReadStatus::ready);
+    std::this_thread::sleep_for(1200ms);
+    CHECK(factory.inspect([](const Control& state) { return state.queries.size() == 1; }));
+    configuration.read_daily_counts(window, 1s);
+    wait_for([&] { return factory.inspect([](const Control& state) { return state.queries.size() == 2; }); });
+    CHECK(factory.inspect([](const Control& state) { return state.attempts.size() == 1; }));
+}
+
 }
 
 int main() {
@@ -343,5 +544,11 @@ int main() {
         disabled_health_and_retry_tests();
         expired_candidate_tests();
         exception_redaction_tests();
+        query_initialization_and_refresh_tests();
+        query_disable_and_window_change_tests();
+        query_connection_rotation_tests();
+        query_error_and_recovery_tests();
+        query_stale_cache_tests();
+        query_interval_reload_tests();
     });
 }

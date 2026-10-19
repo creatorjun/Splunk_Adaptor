@@ -8,8 +8,8 @@
 namespace monitor {
 
 CollectAndStore::CollectAndStore(IResourceReader& reader, ISnapshotStore& store,
-    IThresholdConfigReader& config)
-    : reader_(reader), store_(store), config_(config) {
+    IThresholdConfigReader& config, ICollectCountMonitor* collect_count)
+    : reader_(reader), store_(store), config_(config), collect_count_(collect_count) {
 }
 
 std::expected<void, Error> CollectAndStore::initialize() {
@@ -25,11 +25,16 @@ std::expected<void, Error> CollectAndStore::initialize() {
     auto sample = reader_.read();
     policy_ = *configured;
     policy_applied_at_ = sample.timestamp;
+    if (collect_count_) collect_count_->collect(sample.timestamp);
     if (sample.cpu.value && !sample.cpu.error) {
         previous_cpu_ = *sample.cpu.value;
         previous_cpu_time_ = sample.cpu_observed_at;
     }
     return {};
+}
+
+void CollectAndStore::settings_changed(std::chrono::system_clock::time_point timestamp) {
+    if (policy_ && collect_count_) collect_count_->settings_changed(timestamp);
 }
 
 std::expected<ResourceSnapshot, Error> CollectAndStore::run(std::uint64_t missed_intervals) {
@@ -130,6 +135,16 @@ std::expected<ResourceSnapshot, Error> CollectAndStore::run(std::uint64_t missed
         }
     }
     summarize(snapshot, sample.filesystem_enumeration_error.has_value());
+    if (collect_count_) {
+        snapshot.collect_count = collect_count_->collect(snapshot.timestamp);
+        if (snapshot.collect_count.error) snapshot.errors.push_back(*snapshot.collect_count.error);
+        if (snapshot.collect_count.status == CollectCountStatus::warning) {
+            snapshot.status = MetricStatus::warning;
+        } else if (snapshot.collect_count.status != CollectCountStatus::ok &&
+            snapshot.collect_count.status != CollectCountStatus::disabled && snapshot.status == MetricStatus::ok) {
+            snapshot.status = MetricStatus::unknown;
+        }
+    }
     if (auto saved = store_.save(snapshot); !saved) {
         auto error = saved.error();
         for (const auto& cycle_error : snapshot.errors) {

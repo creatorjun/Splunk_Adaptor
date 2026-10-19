@@ -1,5 +1,6 @@
 // tests/DaemonRunnerTest.cpp
 #include "TestSupport.hpp"
+#include "application/SettingsController.hpp"
 #include "infrastructure/linux/UniqueFd.hpp"
 #include "runtime/DaemonRunner.hpp"
 
@@ -83,6 +84,11 @@ struct SavedRecord {
     std::uint64_t missed_intervals{};
 };
 
+struct AnalysisReloadRecord {
+    std::int64_t interval_seconds{};
+    std::size_t saved_snapshots{};
+};
+
 class FixtureReader final : public IResourceReader {
 public:
     explicit FixtureReader(std::chrono::milliseconds delay = 0ms, bool cpu_available = true)
@@ -144,6 +150,41 @@ public:
     bool fail{};
 };
 
+class ReloadingSettings final : public ISettingsReader {
+public:
+    std::expected<MonitorSettings, Error> read_settings() override {
+        MonitorSettings settings;
+        settings.collection_interval = reads_++ == 0 ? 60s : 86400s;
+        return settings;
+    }
+
+private:
+    unsigned reads_{};
+};
+
+class FixtureOutput final : public IOutputDirectory {
+public:
+    std::expected<void, Error> configure_output(const std::string&) override { return {}; }
+};
+
+class ReloadRecordingMonitor final : public ICollectCountMonitor {
+public:
+    ReloadRecordingMonitor(const SettingsController& settings, const RecordingStore& store, int descriptor)
+        : settings_(settings), store_(store), descriptor_(descriptor) {}
+
+    CollectCountAnalysis collect(std::chrono::system_clock::time_point) override { return {}; }
+
+    void settings_changed(std::chrono::system_clock::time_point) override {
+        const AnalysisReloadRecord record{settings_.current().collection_interval.count(), store_.calls};
+        CHECK(::write(descriptor_, &record, sizeof(record)) == static_cast<ssize_t>(sizeof(record)));
+    }
+
+private:
+    const SettingsController& settings_;
+    const RecordingStore& store_;
+    int descriptor_;
+};
+
 class CapturedLogs {
 public:
     CapturedLogs() : previous_output_(std::cout.rdbuf(output.rdbuf())), previous_errors_(std::cerr.rdbuf(errors.rdbuf())) {}
@@ -192,8 +233,9 @@ private:
     int descriptor_;
 };
 
-SavedRecord read_record(int descriptor) {
-    SavedRecord record;
+template <typename Record = SavedRecord>
+Record read_record(int descriptor) {
+    Record record;
     auto* data = reinterpret_cast<char*>(&record);
     std::size_t received{};
     const auto deadline = std::chrono::steady_clock::now() + 8s;
@@ -298,11 +340,48 @@ void once_status_tests() {
     run_case(50.0, true, true, "", 1);
 }
 
+void analysis_reload_before_collection_test() {
+    int descriptors[2]{};
+    CHECK(::pipe2(descriptors, O_CLOEXEC | O_NONBLOCK) == 0);
+    UniqueFd reading(descriptors[0]);
+    UniqueFd writing(descriptors[1]);
+    const auto child = ::fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        reading.reset();
+        try {
+            ReloadingSettings settings_reader;
+            FixtureOutput output;
+            SettingsController settings(settings_reader, output);
+            CHECK(settings.initialize());
+            CHECK(settings.current().collection_interval == 60s);
+            FixtureReader reader;
+            RecordingStore store;
+            ReloadRecordingMonitor monitor(settings, store, writing.get());
+            CollectAndStore use_case(reader, store, settings, &monitor);
+            const int result = run_daemon(use_case, {}, &settings);
+            ::_exit(result);
+        } catch (const std::exception& error) {
+            std::cerr << error.what() << '\n';
+            ::_exit(1);
+        }
+    }
+    ChildProcess process(child);
+    writing.reset();
+    const auto notification = read_record<AnalysisReloadRecord>(reading.get());
+    CHECK(notification.interval_seconds == 86400);
+    CHECK(notification.saved_snapshots == 0);
+    const auto status = process.stop();
+    CHECK(WIFEXITED(status));
+    CHECK(WEXITSTATUS(status) == 0);
+}
+
 }
 
 int main() {
     return test::run([] {
         runtime_overrun_test();
         once_status_tests();
+        analysis_reload_before_collection_test();
     });
 }

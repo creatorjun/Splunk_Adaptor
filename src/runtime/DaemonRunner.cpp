@@ -154,6 +154,7 @@ int run_daemon(CollectAndStore& use_case, const DaemonOptions& options,
                         skipped_intervals = 0;
                     }
                     if (*changed || recovered) {
+                        use_case.settings_changed(std::chrono::system_clock::now());
                         std::cout << (*changed ? "settings_reloaded" : "settings_recovered")
                                   << " interval_seconds=" << interval.count()
                                   << " output=" << safe_log_text(current.output_directory) << std::endl;

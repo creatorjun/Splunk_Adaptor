@@ -45,6 +45,7 @@ struct Database final : IMySqlConfiguration {
     MySqlSettings candidate;
     MySqlSettings active;
     std::size_t commits{};
+    std::size_t connection_changes{};
     bool credential_changed{false};
 
     std::expected<bool, Error> prepare(const MySqlSettings& next) override {
@@ -55,6 +56,7 @@ struct Database final : IMySqlConfiguration {
     bool commit() noexcept override {
         ++commits;
         const bool changed = active != candidate || credential_changed;
+        if (changed) ++connection_changes;
         active = candidate;
         credential_changed = false;
         return changed;
@@ -440,6 +442,52 @@ void analyzer_gate_tests() {
     CHECK(independent_output.active == "/Monitor");
 }
 
+void analyzer_settings_reload_tests() {
+    Reader reader;
+    reader.next->is_analyzer = true;
+    reader.next->mysql.database = "CloudESM";
+    Output output;
+    Database database;
+    SettingsController controller(reader, output, {}, &database);
+    CHECK(controller.initialize());
+    const auto original_mysql = database.active;
+    const auto connections = database.connection_changes;
+    CHECK(connections == 1);
+    CHECK(controller.current().analyzer == AnalyzerSettings{});
+
+    reader.next->analyzer.collect_count_change_percent = 25.5;
+    auto changed = controller.reload();
+    CHECK(changed && *changed);
+    CHECK(controller.current().analyzer.collect_count_change_percent == 25.5);
+    CHECK(controller.current().analyzer.comparison_day == ComparisonDay::yesterday);
+    CHECK(database.candidate == original_mysql);
+    CHECK(database.active == original_mysql);
+    CHECK(database.connection_changes == connections);
+    CHECK(output.attempts.size() == 1);
+
+    reader.next->analyzer.comparison_day = ComparisonDay::today;
+    changed = controller.reload();
+    CHECK(changed && *changed);
+    CHECK(controller.current().analyzer.comparison_day == ComparisonDay::today);
+    CHECK(database.connection_changes == connections);
+    CHECK(database.active == original_mysql);
+    changed = controller.reload();
+    CHECK(changed && !*changed);
+
+    const auto accepted = controller.current();
+    reader.next = std::unexpected(Error{"settings_config", "settings.json", "invalid_analyzer",
+        "Invalid analyzer threshold"});
+    CHECK(!controller.reload());
+    CHECK(controller.current() == accepted);
+    CHECK(controller.reload_error()->code == "invalid_analyzer");
+    CHECK(database.connection_changes == connections);
+    reader.next = accepted;
+    changed = controller.reload();
+    CHECK(changed && !*changed);
+    CHECK(!controller.reload_error());
+    CHECK(database.connection_changes == connections);
+}
+
 }
 
 int main() {
@@ -452,5 +500,6 @@ int main() {
         database_reload_tests();
         database_startup_tests();
         analyzer_gate_tests();
+        analyzer_settings_reload_tests();
     });
 }

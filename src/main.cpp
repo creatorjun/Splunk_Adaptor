@@ -1,5 +1,7 @@
 // src/main.cpp
 #include "application/CollectAndStore.hpp"
+#include "application/CollectCountMonitor.hpp"
+#include "infrastructure/linux/LocalDayWindow.hpp"
 #include "application/SettingsController.hpp"
 #include "infrastructure/config/JsonSettingsReader.hpp"
 #include "infrastructure/config/JsonMySqlCredentialsReader.hpp"
@@ -33,7 +35,7 @@ int main(int argc, char* argv[]) {
                 return 0;
             }
             if (argument == "--version") {
-                std::cout << "resource-monitor 1.3.3\n";
+                std::cout << "resource-monitor 1.4.0\n";
                 return 0;
             }
             if (argument == "--once") {
@@ -107,7 +109,9 @@ int main(int argc, char* argv[]) {
             return initialized.error().component == "settings_config" ? 78 : 1;
         }
         monitor::ProcResourceReader reader;
-        monitor::CollectAndStore use_case{reader, store, settings};
+        monitor::LocalDayWindow calendar;
+        monitor::CollectCountMonitor collect_count{database, settings, calendar};
+        monitor::CollectAndStore use_case{reader, store, settings, &collect_count};
         return monitor::run_daemon(use_case, options, &settings);
     } catch (const std::exception& error) {
         monitor::log_error({"runtime", "main", "unhandled_exception", error.what()});

@@ -141,6 +141,24 @@ nlohmann::json nullable(const std::optional<T>& value) {
 
 nlohmann::json serialize(const ResourceSnapshot& snapshot, const std::string& timestamp,
     const std::string& applied_at) {
+    auto alerts = nlohmann::json::array();
+    for (const auto& alert : snapshot.collect_count.alerts) {
+        alerts.push_back({{"eqp_ip", alert.eqp_ip}, {"current_count", alert.current_count},
+            {"previous_count", alert.previous_count}, {"current_present", alert.current_present},
+            {"previous_present", alert.previous_present}, {"change_percent", nullable(alert.change_percent)},
+            {"reason", alert.reason}});
+    }
+    nlohmann::json queried_at = nullptr;
+    if (snapshot.collect_count.queried_at) {
+        const auto formatted = format_time(*snapshot.collect_count.queried_at, true, {});
+        if (formatted) queried_at = formatted->timestamp;
+    }
+    nlohmann::json analysis_error = nullptr;
+    if (snapshot.collect_count.error) {
+        const auto& error = *snapshot.collect_count.error;
+        analysis_error = {{"component", error.component}, {"target", error.target},
+            {"code", error.code}, {"message", error.message}};
+    }
     auto filesystems = nlohmann::json::array();
     for (const auto& filesystem : snapshot.filesystems) {
         filesystems.push_back({
@@ -190,6 +208,17 @@ nlohmann::json serialize(const ResourceSnapshot& snapshot, const std::string& ti
             {"usage_percent", nullable(snapshot.memory.usage_percent)}
         }},
         {"filesystems", std::move(filesystems)},
+        {"collect_count", {
+            {"source", "CloudESM.SUM_COLLECT_INFO_1DAY"},
+            {"status", to_string(snapshot.collect_count.status)},
+            {"current_day", snapshot.collect_count.window.current_day == 0 ? nlohmann::json(nullptr) : nlohmann::json(snapshot.collect_count.window.current_day)},
+            {"previous_day", snapshot.collect_count.window.previous_day == 0 ? nlohmann::json(nullptr) : nlohmann::json(snapshot.collect_count.window.previous_day)},
+            {"threshold_percent", snapshot.collect_count.threshold_percent},
+            {"queried_at", std::move(queried_at)},
+            {"equipment_count", snapshot.collect_count.equipment_count},
+            {"alerts", std::move(alerts)},
+            {"error", std::move(analysis_error)}
+        }},
         {"errors", std::move(errors)}
     };
 }

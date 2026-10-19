@@ -46,6 +46,11 @@ std::string document_with_mysql(const std::string& mysql, const std::string& ana
         + mysql + (analyzer.empty() ? "" : ",\"is_analyzer\":" + analyzer) + "}";
 }
 
+std::string document_with_analyzer(const std::string& analyzer) {
+    return R"({"schema_version":1,"thresholds":{"cpu_usage_percent":80,"memory_usage_percent":85.5,"storage_usage_percent":90},"analyzer":)"
+        + analyzer + "}";
+}
+
 void check_failure(monitor::JsonSettingsReader& reader, const std::filesystem::path& path) {
     const auto settings = reader.read_settings();
     CHECK(!settings);
@@ -74,12 +79,72 @@ int main() {
         CHECK(settings->output_directory == "/Monitor");
         CHECK(settings->mysql == monitor::MySqlSettings{});
         CHECK(!settings->is_analyzer);
+        CHECK(settings->analyzer.collect_count_change_percent == 10.0);
+        CHECK(settings->analyzer.comparison_day == monitor::ComparisonDay::yesterday);
         auto policy = reader.read();
         CHECK(policy);
         CHECK(settings->thresholds == *policy);
         CHECK(test::near(policy->cpu_usage_percent, 80));
         CHECK(test::near(policy->memory_usage_percent, 85.5));
         CHECK(test::near(policy->storage_usage_percent, 90));
+
+        write_file(path, document_with_analyzer("{}"));
+        settings = reader.read_settings();
+        CHECK(settings);
+        CHECK(settings->analyzer == monitor::AnalyzerSettings{});
+        for (const auto& threshold : {"0.000001", "10", "101.5", "1000000"}) {
+            write_file(path, document_with_analyzer(
+                "{\"collect_count_change_percent\":" + std::string{threshold} + "}"));
+            settings = reader.read_settings();
+            CHECK(settings);
+            CHECK(settings->analyzer.collect_count_change_percent == std::stod(threshold));
+            CHECK(settings->analyzer.comparison_day == monitor::ComparisonDay::yesterday);
+            CHECK(!settings->is_analyzer);
+        }
+        for (const auto& day : {"today", "yesterday"}) {
+            write_file(path, document_with_analyzer(
+                "{\"comparison_day\":\"" + std::string{day} + "\"}"));
+            settings = reader.read_settings();
+            CHECK(settings);
+            CHECK(settings->analyzer.collect_count_change_percent == 10.0);
+            CHECK(settings->analyzer.comparison_day == (std::string{day} == "today"
+                ? monitor::ComparisonDay::today : monitor::ComparisonDay::yesterday));
+        }
+        write_file(path, document_with_analyzer(
+            R"({"collect_count_change_percent":12.5,"comparison_day":"today"})"));
+        settings = reader.read_settings();
+        CHECK(settings);
+        CHECK(settings->analyzer.collect_count_change_percent == 12.5);
+        CHECK(settings->analyzer.comparison_day == monitor::ComparisonDay::today);
+        CHECK(settings->thresholds == *policy);
+        const std::vector<std::string> invalid_analyzer{
+            "null", "true", "1", "\"analyzer\"", "[]",
+            R"({"typo":10})",
+            R"({"collect_count_change_percent":0})",
+            R"({"collect_count_change_percent":-0.1})",
+            R"({"collect_count_change_percent":1000000.1})",
+            R"({"collect_count_change_percent":1e400})",
+            R"({"collect_count_change_percent":18446744073709551615})",
+            R"({"collect_count_change_percent":true})",
+            R"({"collect_count_change_percent":null})",
+            R"({"collect_count_change_percent":"10"})",
+            R"({"collect_count_change_percent":[]})",
+            R"({"collect_count_change_percent":{}})",
+            R"({"collect_count_change_percent":10,"collect_count_change_percent":20})",
+            R"({"comparison_day":"tomorrow"})",
+            R"({"comparison_day":"Today"})",
+            R"({"comparison_day":""})",
+            R"({"comparison_day":true})",
+            R"({"comparison_day":1})",
+            R"({"comparison_day":null})",
+            R"({"comparison_day":[]})",
+            R"({"comparison_day":{}})",
+            R"({"comparison_day":"today","comparison_day":"yesterday"})"
+        };
+        for (const auto& analyzer : invalid_analyzer) {
+            write_file(path, document_with_analyzer(analyzer));
+            check_failure(reader, path);
+        }
 
         write_file(path, document_with_collection(R"({"interval_seconds":15,"output_directory":"/var/lib/resource-monitor snapshots"})"));
         settings = reader.read_settings();

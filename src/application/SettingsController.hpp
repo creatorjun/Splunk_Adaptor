@@ -5,6 +5,7 @@
 #include "application/ports/IMySqlConfiguration.hpp"
 #include "application/ports/ISettingsReader.hpp"
 #include "application/ports/IThresholdConfigReader.hpp"
+#include "application/ports/IMonitorSettingsProvider.hpp"
 
 #include <optional>
 
@@ -15,13 +16,13 @@ struct SettingsOverrides {
     std::optional<std::string> output_directory;
 };
 
-class SettingsController final : public IThresholdConfigReader {
+class SettingsController final : public IThresholdConfigReader, public IMonitorSettingsProvider {
 public:
     SettingsController(ISettingsReader& reader, IOutputDirectory& output,
         SettingsOverrides overrides = {}, IMySqlConfiguration* mysql = nullptr);
     std::expected<void, Error> initialize();
     std::expected<bool, Error> reload();
-    const MonitorSettings& current() const;
+    const MonitorSettings& current() const override;
     std::expected<ThresholdPolicy, Error> read() override;
     std::optional<Error> reload_error() const override;
 

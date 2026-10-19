@@ -2,6 +2,7 @@
 #pragma once
 
 #include "application/MySqlSettings.hpp"
+#include "application/AnalyzerSettings.hpp"
 #include "domain/ThresholdPolicy.hpp"
 
 #include <chrono>
@@ -15,6 +16,7 @@ struct MonitorSettings {
     std::string output_directory{"/Monitor"};
     MySqlSettings mysql{};
     bool is_analyzer{false};
+    AnalyzerSettings analyzer{};
 
     bool operator==(const MonitorSettings&) const = default;
 };

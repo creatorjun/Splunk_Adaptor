@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cerrno>
+#include <cmath>
 #include <cstdint>
 #include <fcntl.h>
 #include <set>
@@ -116,7 +117,7 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::read_settings() {
             return std::unexpected(config_error(path_, "invalid_schema", "Expected schema_version, thresholds, and optional is_analyzer, collection and mysql"));
         }
         for (const auto& [key, value] : json.items()) {
-            if (key != "schema_version" && key != "thresholds" && key != "collection" && key != "mysql" && key != "is_analyzer") {
+            if (key != "schema_version" && key != "thresholds" && key != "collection" && key != "mysql" && key != "is_analyzer" && key != "analyzer") {
                 return std::unexpected(config_error(path_, "invalid_schema", "Unknown configuration key"));
             }
         }
@@ -150,6 +151,35 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::read_settings() {
                 return std::unexpected(config_error(path_, "invalid_schema", "is_analyzer must be a boolean"));
             }
             settings.is_analyzer = json["is_analyzer"].get<bool>();
+        }
+        if (json.contains("analyzer")) {
+            const auto& analyzer = json["analyzer"];
+            if (!analyzer.is_object()) {
+                return std::unexpected(config_error(path_, "invalid_analyzer", "analyzer must be an object"));
+            }
+            for (const auto& [key, value] : analyzer.items()) {
+                if (key != "collect_count_change_percent" && key != "comparison_day") {
+                    return std::unexpected(config_error(path_, "invalid_analyzer", "Unknown analyzer setting"));
+                }
+            }
+            if (analyzer.contains("collect_count_change_percent")) {
+                const auto& value = analyzer["collect_count_change_percent"];
+                if (!value.is_number()) {
+                    return std::unexpected(config_error(path_, "invalid_analyzer", "collect_count_change_percent must be numeric"));
+                }
+                const double threshold = value.get<double>();
+                if (!std::isfinite(threshold) || threshold <= 0 || threshold > 1000000) {
+                    return std::unexpected(config_error(path_, "invalid_analyzer", "collect_count_change_percent must be greater than 0 and at most 1000000"));
+                }
+                settings.analyzer.collect_count_change_percent = threshold;
+            }
+            if (analyzer.contains("comparison_day")) {
+                const auto& value = analyzer["comparison_day"];
+                if (!value.is_string() || (value != "today" && value != "yesterday")) {
+                    return std::unexpected(config_error(path_, "invalid_analyzer", "comparison_day must be today or yesterday"));
+                }
+                settings.analyzer.comparison_day = value == "today" ? ComparisonDay::today : ComparisonDay::yesterday;
+            }
         }
         if (json.contains("collection")) {
             const auto& collection = json["collection"];

@@ -1,5 +1,6 @@
 // src/infrastructure/database/MariaDbConnectionFactory.cpp
 #include "infrastructure/database/MariaDbConnectionFactory.hpp"
+#include "infrastructure/database/CollectCountQuery.hpp"
 
 #include <mysql.h>
 
@@ -65,6 +66,42 @@ public:
                 "Database health result was invalid"});
         }
         return {};
+    }
+
+    std::expected<std::vector<DailyCountPair>, Error> read_daily_counts(const DailyCountWindow& window) override {
+        const auto query = make_collect_count_query(window);
+        if (!query) {
+            return std::unexpected(query.error());
+        }
+        if (::mysql_real_query(connection_.get(), query->data(), static_cast<unsigned long>(query->size())) != 0) {
+            return std::unexpected(database_error(connection_.get(), "Daily collection count query failed"));
+        }
+        std::unique_ptr<MYSQL_RES, FreeResult> result(::mysql_use_result(connection_.get()));
+        if (!result || ::mysql_num_fields(result.get()) != CollectCountQueryRow{}.size()) {
+            return std::unexpected(Error{"collect_count", "CloudESM.SUM_COLLECT_INFO_1DAY", "invalid_query_result",
+                "Daily collection count result was invalid"});
+        }
+        CollectCountQueryResult decoded;
+        while (const auto row = ::mysql_fetch_row(result.get())) {
+            const auto lengths = ::mysql_fetch_lengths(result.get());
+            if (!lengths) {
+                return std::unexpected(Error{"collect_count", "CloudESM.SUM_COLLECT_INFO_1DAY", "invalid_query_result",
+                    "Daily collection count result was invalid"});
+            }
+            CollectCountQueryRow fields;
+            for (std::size_t index = 0; index < fields.size(); ++index) {
+                if (row[index]) {
+                    fields[index] = std::string_view{row[index], lengths[index]};
+                }
+            }
+            if (const auto appended = decoded.append(fields); !appended) {
+                return std::unexpected(appended.error());
+            }
+        }
+        if (::mysql_errno(connection_.get()) != 0) {
+            return std::unexpected(database_error(connection_.get(), "Daily collection count result read failed"));
+        }
+        return std::move(decoded).take();
     }
 
 private:
