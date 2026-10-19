@@ -177,7 +177,7 @@ public:
                 request.reset();
                 working_generation = task.generation;
                 lock.unlock();
-                auto connected = connect(task.identity);
+                auto connected = connect(task);
                 lock.lock();
                 working_generation.reset();
                 if (!stopping && generation == task.generation && desired && *desired == task.identity) {
@@ -229,14 +229,20 @@ public:
         lock.unlock();
     }
 
-    std::expected<std::shared_ptr<IMySqlSession>, Error> connect(const Identity& identity) {
+    std::expected<std::shared_ptr<IMySqlSession>, Error> connect(const Request& task) {
         try {
-            auto result = factory.connect(identity.settings, identity.credentials);
+            auto result = factory.connect(task.identity.settings, task.identity.credentials);
             if (!result) {
                 return std::unexpected(result.error());
             }
             if (!*result) {
                 return std::unexpected(worker_error());
+            }
+            {
+                std::lock_guard lock(mutex);
+                if (stopping || generation != task.generation || !desired || *desired != task.identity) {
+                    return std::unexpected(worker_error());
+                }
             }
             auto verified = (*result)->probe();
             if (!verified) {

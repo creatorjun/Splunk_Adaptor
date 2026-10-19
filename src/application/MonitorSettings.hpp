@@ -14,6 +14,9 @@ struct MonitorSettings {
     std::chrono::seconds collection_interval{60};
     std::string output_directory{"/Monitor"};
     MySqlSettings mysql{};
+    bool is_analyzer{false};
+
+    bool mysql_enabled() const noexcept { return is_analyzer && mysql.enabled; }
 
     bool operator==(const MonitorSettings&) const = default;
 };

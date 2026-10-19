@@ -287,6 +287,7 @@ void database_reload_tests() {
     SettingsController controller(reader, output, {}, &database);
     CHECK(controller.initialize());
     const auto previous = controller.current();
+    reader.next->is_analyzer = true;
     reader.next->mysql.enabled = true;
     reader.next->mysql.database = "monitoring";
     reader.next->collection_interval = std::chrono::seconds{2};
@@ -329,6 +330,7 @@ void database_reload_tests() {
 void database_startup_tests() {
     for (const bool pending : {true, false}) {
         Reader reader;
+        reader.next->is_analyzer = true;
         reader.next->mysql.enabled = true;
         reader.next->mysql.database = "monitoring";
         Output output;
@@ -353,11 +355,89 @@ void database_startup_tests() {
         CHECK(!controller.reload_error());
     }
     Reader reader;
+    reader.next->is_analyzer = true;
     reader.next->mysql.enabled = true;
     Output output;
     SettingsController controller(reader, output);
     CHECK(!controller.initialize());
     CHECK(output.attempts.empty());
+}
+
+void analyzer_gate_tests() {
+    for (const bool analyzer : {false, true}) {
+        for (const bool enabled : {false, true}) {
+            Reader reader;
+            reader.next->is_analyzer = analyzer;
+            reader.next->mysql.enabled = enabled;
+            Output output;
+            Database database;
+            SettingsController controller(reader, output, {}, &database);
+            CHECK(controller.initialize());
+            CHECK(controller.current().is_analyzer == analyzer);
+            CHECK(controller.current().mysql.enabled == (analyzer && enabled));
+            CHECK(database.candidate.enabled == (analyzer && enabled));
+            CHECK(database.active.enabled == (analyzer && enabled));
+            CHECK(!controller.reload_error());
+            const auto unchanged = controller.reload();
+            CHECK(unchanged && !*unchanged);
+        }
+    }
+
+    Reader reader;
+    reader.next->mysql.enabled = true;
+    reader.next->mysql.database = "monitoring";
+    Output output;
+    Database database;
+    SettingsController controller(reader, output, {}, &database);
+    CHECK(controller.initialize());
+    CHECK(!controller.current().is_analyzer);
+    CHECK(!controller.current().mysql.enabled);
+    CHECK(reader.next->mysql.enabled);
+    CHECK(!database.active.enabled);
+
+    reader.next->is_analyzer = true;
+    database.prepared = false;
+    CHECK(!controller.reload());
+    CHECK(!controller.current().is_analyzer);
+    CHECK(!controller.current().mysql.enabled);
+    CHECK(controller.reload_error()->code == "connection_pending");
+    database.prepared = true;
+    auto changed = controller.reload();
+    CHECK(changed && *changed);
+    CHECK(controller.current().is_analyzer);
+    CHECK(controller.current().mysql.enabled);
+    CHECK(database.active.enabled);
+
+    reader.next->is_analyzer = false;
+    changed = controller.reload();
+    CHECK(changed && *changed);
+    CHECK(!controller.current().is_analyzer);
+    CHECK(!controller.current().mysql.enabled);
+    CHECK(!database.active.enabled);
+    CHECK(reader.next->mysql.enabled);
+    CHECK(!controller.reload_error());
+    changed = controller.reload();
+    CHECK(changed && !*changed);
+
+    reader.next->is_analyzer = true;
+    changed = controller.reload();
+    CHECK(changed && *changed);
+    CHECK(database.active.enabled);
+    reader.next->mysql.enabled = false;
+    changed = controller.reload();
+    CHECK(changed && *changed);
+    CHECK(controller.current().is_analyzer);
+    CHECK(!controller.current().mysql.enabled);
+    CHECK(!database.active.enabled);
+
+    Reader without_adapter;
+    without_adapter.next->mysql.enabled = true;
+    Output independent_output;
+    SettingsController independent(without_adapter, independent_output);
+    CHECK(independent.initialize());
+    CHECK(!independent.current().mysql.enabled);
+    CHECK(!independent.reload_error());
+    CHECK(independent_output.active == "/Monitor");
 }
 
 }
@@ -371,5 +451,6 @@ int main() {
         override_tests();
         database_reload_tests();
         database_startup_tests();
+        analyzer_gate_tests();
     });
 }

@@ -7,13 +7,14 @@ import os
 import pathlib
 import re
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
 import time
 
 
-def write_config(path, cpu=0, memory=0, storage=0, collection=None):
+def write_config(path, cpu=0, memory=0, storage=0, collection=None, is_analyzer=None, mysql=None):
     temporary = path.with_suffix('.new')
     settings = {
         'schema_version': 1,
@@ -25,6 +26,10 @@ def write_config(path, cpu=0, memory=0, storage=0, collection=None):
     }
     if collection is not None:
         settings['collection'] = collection
+    if is_analyzer is not None:
+        settings['is_analyzer'] = is_analyzer
+    if mysql is not None:
+        settings['mysql'] = mysql
     temporary.write_text(json.dumps(settings), encoding='utf-8')
     os.replace(temporary, path)
 
@@ -122,11 +127,93 @@ def validate_settings(executable, config, output):
         result = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
         assert result.returncode == 78, result.stderr
         assert 'component=settings_config' in result.stderr
+    for is_analyzer in (None, False, True):
+        for enabled in (False, True):
+            write_config(config, is_analyzer=is_analyzer, mysql={
+                'enabled': enabled,
+                'database': 'monitoring',
+                'tls_mode': 'disabled',
+                'credentials_file': str(config.parent / 'missing-mysql.json'),
+            })
+            result = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
+            requires_credentials = is_analyzer is True and enabled
+            assert result.returncode == (78 if requires_credentials else 0), result.stderr
+            if requires_credentials:
+                assert 'component=mysql_credentials' in result.stderr
+    for is_analyzer in ('true', 'false', 1, 0, [], {}):
+        write_config(config, is_analyzer=is_analyzer)
+        result = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
+        assert result.returncode == 78, result.stderr
+        assert 'component=settings_config' in result.stderr
     config.write_text('{', encoding='utf-8')
     result = subprocess.run(base + ['--once'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
     assert result.returncode == 78, result.stderr
     assert 'component=settings_config' in result.stderr
     assert not list(output.glob('*.json'))
+
+
+def analyzer_reload_test(executable, root, config):
+    output = root / 'analyzer-snapshots'
+    output.mkdir()
+    credentials = root / 'analyzer-credentials.json'
+    credentials.write_text(json.dumps({'username': 'test-fixture', 'password': 'test-fixture'}), encoding='utf-8')
+    credentials.chmod(0o600)
+    log_path = root / 'analyzer.log'
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(('127.0.0.1', 0))
+        listener.listen(2)
+        listener.settimeout(0.1)
+        database = {
+            'enabled': True,
+            'host': '127.0.0.1',
+            'port': listener.getsockname()[1],
+            'database': 'monitoring',
+            'tls_mode': 'disabled',
+            'credentials_file': str(credentials),
+            'connect_timeout_seconds': 1,
+            'read_timeout_seconds': 1,
+            'write_timeout_seconds': 1,
+        }
+
+        def assert_no_connection():
+            try:
+                connection, address = listener.accept()
+            except socket.timeout:
+                return
+            connection.close()
+            raise AssertionError('analyzer disabled but database connection attempted: ' + str(address))
+
+        write_config(config, collection=collection(1, output), is_analyzer=False, mysql=database)
+        with running_daemon([executable, '--config', str(config)], log_path) as process:
+            original_pid = process.pid
+            seen = set()
+            wait_snapshot(output, seen, lambda value: value['config_status'] == 'ok', process)
+            wait_snapshot(output, seen, lambda value: value['config_status'] == 'ok', process)
+            assert_no_connection()
+            write_config(config, collection=collection(1, output), is_analyzer=True, mysql=database)
+            deadline = time.monotonic() + 5
+            connected = False
+            while time.monotonic() < deadline:
+                assert process.poll() is None
+                try:
+                    connection, _ = listener.accept()
+                except socket.timeout:
+                    continue
+                connection.close()
+                connected = True
+                break
+            assert connected, 'enabling analyzer did not start a database connection'
+            wait_snapshot(output, seen, lambda value: value['config_status'] == 'using_last_valid', process)
+            log_offset = len(log_path.read_text(encoding='utf-8'))
+            database['credentials_file'] = str(root / 'missing-analyzer-credentials.json')
+            write_config(config, collection=collection(1, output), is_analyzer=False, mysql=database)
+            wait_log(log_path, 'settings_reloaded', process, offset=log_offset)
+            wait_snapshot(output, seen, lambda value: value['config_status'] == 'ok', process)
+            wait_snapshot(output, seen, lambda value: value['config_status'] == 'ok', process)
+            assert_no_connection()
+            assert process.pid == original_pid and process.poll() is None
+            process.send_signal(signal.SIGTERM)
+            assert process.wait(timeout=3) == 0
 
 
 def hot_reload_test(executable, root, config, output):
@@ -300,9 +387,10 @@ def main():
         output.mkdir()
         config = root / 'settings.json'
         validate_settings(executable, config, output)
+        analyzer_reload_test(executable, root, config)
         hot_reload_test(executable, root, config, output)
         override_and_once_tests(executable, root, config)
-    print('Settings validation, OS timezone timestamps and filenames, atomic live interval/output/threshold reload, retry, aliases, CLI overrides, legacy config, once saves and SIGTERM passed')
+    print('Settings validation, analyzer database connection gating and live reload, OS timezone timestamps and filenames, atomic live interval/output/threshold reload, retry, aliases, CLI overrides, legacy config, once saves and SIGTERM passed')
 
 
 if __name__ == '__main__':

@@ -68,6 +68,7 @@ SELinux가 Enforcing인 실제 서버에서 파일 쓰기와 디렉터리 접근
 ```json
 {
   "schema_version": 1,
+  "is_analyzer": false,
   "collection": {
     "interval_seconds": 60,
     "output_directory": "/Monitor"
@@ -94,6 +95,7 @@ SELinux가 Enforcing인 실제 서버에서 파일 쓰기와 디렉터리 접근
 
 | 설정 | 허용 값과 기본값 | 변경 적용 시점 |
 | --- | --- | --- |
+| `is_analyzer` | JSON 불리언 `true` 또는 `false`, 생략 시 기본 `false` | 다음 설정 확인 후 DB 연결·쿼리 허용 여부 변경 |
 | `collection.interval_seconds` | 1~86400의 정수, 기본 60초 | 다음 설정 확인 후 새 주기 시작 |
 | `collection.output_directory` | 제어문자가 없는 절대 경로, 기본 `/Monitor` | 다음 설정 확인 후 저장부터 |
 | `thresholds.cpu_usage_percent` | 0~100의 숫자 | 다음 설정 확인 후 수집부터 |
@@ -102,7 +104,7 @@ SELinux가 Enforcing인 실제 서버에서 파일 쓰기와 디렉터리 접근
 
 세 임계치는 필수이며 유한한 숫자여야 합니다. 0은 항상 경고를 발생시킵니다. `collection`이나 그 하위 설정을 생략하면 해당 기본값을 사용하므로 이전 임계치 전용 JSON도 읽을 수 있습니다. 잘못된 자료형, null, 필수 키 누락, 중복 키, 알 수 없는 키, 지원하지 않는 스키마 버전은 거부합니다. 설정은 최대 64KiB의 일반 파일이어야 하며 심볼릭 링크와 FIFO는 허용하지 않습니다. 새로운 동작 설정은 이름·자료형·검증 규칙을 정의해 추가합니다.
 
-데몬은 수집 주기와 별도로 1초마다 설정 파일 전체를 확인하므로 재시작 없이 모든 항목을 자동 반영합니다. MySQL을 활성화한 경우에는 계정 파일도 확인하며 DB 연결을 준비하는 동안 기존 설정을 유지합니다. 파일을 직접 수정하는 방식과 새 파일로 원자 교체하는 방식 모두 지원합니다. 진행 중인 동기 수집·파일 작업이 오래 걸리면 확인도 그 작업이 끝난 뒤 수행됩니다. 명시한 `--interval-seconds`와 `--output` 옵션은 실행 중에도 각각 JSON의 값을 덮어씁니다. 기본 systemd 서비스는 이 옵션들을 지정하지 않아 파일 설정을 사용합니다.
+데몬은 수집 주기와 별도로 1초마다 설정 파일 전체를 확인하므로 재시작 없이 모든 항목을 자동 반영합니다. `is_analyzer`와 `mysql.enabled`가 모두 `true`인 경우에만 계정 파일을 확인하고 DB 연결을 준비합니다. 파일을 직접 수정하는 방식과 새 파일로 원자 교체하는 방식 모두 지원합니다. 진행 중인 동기 수집·파일 작업이 오래 걸리면 확인도 그 작업이 끝난 뒤 수행됩니다. 명시한 `--interval-seconds`와 `--output` 옵션은 실행 중에도 각각 JSON의 값을 덮어씁니다. 기본 systemd 서비스는 이 옵션들을 지정하지 않아 파일 설정을 사용합니다.
 
 수집 주기가 바뀌면 적용한 시점부터 새 주기만큼 기다린 뒤 다음 JSON을 저장합니다. 예를 들어 60초에서 5초로 변경하면 다음 설정 확인 후 약 5초 뒤 수집합니다. CPU 기준 샘플을 버리지 않으므로 전환 직후 `cpu.window_seconds`는 직전 샘플부터의 실제 관측 시간이며 새 주기와 다를 수 있습니다. 저장 경로나 임계치만 바뀌거나 문서 내용이 동일하면 수집 타이머를 다시 시작하지 않습니다.
 
@@ -112,7 +114,7 @@ SELinux가 Enforcing인 실제 서버에서 파일 쓰기와 디렉터리 접근
 
 설정 파일 검증, 새 저장 경로 준비와 필요한 MySQL 연결 준비를 모두 성공한 경우에만 수집 주기·경로·임계치·DB 설정을 한 번에 적용합니다. 새 경로는 디렉터리 잠금을 확보하고 실제 임시파일 쓰기·동기화·정리를 확인한 뒤 전환합니다. 기존 경로의 잠금은 전환 완료 시 해제합니다. 같은 디렉터리를 가리키는 경로 별칭은 기존 잠금을 재사용합니다.
 
-문서 오류, 없는 경로, 권한 부족, 다른 데몬의 잠금 등으로 변경을 적용하지 못하면 기존 설정 전체로 수집을 계속하고 JSON에 `config_status=using_last_valid`와 오류를 기록합니다. 실패 원인은 journal에도 남깁니다. 매초 다시 시도하므로 디렉터리를 준비하거나 잠금을 해제하면 파일을 다시 수정하지 않아도 자동 반영합니다. DB 연결 실패의 재시도 간격은 5초입니다. 시작부터 설정 문서가 잘못된 경우 종료 코드 78로 실패하며 systemd는 이 코드로 반복 재시작하지 않습니다. `--check-config`는 문서 형식과 MySQL 활성화 시 계정 파일을 검증합니다. DB 네트워크 접속과 실제 저장 경로 준비는 실행 시 검증합니다.
+문서 오류, 없는 경로, 권한 부족, 다른 데몬의 잠금 등으로 변경을 적용하지 못하면 기존 설정 전체로 수집을 계속하고 JSON에 `config_status=using_last_valid`와 오류를 기록합니다. 실패 원인은 journal에도 남깁니다. 매초 다시 시도하므로 디렉터리를 준비하거나 잠금을 해제하면 파일을 다시 수정하지 않아도 자동 반영합니다. DB 연결 실패의 재시도 간격은 5초입니다. 시작부터 설정 문서가 잘못된 경우 종료 코드 78로 실패하며 systemd는 이 코드로 반복 재시작하지 않습니다. `--check-config`는 문서 형식과 `is_analyzer`·`mysql.enabled`가 모두 `true`일 때 계정 파일을 검증합니다. DB 네트워크 접속과 실제 저장 경로 준비는 실행 시 검증합니다.
 
 사용자가 수정한 파일을 데몬이 덮어쓰지 않습니다. 편집 중간의 일시적 파싱 실패를 줄이려면 같은 디렉터리에 새 파일을 작성·검증한 뒤 원자적으로 교체하십시오. 별도 검증 명령은 다음과 같습니다.
 
@@ -122,20 +124,22 @@ resource-monitor --config /etc/resource-monitor/settings.json --check-config
 
 ## MySQL 연결 설정
 
-MySQL 연결은 기본적으로 꺼져 있습니다. `mysql`을 생략한 기존 설정도 그대로 동작합니다. `settings.json`의 `mysql`에는 접속 대상과 동작 설정만 저장하고 `username` 또는 `password`를 직접 넣으면 설정을 거부합니다.
+MySQL 연결과 쿼리는 최상위 `is_analyzer`와 `mysql.enabled`가 모두 `true`일 때만 실행합니다. `is_analyzer`는 생략하면 `false`이며 문자열 `"true"`, 숫자 `1`, `null`은 허용하지 않습니다. JSON에는 소문자 `true` 또는 `false`를 입력하십시오. `mysql`을 생략하면 연결은 비활성 상태입니다. `settings.json`의 `mysql`에는 접속 대상과 동작 설정만 저장하고 `username` 또는 `password`를 직접 넣으면 설정을 거부합니다.
+
+기존 설정에서 DB 연결을 사용 중이었다면 1.3.2로 업그레이드할 때 최상위 `"is_analyzer": true`를 명시해야 DB 연결을 사용합니다. 항목이 없거나 `false`이면 `mysql.enabled`가 `true`여도 DB에 연결하거나 쿼리를 실행하지 않고 계정 파일도 읽지 않습니다. CPU·메모리·스토리지 수집과 JSON 저장은 계속합니다.
 
 | 설정 | 의미와 기본값 |
 | --- | --- |
-| `mysql.enabled` | 연결 사용 여부, 기본 `false` |
+| `mysql.enabled` | 연결 사용 여부, 기본 `false`; `is_analyzer`도 `true`여야 동작 |
 | `mysql.host` | 접속할 호스트, 기본 `127.0.0.1` |
 | `mysql.port` | TCP 포트, 1~65535, 기본 `3306` |
-| `mysql.database` | 접속할 데이터베이스, 활성화할 때 필수이며 배포 예제는 `monitoring` |
+| `mysql.database` | 접속할 데이터베이스, `is_analyzer`·`mysql.enabled`가 모두 `true`일 때 필수이며 배포 예제는 `monitoring` |
 | `mysql.credentials_file` | 계정 파일의 절대 경로, 기본 `/etc/resource-monitor/secrets/mysql.json` |
 | `mysql.connect_timeout_seconds` | 연결 제한 시간, 1~10초의 정수, 기본 3초 |
 | `mysql.read_timeout_seconds` | 읽기 제한 시간, 1~10초의 정수, 기본 3초 |
 | `mysql.write_timeout_seconds` | 쓰기 제한 시간, 1~10초의 정수, 기본 3초 |
 | `mysql.tls_mode` | `verify_identity`, `disabled`, 기본 `verify_identity` |
-| `mysql.tls_ca_file` | 활성화된 `verify_identity` 연결에서 필수인 CA 인증서의 절대 경로 |
+| `mysql.tls_ca_file` | `is_analyzer`·`mysql.enabled`가 모두 `true`인 `verify_identity` 연결에서 필수인 CA 인증서의 절대 경로 |
 
 기본 `verify_identity`는 TLS 암호화와 서버 인증서·호스트명 검증을 모두 요구합니다. `tls_ca_file`에는 신뢰할 CA 인증서를 준비하고 인증서의 호스트명과 일치하는 `host`를 지정하십시오. IP 주소로 접속한다면 서버 인증서에 해당 IP의 SAN이 있어야 합니다. TLS를 제공하지 않는 로컬 테스트 DB를 사용할 때만 `disabled`를 명시하십시오. 인증서 검증 없이 TLS만 요구하는 모드는 제공하지 않습니다.
 
@@ -163,13 +167,15 @@ sudoedit /etc/resource-monitor/settings.json
 sudo -u resource-monitor /usr/sbin/resource-monitor --check-config
 ```
 
-위 `/path/to/trusted-ca.pem`은 DB 관리자가 제공한 CA 인증서의 실제 경로로 바꾸십시오. `settings.json`에서 DB 주소·데이터베이스·TLS 설정을 맞추고 `mysql.enabled`를 `true`로 변경하면 실행 중인 데몬이 연결을 준비합니다. `secrets/mysql.json`은 평문이므로 전용 서비스 계정과 root만 읽을 수 있도록 디렉터리와 파일 권한을 유지해야 합니다. 계정 파일은 root 또는 현재 실행 계정이 소유한 최대 16KiB의 일반 파일이어야 하며 권한은 0600 또는 0640만 허용합니다. 심볼릭 링크와 FIFO도 허용하지 않습니다. 사용자명은 제어문자가 없는 1~128바이트, 비밀번호는 NUL 문자가 없는 1~4096바이트 문자열입니다. 실제 파일과 `.env`는 Git 및 소스 패키지에서 제외하고, 배포본에는 예제 값이 있는 계정 템플릿만 포함합니다.
+위 `/path/to/trusted-ca.pem`은 DB 관리자가 제공한 CA 인증서의 실제 경로로 바꾸십시오. `settings.json`에서 DB 주소·데이터베이스·TLS 설정을 맞추고 최상위 `is_analyzer`와 `mysql.enabled`를 모두 `true`로 변경하면 실행 중인 데몬이 연결을 준비합니다. `secrets/mysql.json`은 평문이므로 전용 서비스 계정과 root만 읽을 수 있도록 디렉터리와 파일 권한을 유지해야 합니다. 계정 파일은 root 또는 현재 실행 계정이 소유한 최대 16KiB의 일반 파일이어야 하며 권한은 0600 또는 0640만 허용합니다. 심볼릭 링크와 FIFO도 허용하지 않습니다. 사용자명은 제어문자가 없는 1~128바이트, 비밀번호는 NUL 문자가 없는 1~4096바이트 문자열입니다. 실제 파일과 `.env`는 Git 및 소스 패키지에서 제외하고, 배포본에는 예제 값이 있는 계정 템플릿만 포함합니다.
 
-설정과 계정 파일을 1초마다 다시 읽으므로 비밀번호만 바꾸어도 재연결합니다. 새 연결과 `SELECT 1` 확인은 별도 작업 스레드에서 수행하여 기존 리소스 수집을 계속합니다. 준비된 연결이 성공하고 설정 전체를 적용할 수 있을 때 기존 연결을 교체합니다. 그동안 주소·계정 오류, 접속 거부, TLS 오류가 발생하면 기존 연결과 설정 전체를 유지하고 5초 간격으로 다시 시도합니다. 대기 중 파일을 다시 수정하면 최신 설정에 맞는 연결만 채택합니다. `enabled`를 `false`로 바꾸면 연결을 닫습니다.
+DB 사용이 허용된 동안 설정과 계정 파일을 1초마다 다시 읽으므로 비밀번호만 바꾸어도 재연결합니다. 새 연결과 `SELECT 1` 확인은 별도 작업 스레드에서 수행하여 기존 리소스 수집을 계속합니다. 준비된 연결이 성공하고 설정 전체를 적용할 수 있을 때 기존 연결을 교체합니다. 그동안 주소·계정 오류, 접속 거부, TLS 오류가 발생하면 기존 연결과 설정 전체를 유지하고 5초 간격으로 다시 시도합니다. 대기 중 파일을 다시 수정하면 최신 설정에 맞는 연결만 채택합니다.
+
+`is_analyzer` 또는 `mysql.enabled`를 `false`로 바꾸면 다음 설정 확인에서 기존 연결을 닫고 새 DB 연결·쿼리·계정 파일 읽기를 중단합니다. 데몬을 재시작할 필요가 없습니다. 이미 작업 스레드에 전달된 연결이나 쿼리는 완료될 수 있지만 비활성화 이전 작업의 결과는 채택하지 않습니다. 다시 두 항목을 모두 `true`로 설정하면 최신 설정과 계정 파일로 연결을 준비합니다.
 
 처음 실행할 때 DB에 연결할 수 없거나 계정 파일이 잘못되어도 리소스 수집은 시작 설정의 수집 주기·저장 경로·임계치로 계속합니다. 연결이 준비될 때까지 DB는 비활성 상태이고 `config_status=using_last_valid`와 계정 값을 제외한 오류를 기록합니다. DB 접속 성공 후에는 정상 상태로 돌아옵니다. DB 오류는 CPU·메모리·스토리지 사용률에 대한 `status`와 별개입니다. 사용자명·비밀번호와 DB 서버가 반환한 원문 오류는 journal 및 결과 JSON에 기록하지 않습니다.
 
-정상 연결은 30초마다 `SELECT 1`로 확인하며 끊어진 연결은 현재 설정으로 다시 준비합니다. 저장 경로 오류 등으로 적용을 기다리는 후보 연결도 30초가 지나면 새로 연결·검증합니다. 시간 제한은 연결 라이브러리의 네트워크 작업에 적용되며 운영체제의 DNS 조회 시간을 제한하지는 않습니다. 종료 시 진행 중인 DB 작업을 기다리고, systemd의 기존 `TimeoutStopSec=15`를 초과하면 systemd가 프로세스를 종료합니다.
+DB 사용이 허용된 정상 연결은 30초마다 `SELECT 1`로 확인하며 끊어진 연결은 현재 설정으로 다시 준비합니다. 저장 경로 오류 등으로 적용을 기다리는 후보 연결도 30초가 지나면 새로 연결·검증합니다. 시간 제한은 연결 라이브러리의 네트워크 작업에 적용되며 운영체제의 DNS 조회 시간을 제한하지는 않습니다. 종료 시 진행 중인 DB 작업을 기다리고, systemd의 기존 `TimeoutStopSec=15`를 초과하면 systemd가 프로세스를 종료합니다.
 
 이 버전은 접속 설정과 계정 분리, 실제 연결·검증·교체까지 제공합니다. 연결 확인용 `SELECT 1` 외의 업무 쿼리나 조회 결과 저장은 아직 실행하지 않습니다. 쿼리와 결과 계약이 정해지면 응용 계층의 DB 포트를 통해 추가할 수 있습니다.
 
@@ -257,7 +263,7 @@ RPM은 빌드할 OL8 또는 OL9 시스템에서 다음처럼 생성합니다. So
 ```bash
 sudo dnf install -y rpm-build gcc-toolset-15-gcc-c++ cmake make python3 pkgconf-pkg-config mariadb-connector-c-devel
 mkdir -p "$HOME/rpmbuild/SOURCES" "$HOME/rpmbuild/SPECS"
-cp artifacts/resource-monitor-1.3.1.tar.gz "$HOME/rpmbuild/SOURCES/"
+cp artifacts/resource-monitor-1.3.2.tar.gz "$HOME/rpmbuild/SOURCES/"
 curl --fail --location https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz --output "$HOME/rpmbuild/SOURCES/json.tar.xz"
 cp packaging/rpm/resource-monitor.spec "$HOME/rpmbuild/SPECS/"
 rpmbuild -ba "$HOME/rpmbuild/SPECS/resource-monitor.spec"

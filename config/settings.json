@@ -1,5 +1,6 @@
 {
   "schema_version": 1,
+  "is_analyzer": false,
   "collection": {
     "interval_seconds": 60,
     "output_directory": "/Monitor"

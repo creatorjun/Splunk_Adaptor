@@ -113,10 +113,10 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::read_settings() {
         const auto json = nlohmann::json::parse(document, callback);
         if (!json.is_object() || !json.contains("schema_version") ||
             !json.contains("thresholds")) {
-            return std::unexpected(config_error(path_, "invalid_schema", "Expected schema_version, thresholds, and optional collection and mysql"));
+            return std::unexpected(config_error(path_, "invalid_schema", "Expected schema_version, thresholds, and optional is_analyzer, collection and mysql"));
         }
         for (const auto& [key, value] : json.items()) {
-            if (key != "schema_version" && key != "thresholds" && key != "collection" && key != "mysql") {
+            if (key != "schema_version" && key != "thresholds" && key != "collection" && key != "mysql" && key != "is_analyzer") {
                 return std::unexpected(config_error(path_, "invalid_schema", "Unknown configuration key"));
             }
         }
@@ -145,6 +145,12 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::read_settings() {
             return std::unexpected(std::move(error));
         }
         MonitorSettings settings{policy};
+        if (json.contains("is_analyzer")) {
+            if (!json["is_analyzer"].is_boolean()) {
+                return std::unexpected(config_error(path_, "invalid_schema", "is_analyzer must be a boolean"));
+            }
+            settings.is_analyzer = json["is_analyzer"].get<bool>();
+        }
         if (json.contains("collection")) {
             const auto& collection = json["collection"];
             if (!collection.is_object()) {
@@ -241,7 +247,7 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::read_settings() {
                 }
                 *destination = number.get<unsigned int>();
             }
-            if (settings.mysql.host.empty() || (settings.mysql.enabled && settings.mysql.database.empty())) {
+            if (settings.mysql.host.empty() || (settings.mysql_enabled() && settings.mysql.database.empty())) {
                 return std::unexpected(config_error(path_, "invalid_mysql", "MySQL host is required and database is required when enabled"));
             }
             if (settings.mysql.credentials_file.empty() || !std::filesystem::path(settings.mysql.credentials_file).is_absolute()) {
@@ -251,7 +257,7 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::read_settings() {
                 return std::unexpected(config_error(path_, "invalid_mysql", "MySQL tls_mode must be disabled or verify_identity"));
             }
             if ((!settings.mysql.tls_ca_file.empty() && !std::filesystem::path(settings.mysql.tls_ca_file).is_absolute()) ||
-                (settings.mysql.enabled && settings.mysql.tls_mode == "verify_identity" && settings.mysql.tls_ca_file.empty())) {
+                (settings.mysql_enabled() && settings.mysql.tls_mode == "verify_identity" && settings.mysql.tls_ca_file.empty())) {
                 return std::unexpected(config_error(path_, "invalid_mysql", "MySQL tls_ca_file must be absolute and is required when enabled with verify_identity"));
             }
         }

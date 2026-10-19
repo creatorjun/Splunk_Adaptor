@@ -41,9 +41,9 @@ std::string document_with_collection(const std::string& collection) {
         + collection + "}";
 }
 
-std::string document_with_mysql(const std::string& mysql) {
+std::string document_with_mysql(const std::string& mysql, const std::string& analyzer = "true") {
     return R"({"schema_version":1,"thresholds":{"cpu_usage_percent":80,"memory_usage_percent":85.5,"storage_usage_percent":90},"mysql":)"
-        + mysql + "}";
+        + mysql + (analyzer.empty() ? "" : ",\"is_analyzer\":" + analyzer) + "}";
 }
 
 void check_failure(monitor::JsonSettingsReader& reader, const std::filesystem::path& path) {
@@ -73,6 +73,7 @@ int main() {
         CHECK(settings->collection_interval == std::chrono::seconds{60});
         CHECK(settings->output_directory == "/Monitor");
         CHECK(settings->mysql == monitor::MySqlSettings{});
+        CHECK(!settings->is_analyzer);
         auto policy = reader.read();
         CHECK(policy);
         CHECK(settings->thresholds == *policy);
@@ -197,6 +198,7 @@ int main() {
         settings = reader.read_settings();
         CHECK(settings);
         CHECK(settings->mysql.enabled);
+        CHECK(settings->is_analyzer);
         CHECK(settings->mysql.host == "db.internal");
         CHECK(settings->mysql.port == 3307);
         CHECK(settings->mysql.database == "monitoring");
@@ -206,6 +208,36 @@ int main() {
         CHECK(settings->mysql.write_timeout_seconds == 10);
         CHECK(settings->mysql.tls_mode == "verify_identity");
         CHECK(settings->mysql.tls_ca_file == "/etc/pki/db-ca.pem");
+        for (const auto& analyzer : {std::string{}, std::string{"false"}}) {
+            for (const auto& mysql : {
+                std::string{R"({"enabled":true})"},
+                std::string{R"({"enabled":true,"database":"","tls_ca_file":""})"},
+                std::string{R"({"enabled":true,"database":"monitoring","tls_mode":"verify_identity"})"}
+            }) {
+                write_file(path, document_with_mysql(mysql, analyzer));
+                settings = reader.read_settings();
+                CHECK(settings);
+                CHECK(!settings->is_analyzer);
+                CHECK(settings->mysql.enabled);
+            }
+        }
+        for (const auto& analyzer : {"null", "1", "0", "1.0", "\"true\"", "\"false\"", "[]", "{}"}) {
+            write_file(path, document_with_mysql("{}", analyzer));
+            check_failure(reader, path);
+        }
+        write_file(path, document_with_mysql("{}", "false,\"is_analyzer\":true"));
+        check_failure(reader, path);
+        for (const auto& mysql : {
+            std::string{R"({"enabled":"true"})"},
+            std::string{R"({"enabled":true,"port":0})"},
+            std::string{R"({"enabled":true,"database":null})"},
+            std::string{R"({"enabled":true,"credentials_file":"relative.json"})"},
+            std::string{R"({"enabled":true,"tls_mode":"preferred"})"},
+            std::string{R"({"enabled":true,"tls_ca_file":null})"}
+        }) {
+            write_file(path, document_with_mysql(mysql, "false"));
+            check_failure(reader, path);
+        }
         for (const auto& mysql : {
             std::string{R"({"port":1,"tls_mode":"disabled"})"},
             std::string{R"({"port":65535,"tls_mode":"verify_identity"})"},

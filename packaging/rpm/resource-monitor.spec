@@ -2,7 +2,7 @@
 %global debug_package %{nil}
 
 Name:           resource-monitor
-Version:        1.3.1
+Version:        1.3.2
 Release:        1%{?dist}
 Summary:        System resource snapshots with JSON settings
 License:        Proprietary

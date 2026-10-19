@@ -30,6 +30,7 @@ def main():
         original = json.loads(config.read_text())
         assert original['collection'] == {'interval_seconds': 60, 'output_directory': '/Monitor'}
         assert original['thresholds']['cpu_usage_percent'] == 80
+        assert original['is_analyzer'] is False
         assert original['mysql']['enabled'] is False
         assert original['mysql']['credentials_file'] == '/etc/resource-monitor/secrets/mysql.json'
         assert original['mysql']['tls_mode'] == 'verify_identity'
@@ -48,6 +49,7 @@ def main():
         assert not list(fresh.rglob('thresholds.json'))
         assert len(list(fresh.rglob('settings.json'))) == 2
         original['thresholds']['cpu_usage_percent'] = 42
+        original['is_analyzer'] = True
         original['collection'] = {'interval_seconds': 17, 'output_directory': '/custom-monitor'}
         existing_settings = (json.dumps(original, indent=4) + '\n').encode('utf-8')
         config.write_bytes(existing_settings)
@@ -62,6 +64,7 @@ def main():
         assert (fresh / 'usr/lib/systemd/system/resource-monitor.service').is_file()
         assert (fresh / 'usr/share/doc/resource-monitor/THIRD_PARTY_NOTICES.txt').is_file()
         assert json.loads(shared.read_text())['thresholds']['cpu_usage_percent'] == 80
+        assert json.loads(shared.read_text())['is_analyzer'] is False
         assert not list(fresh.rglob('thresholds.json'))
 
         legacy_stage = root / 'legacy'
@@ -82,6 +85,7 @@ def main():
         assert migrated.read_bytes() == legacy_bytes
         assert legacy_config.read_bytes() == legacy_bytes
         assert 'collection' not in json.loads(migrated.read_text())
+        assert 'is_analyzer' not in json.loads(migrated.read_text())
         install(legacy_stage)
         assert migrated.read_bytes() == legacy_bytes
 

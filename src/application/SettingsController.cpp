@@ -67,6 +67,7 @@ std::expected<bool, Error> SettingsController::load_and_apply() {
     if (overrides_.output_directory) {
         next->output_directory = *overrides_.output_directory;
     }
+    next->mysql.enabled = next->mysql_enabled();
     if (!mysql_ && next->mysql.enabled) {
         last_error_ = Error{"mysql", "connection", "unavailable", "Database adapter is unavailable"};
         return std::unexpected(*last_error_);

@@ -42,6 +42,7 @@ struct Control {
     bool signals_masked{};
     std::vector<Attempt> attempts;
     std::set<std::size_t> live;
+    std::set<std::size_t> closed;
     std::set<std::size_t> fail_probe;
     std::map<std::size_t, unsigned int> probes;
 };
@@ -55,6 +56,7 @@ struct Session final : IMySqlSession {
     ~Session() override {
         std::lock_guard lock(state.mutex);
         state.live.erase(id);
+        state.closed.insert(id);
     }
 
     std::expected<void, Error> probe() override {
@@ -213,6 +215,7 @@ void stale_candidate_tests() {
     wait_for([&] { return factory.inspect([](const Control& state) { return state.live == std::set<std::size_t>{2}; }); });
     CHECK(factory.inspect([](const Control& state) { return state.attempts.back().settings.port == 4406
         && state.attempts.back().credentials.username == "new-user"; }));
+    CHECK(factory.inspect([](const Control& state) { return !state.probes.contains(1); }));
     settings.database = "replacement";
     wait_ready(configuration, settings);
     reader.next = std::unexpected(Error{"mysql_credentials", "credentials", "unreadable", "Unreadable credentials"});
@@ -256,10 +259,40 @@ void failed_probe_and_cancel_tests() {
     settings.enabled = false;
     CHECK(configuration.prepare(settings).value());
     CHECK(configuration.commit());
+    const auto reads = reader.reads;
     factory.release();
-    wait_for([&] { return factory.inspect([](const Control& state) { return state.live.empty(); }); });
+    wait_for([&] { return factory.inspect([](const Control& state) { return state.closed.contains(3); }); });
+    CHECK(factory.inspect([](const Control& state) { return state.live.empty() && !state.probes.contains(3); }));
     CHECK(configuration.prepare(settings).value());
     CHECK(!configuration.commit());
+    CHECK(reader.reads == reads);
+    CHECK(factory.inspect([](const Control& state) { return state.attempts.size() == 3; }));
+}
+
+void disabled_health_and_retry_tests() {
+    Reader reader;
+    Factory factory;
+    MySqlConfiguration configuration(reader, factory, 20ms, 20ms);
+    auto settings = enabled_settings();
+    wait_ready(configuration, settings);
+    CHECK(configuration.commit());
+    wait_for([&] { return factory.inspect([](const Control& state) { return state.probes.at(1) >= 2; }); });
+    settings.enabled = false;
+    CHECK(configuration.prepare(settings).value());
+    CHECK(configuration.commit());
+    wait_for([&] { return factory.inspect([](const Control& state) { return state.closed.contains(1); }); });
+    const auto probes = factory.inspect([](const Control& state) { return state.probes; });
+    const auto reads = reader.reads;
+    reader.next = std::unexpected(Error{"mysql_credentials", "credentials", "unreadable", "Unreadable credentials"});
+    std::this_thread::sleep_for(60ms);
+    for (int index = 0; index < 10; ++index) {
+        CHECK(configuration.prepare(settings).value());
+        CHECK(!configuration.commit());
+    }
+    CHECK(reader.reads == reads);
+    CHECK(factory.inspect([&](const Control& state) {
+        return state.attempts.size() == 1 && state.live.empty() && state.probes == probes;
+    }));
 }
 
 void expired_candidate_tests() {
@@ -307,6 +340,7 @@ int main() {
         stale_candidate_tests();
         health_recovery_tests();
         failed_probe_and_cancel_tests();
+        disabled_health_and_retry_tests();
         expired_candidate_tests();
         exception_redaction_tests();
     });
