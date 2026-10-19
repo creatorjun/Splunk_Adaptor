@@ -63,6 +63,11 @@ std::string document_with_log_silence(const std::string& silence, bool is_analyz
         + std::string{is_analyzer ? "true" : "false"} + ",\"log_silence\":" + silence + "}";
 }
 
+std::string document_with_processing_files(const std::string& processing, bool is_analyzer = false) {
+    return R"({"schema_version":1,"thresholds":{"cpu_usage_percent":80,"memory_usage_percent":85.5,"storage_usage_percent":90},"mysql":{"database":"monitoring","tls_mode":"disabled"},"is_analyzer":)"
+        + std::string{is_analyzer ? "true" : "false"} + ",\"processing_files\":" + processing + "}";
+}
+
 void check_failure(monitor::JsonSettingsReader& reader, const std::filesystem::path& path) {
     const auto settings = reader.read_settings();
     CHECK(!settings);
@@ -74,6 +79,72 @@ void check_failure(monitor::JsonSettingsReader& reader, const std::filesystem::p
     CHECK(thresholds.error().component == "settings_config");
     CHECK(thresholds.error().target == path.string());
     CHECK(!thresholds.error().message.empty());
+}
+
+void processing_files_settings_tests() {
+    TemporaryDirectory directory;
+    const auto path = directory.path / "settings.json";
+    monitor::JsonSettingsReader reader(path);
+    for (const auto* partial : {"{}", R"({"thresholds":{}})",
+        R"({"thresholds":{"collector":{},"normalize":{}}})"}) {
+        write_file(path, document_with_processing_files(partial));
+        const auto settings = reader.read_settings();
+        CHECK(settings);
+        CHECK(settings->processing_files == monitor::ProcessingFileSettings{});
+    }
+    for (const bool analyzer : {false, true}) {
+        write_file(path, document_with_processing_files(
+            R"({"thresholds":{"collector":{"tmp_count":0,"done_count":1000000000000},"normalize":{"tmp_count":101,"done_count":99}}})", analyzer));
+        const auto settings = reader.read_settings();
+        CHECK(settings);
+        CHECK(settings->is_analyzer == analyzer);
+        CHECK(settings->processing_files.collector.tmp_count == 0);
+        CHECK(settings->processing_files.collector.done_count == 1000000000000ULL);
+        CHECK(settings->processing_files.normalize.tmp_count == 101);
+        CHECK(settings->processing_files.normalize.done_count == 99);
+    }
+    for (const auto* profile : {"collector", "normalize"}) {
+        for (const auto* extension : {"tmp_count", "done_count"}) {
+            write_file(path, document_with_processing_files(nlohmann::json{
+                {"thresholds", {{profile, {{extension, 42}}}}}}.dump()));
+            const auto settings = reader.read_settings();
+            CHECK(settings);
+            const bool collector = std::string_view{profile} == "collector";
+            const auto& changed = collector ? settings->processing_files.collector : settings->processing_files.normalize;
+            const auto& unchanged = collector ? settings->processing_files.normalize : settings->processing_files.collector;
+            CHECK(unchanged == monitor::ProcessingFileThresholds{});
+            CHECK(changed.tmp_count == (std::string_view{extension} == "tmp_count" ? 42ULL : 100ULL));
+            CHECK(changed.done_count == (std::string_view{extension} == "done_count" ? 42ULL : 100ULL));
+            for (const auto* invalid : {"-1", "1000000000001", "18446744073709551615", "18446744073709551616",
+                "-9223372036854775808", "100.0", "1e2", "0.5", "true", "false", "null", "[]", "{}", "\"redaction-marker\""}) {
+                write_file(path, document_with_processing_files(
+                    "{\"thresholds\":{\"" + std::string{profile} + "\":{\"" + extension + "\":" + invalid + "}}}"));
+                const auto rejected = reader.read_settings();
+                CHECK(!rejected);
+                CHECK(rejected.error().code == "invalid_processing_files");
+                CHECK(rejected.error().message.find("redaction-marker") == std::string::npos);
+            }
+        }
+    }
+    for (const auto* invalid : {"null", "true", "100", "[]", "\"redaction-marker\"",
+        R"({"enabled":true})", R"({"scan_interval_seconds":30})", R"({"redaction-marker":100})",
+        R"({"thresholds":null})", R"({"thresholds":[]})", R"({"thresholds":{"redaction-marker":{}}})",
+        R"({"thresholds":{"collector":null}})", R"({"thresholds":{"normalize":[]}})",
+        R"({"thresholds":{"collector":{"redaction-marker":100}}})",
+        R"({"thresholds":{"normalize":{"path":"redaction-marker"}}})"}) {
+        write_file(path, document_with_processing_files(invalid));
+        const auto rejected = reader.read_settings();
+        CHECK(!rejected);
+        CHECK(rejected.error().code == "invalid_processing_files");
+        CHECK(rejected.error().message.find("redaction-marker") == std::string::npos);
+    }
+    for (const auto* invalid : {
+        R"({"thresholds":{"collector":{"tmp_count":100,"tmp_count":200}}})",
+        R"({"thresholds":{"collector":{},"collector":{}}})",
+        R"({"thresholds":{},"thresholds":{}})"}) {
+        write_file(path, document_with_processing_files(invalid));
+        check_failure(reader, path);
+    }
 }
 
 }
@@ -104,6 +175,7 @@ int main() {
         CHECK(settings->process_monitor.collector == default_collector);
         CHECK(settings->log_silence.default_timeout_seconds == 300);
         CHECK(settings->log_silence.overrides.empty());
+        CHECK(settings->processing_files == monitor::ProcessingFileSettings{});
         auto policy = reader.read();
         CHECK(policy);
         CHECK(settings->thresholds == *policy);
@@ -570,5 +642,6 @@ int main() {
         CHECK(::mkfifo(pipe.c_str(), 0600) == 0);
         monitor::JsonSettingsReader pipe_reader(pipe);
         check_failure(pipe_reader, pipe);
+        processing_files_settings_tests();
     });
 }

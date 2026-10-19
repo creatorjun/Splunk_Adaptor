@@ -5,6 +5,7 @@
 #include "application/AnalyzerSettings.hpp"
 #include "application/ProcessMonitorSettings.hpp"
 #include "application/LogSilenceSettings.hpp"
+#include "application/ProcessingFileSettings.hpp"
 #include "domain/ThresholdPolicy.hpp"
 
 #include <chrono>
@@ -21,6 +22,7 @@ struct MonitorSettings {
     AnalyzerSettings analyzer{};
     ProcessMonitorSettings process_monitor{};
     LogSilenceSettings log_silence{};
+    ProcessingFileSettings processing_files{};
 
     bool operator==(const MonitorSettings&) const = default;
 };

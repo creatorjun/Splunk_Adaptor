@@ -281,6 +281,77 @@ void check_log_silence_snapshots() {
     check_no_temporary_files(directory.path);
 }
 
+void check_processing_files_snapshots() {
+    ScopedTimezone scoped_zone("KST-9");
+    TemporaryDirectory directory;
+    monitor::JsonSnapshotStore store(directory.path);
+    auto snapshot = make_snapshot();
+    snapshot.processing_files.directories = {
+        {"/CloudESM/data/processing/collector", 99, 0, {}},
+        {"/CloudESM/data/processing/normalize", 10, 99, {}}};
+    for (const auto state : {monitor::ProcessingFilesStatus::disabled, monitor::ProcessingFilesStatus::pending,
+        monitor::ProcessingFilesStatus::ok, monitor::ProcessingFilesStatus::partial,
+        monitor::ProcessingFilesStatus::error}) {
+        TemporaryDirectory omitted_directory;
+        monitor::JsonSnapshotStore omitted_store(omitted_directory.path);
+        snapshot.processing_files.status = state;
+        CHECK(omitted_store.save(snapshot));
+        const auto omitted = read_json(omitted_directory.path / "20261014T213400+0900.json");
+        CHECK(!omitted.contains("processing_files"));
+        CHECK(omitted["cpu"]["usage_percent"] == *snapshot.cpu.usage_percent);
+        CHECK(omitted["memory"]["total_bytes"] == *snapshot.memory.total_bytes);
+    }
+
+    snapshot.processing_files.status = monitor::ProcessingFilesStatus::warning;
+    snapshot.processing_files.scan_started_at = snapshot.timestamp - std::chrono::milliseconds{1234};
+    snapshot.processing_files.scanned_at = snapshot.timestamp - std::chrono::milliseconds{123};
+    snapshot.processing_files.alerts = {
+        {"/CloudESM/data/processing/collector", ".tmp", 100, 100},
+        {"/CloudESM/data/processing/normalize", ".done", 120, 100}};
+    CHECK(store.save(snapshot));
+    const auto document = read_json(directory.path / "20261014T213400+0900.json");
+    const auto& processing = document["processing_files"];
+    CHECK(processing.size() == 5);
+    CHECK(processing["status"] == "warning");
+    CHECK(processing["scan_interval_seconds"] == 60);
+    CHECK(processing["scan_started_at"] == "2026-10-14T21:33:58.766+09:00");
+    CHECK(processing["scanned_at"] == "2026-10-14T21:33:59.877+09:00");
+    CHECK(!processing.contains("directories"));
+    CHECK(processing["alerts"].size() == 2);
+    CHECK(processing["alerts"][0].size() == 4);
+    CHECK(processing["alerts"][0]["path"] == "/CloudESM/data/processing/collector");
+    CHECK(processing["alerts"][0]["extension"] == ".tmp");
+    CHECK(processing["alerts"][0]["count"] == 100);
+    CHECK(processing["alerts"][0]["count"].is_number_unsigned());
+    CHECK(processing["alerts"][0]["threshold"] == 100);
+    CHECK(processing["alerts"][1]["path"] == "/CloudESM/data/processing/normalize");
+    CHECK(processing["alerts"][1]["extension"] == ".done");
+    CHECK(processing["alerts"][1]["count"] == 120);
+    CHECK(processing["alerts"][1]["threshold"] == 100);
+
+    snapshot.processing_files.scan_started_at.reset();
+    snapshot.processing_files.scanned_at.reset();
+    snapshot.processing_files.alerts = {{"/CloudESM/data/processing/collector", ".done", 0, 0}};
+    CHECK(store.save(snapshot));
+    const auto zero = read_json(directory.path / "20261014T213400+0900_1.json")["processing_files"];
+    CHECK(zero["scan_started_at"].is_null());
+    CHECK(zero["scanned_at"].is_null());
+    CHECK(zero["alerts"].size() == 1);
+    CHECK(zero["alerts"][0]["count"] == 0);
+    CHECK(zero["alerts"][0]["threshold"] == 0);
+
+    snapshot.processing_files.alerts.clear();
+    snapshot.processing_files.status = monitor::ProcessingFilesStatus::error;
+    snapshot.errors.push_back({"processing_files", "/CloudESM/data/processing/collector",
+        "scan_failed", "Directory unavailable"});
+    CHECK(store.save(snapshot));
+    const auto failed = read_json(directory.path / "20261014T213400+0900_2.json");
+    CHECK(!failed.contains("processing_files"));
+    CHECK(failed["errors"].back()["component"] == "processing_files");
+    CHECK(failed["errors"].back()["code"] == "scan_failed");
+    check_no_temporary_files(directory.path);
+}
+
 void check_collect_count_snapshots() {
     ScopedTimezone scoped_zone("KST-9");
     TemporaryDirectory directory;
@@ -596,5 +667,6 @@ int main() {
         check_collect_count_snapshots();
         check_process_snapshots();
         check_log_silence_snapshots();
+        check_processing_files_snapshots();
     });
 }

@@ -9,9 +9,10 @@ namespace monitor {
 
 CollectAndStore::CollectAndStore(IResourceReader& reader, ISnapshotStore& store,
     IThresholdConfigReader& config, ICollectCountMonitor* collect_count,
-    IJavaProcessMonitor* java_processes, ILogSilenceMonitor* log_silence)
+    IJavaProcessMonitor* java_processes, ILogSilenceMonitor* log_silence,
+    IProcessingFileMonitor* processing_files)
     : reader_(reader), store_(store), config_(config), collect_count_(collect_count),
-      java_processes_(java_processes), log_silence_(log_silence) {
+      java_processes_(java_processes), log_silence_(log_silence), processing_files_(processing_files) {
 }
 
 std::expected<void, Error> CollectAndStore::initialize() {
@@ -29,6 +30,7 @@ std::expected<void, Error> CollectAndStore::initialize() {
     policy_applied_at_ = sample.timestamp;
     if (collect_count_) collect_count_->collect(sample.timestamp);
     if (log_silence_) log_silence_->collect(sample.timestamp);
+    if (processing_files_) processing_files_->settings_changed();
     if (sample.cpu.value && !sample.cpu.error) {
         previous_cpu_ = *sample.cpu.value;
         previous_cpu_time_ = sample.cpu_observed_at;
@@ -39,6 +41,7 @@ std::expected<void, Error> CollectAndStore::initialize() {
 void CollectAndStore::settings_changed(std::chrono::system_clock::time_point timestamp) {
     if (policy_ && collect_count_) collect_count_->settings_changed(timestamp);
     if (policy_ && log_silence_) log_silence_->settings_changed(timestamp);
+    if (policy_ && processing_files_) processing_files_->settings_changed();
 }
 
 std::expected<ResourceSnapshot, Error> CollectAndStore::run(std::uint64_t missed_intervals) {
@@ -167,6 +170,18 @@ std::expected<ResourceSnapshot, Error> CollectAndStore::run(std::uint64_t missed
             snapshot.status = MetricStatus::warning;
         } else if (snapshot.log_silence.status != LogSilenceStatus::ok &&
             snapshot.log_silence.status != LogSilenceStatus::disabled && snapshot.status == MetricStatus::ok) {
+            snapshot.status = MetricStatus::unknown;
+        }
+    }
+    if (processing_files_) {
+        snapshot.processing_files = processing_files_->collect();
+        for (const auto& directory : snapshot.processing_files.directories) {
+            snapshot.errors.insert(snapshot.errors.end(), directory.errors.begin(), directory.errors.end());
+        }
+        if (snapshot.processing_files.status == ProcessingFilesStatus::warning) {
+            snapshot.status = MetricStatus::warning;
+        } else if (snapshot.processing_files.status != ProcessingFilesStatus::ok &&
+            snapshot.processing_files.status != ProcessingFilesStatus::disabled && snapshot.status == MetricStatus::ok) {
             snapshot.status = MetricStatus::unknown;
         }
     }

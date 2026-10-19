@@ -35,6 +35,18 @@
     "interval_seconds": 60,
     "output_directory": "/Monitor"
   },
+  "processing_files": {
+    "thresholds": {
+      "collector": {
+        "tmp_count": 100,
+        "done_count": 100
+      },
+      "normalize": {
+        "tmp_count": 100,
+        "done_count": 100
+      }
+    }
+  },
   "thresholds": {
     "cpu_usage_percent": 80.0,
     "memory_usage_percent": 85.0,

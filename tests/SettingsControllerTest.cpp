@@ -615,6 +615,50 @@ void process_monitor_settings_reload_tests() {
     CHECK(output.attempts.size() == 1);
 }
 
+void processing_files_settings_reload_tests() {
+    Reader reader;
+    Output output;
+    Database database;
+    SettingsController controller(reader, output, {}, &database);
+    CHECK(controller.initialize());
+    const auto original_mysql = database.active;
+    const auto connections = database.connection_changes;
+    CHECK(controller.current().processing_files == ProcessingFileSettings{});
+
+    reader.next->processing_files.collector = {0, 150};
+    reader.next->processing_files.normalize = {200, 1000000000000ULL};
+    auto changed = controller.reload();
+    CHECK(changed && *changed);
+    CHECK(controller.current().processing_files == reader.next->processing_files);
+    CHECK(controller.current().collection_interval == std::chrono::seconds{60});
+    CHECK(database.active == original_mysql);
+    CHECK(database.connection_changes == connections);
+    CHECK(output.attempts.size() == 1);
+    changed = controller.reload();
+    CHECK(changed && !*changed);
+
+    const auto accepted = controller.current();
+    reader.next = std::unexpected(Error{"settings_config", "settings.json", "invalid_processing_files",
+        "Invalid processing file thresholds"});
+    CHECK(!controller.reload());
+    CHECK(controller.current() == accepted);
+    CHECK(controller.reload_error()->code == "invalid_processing_files");
+    CHECK(database.connection_changes == connections);
+    reader.next = accepted;
+    changed = controller.reload();
+    CHECK(changed && !*changed);
+    CHECK(!controller.reload_error());
+
+    reader.next->processing_files = {};
+    changed = controller.reload();
+    CHECK(changed && *changed);
+    CHECK(controller.current().processing_files == ProcessingFileSettings{});
+    CHECK(!controller.current().is_analyzer);
+    CHECK(!database.active.enabled);
+    CHECK(database.connection_changes == connections);
+    CHECK(output.attempts.size() == 1);
+}
+
 }
 
 int main() {
@@ -630,5 +674,6 @@ int main() {
         analyzer_settings_reload_tests();
         process_monitor_settings_reload_tests();
         log_silence_settings_reload_tests();
+        processing_files_settings_reload_tests();
     });
 }

@@ -79,6 +79,33 @@ bool valid_log_silence_timeout(const nlohmann::json& timeout) {
             : timeout.get<std::int64_t>() >= 60 && timeout.get<std::int64_t>() <= 604800);
 }
 
+bool read_processing_file_thresholds(const nlohmann::json& value, ProcessingFileThresholds& destination) {
+    if (!value.is_object()) return false;
+    for (const auto& [key, count] : value.items()) {
+        if ((key != "tmp_count" && key != "done_count") || !count.is_number_integer()) return false;
+        if (count.is_number_unsigned()) {
+            if (count.get<std::uint64_t>() > 1000000000000ULL) return false;
+        } else if (count.get<std::int64_t>() < 0 || count.get<std::int64_t>() > 1000000000000LL) {
+            return false;
+        }
+        (key == "tmp_count" ? destination.tmp_count : destination.done_count) = count.get<std::uint64_t>();
+    }
+    return true;
+}
+
+bool read_processing_files(const nlohmann::json& value, ProcessingFileSettings& destination) {
+    if (!value.is_object()) return false;
+    for (const auto& [key, thresholds] : value.items()) {
+        if (key != "thresholds" || !thresholds.is_object()) return false;
+        for (const auto& [directory, counts] : thresholds.items()) {
+            if (directory != "collector" && directory != "normalize") return false;
+            if (!read_processing_file_thresholds(counts,
+                directory == "collector" ? destination.collector : destination.normalize)) return false;
+        }
+    }
+    return true;
+}
+
 bool read_log_silence_overrides(const nlohmann::json& value, std::vector<LogSilencePolicy>& destination) {
     if (!value.is_array() || value.size() > 256) return false;
     std::set<std::string> unique;
@@ -162,10 +189,10 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::read_settings() {
         const auto json = nlohmann::json::parse(document, callback);
         if (!json.is_object() || !json.contains("schema_version") ||
             !json.contains("thresholds")) {
-            return std::unexpected(config_error(path_, "invalid_schema", "Expected schema_version, thresholds, and optional is_analyzer, analyzer, process_monitor, log_silence, collection and mysql"));
+            return std::unexpected(config_error(path_, "invalid_schema", "Expected schema_version, thresholds, and optional is_analyzer, analyzer, process_monitor, processing_files, log_silence, collection and mysql"));
         }
         for (const auto& [key, value] : json.items()) {
-            if (key != "schema_version" && key != "thresholds" && key != "collection" && key != "mysql" && key != "is_analyzer" && key != "analyzer" && key != "process_monitor" && key != "log_silence") {
+            if (key != "schema_version" && key != "thresholds" && key != "collection" && key != "mysql" && key != "is_analyzer" && key != "analyzer" && key != "process_monitor" && key != "processing_files" && key != "log_silence") {
                 return std::unexpected(config_error(path_, "invalid_schema", "Unknown configuration key"));
             }
         }
@@ -244,6 +271,11 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::read_settings() {
                     return std::unexpected(config_error(path_, "invalid_process_monitor", "Process lists must contain at most 256 unique names, each 1..128 UTF-8 bytes without control characters or leading or trailing ASCII whitespace"));
                 }
             }
+        }
+        if (json.contains("processing_files") &&
+            !read_processing_files(json["processing_files"], settings.processing_files)) {
+            return std::unexpected(config_error(path_, "invalid_processing_files",
+                "Processing file thresholds must be objects with collector and normalize integer counts between 0 and 1000000000000"));
         }
         if (json.contains("log_silence")) {
             const auto& log_silence = json["log_silence"];

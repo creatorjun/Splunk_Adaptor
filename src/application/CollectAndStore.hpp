@@ -7,6 +7,7 @@
 #include "application/ports/ICollectCountMonitor.hpp"
 #include "application/ports/IJavaProcessMonitor.hpp"
 #include "application/ports/ILogSilenceMonitor.hpp"
+#include "application/ports/IProcessingFileMonitor.hpp"
 
 namespace monitor {
 
@@ -15,7 +16,8 @@ public:
     CollectAndStore(IResourceReader& reader, ISnapshotStore& store,
         IThresholdConfigReader& config, ICollectCountMonitor* collect_count = nullptr,
         IJavaProcessMonitor* java_processes = nullptr,
-        ILogSilenceMonitor* log_silence = nullptr);
+        ILogSilenceMonitor* log_silence = nullptr,
+        IProcessingFileMonitor* processing_files = nullptr);
     std::expected<void, Error> initialize();
     void settings_changed(std::chrono::system_clock::time_point timestamp);
     std::expected<ResourceSnapshot, Error> run(std::uint64_t missed_intervals = 0);
@@ -27,6 +29,7 @@ private:
     ICollectCountMonitor* collect_count_;
     IJavaProcessMonitor* java_processes_;
     ILogSilenceMonitor* log_silence_;
+    IProcessingFileMonitor* processing_files_;
     std::optional<ThresholdPolicy> policy_;
     std::chrono::system_clock::time_point policy_applied_at_;
     std::optional<CpuCounters> previous_cpu_;

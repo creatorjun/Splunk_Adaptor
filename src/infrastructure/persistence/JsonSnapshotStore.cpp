@@ -203,7 +203,7 @@ nlohmann::json serialize(const ResourceSnapshot& snapshot, const std::string& ti
         errors.push_back({{"component", error.component}, {"target", error.target},
             {"code", error.code}, {"message", error.message}});
     }
-    return {
+    nlohmann::json document{
         {"schema_version", 1},
         {"timestamp", timestamp},
         {"thresholds_applied_at", applied_at},
@@ -259,6 +259,21 @@ nlohmann::json serialize(const ResourceSnapshot& snapshot, const std::string& ti
         }},
         {"errors", std::move(errors)}
     };
+    if (!snapshot.processing_files.alerts.empty()) {
+        auto processing_alerts = nlohmann::json::array();
+        for (const auto& alert : snapshot.processing_files.alerts) {
+            processing_alerts.push_back({{"path", alert.path}, {"extension", alert.extension},
+                {"count", alert.count}, {"threshold", alert.threshold}});
+        }
+        document["processing_files"] = {
+            {"status", "warning"},
+            {"scan_interval_seconds", snapshot.processing_files.scan_interval_seconds},
+            {"scan_started_at", nullable_time(snapshot.processing_files.scan_started_at)},
+            {"scanned_at", nullable_time(snapshot.processing_files.scanned_at)},
+            {"alerts", std::move(processing_alerts)}
+        };
+    }
+    return document;
 }
 
 int commit_file(int directory, const char* temporary_name, const char* final_name, bool& linked) {

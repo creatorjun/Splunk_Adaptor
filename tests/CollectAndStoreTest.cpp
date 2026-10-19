@@ -129,6 +129,72 @@ bool has_error(const ResourceSnapshot& snapshot, const std::string& code) {
     });
 }
 
+struct ProcessingMonitor final : IProcessingFileMonitor {
+    ProcessingFilesSnapshot next;
+    unsigned reads{};
+    unsigned updates{};
+
+    ProcessingFilesSnapshot collect() override {
+        ++reads;
+        return next;
+    }
+
+    void settings_changed() override { ++updates; }
+};
+
+void processing_file_tests() {
+    Reader reader;
+    Store store;
+    Config config;
+    ProcessingMonitor processing;
+    CollectAndStore use_case(reader, store, config, nullptr, nullptr, nullptr, &processing);
+    use_case.settings_changed(sample(0).timestamp);
+    CHECK(processing.updates == 0);
+    CHECK(use_case.initialize());
+    CHECK(processing.updates == 1);
+    CHECK(processing.reads == 0);
+    use_case.settings_changed(sample(0).timestamp);
+    CHECK(processing.updates == 2);
+    processing.next.status = ProcessingFilesStatus::warning;
+    processing.next.scanned_at = sample(0).timestamp;
+    processing.next.alerts = {{"/CloudESM/data/processing/collector", ".tmp", 100, 100}};
+    reader.next = sample(1);
+    auto result = use_case.run();
+    CHECK(result && result->status == MetricStatus::warning);
+    CHECK(result->collection_status == CollectionStatus::ok);
+    CHECK(result->processing_files.alerts.front().count == 100);
+    CHECK(store.attempts.back().processing_files.alerts.front().threshold == 100);
+    CHECK(processing.reads == 1);
+
+    processing.next.status = ProcessingFilesStatus::partial;
+    processing.next.alerts.clear();
+    processing.next.directories = {{"/CloudESM/data/processing/normalize", {}, {},
+        {{"processing_files", "normalize", "permission_denied", "Directory is unreadable"}}}};
+    reader.next = sample(2);
+    result = use_case.run();
+    CHECK(result && result->status == MetricStatus::unknown);
+    CHECK(result->collection_status == CollectionStatus::ok);
+    CHECK(result->memory.usage_percent == 60.0);
+    CHECK(has_error(*result, "permission_denied"));
+    CHECK(store.attempts.back().processing_files.alerts.empty());
+
+    processing.next.status = ProcessingFilesStatus::warning;
+    processing.next.alerts = {{"/CloudESM/data/processing/collector", ".done", 101, 100}};
+    reader.next = sample(3);
+    result = use_case.run();
+    CHECK(result && result->status == MetricStatus::warning);
+    CHECK(has_error(*result, "permission_denied"));
+    CHECK(result->collection_status == CollectionStatus::ok);
+
+    processing.next = {};
+    reader.next = sample(4);
+    result = use_case.run();
+    CHECK(result && result->status == MetricStatus::ok);
+    CHECK(result->errors.empty());
+    CHECK(result->processing_files.alerts.empty());
+    CHECK(result->processing_files.status == ProcessingFilesStatus::disabled);
+}
+
 void initialization_tests() {
     Reader reader;
     Store store;
@@ -827,6 +893,7 @@ int main() {
         count_analysis_tests();
         process_monitor_tests();
         log_silence_tests();
+        processing_file_tests();
         reload_tests();
         partial_failure_tests();
         write_failure_baseline_test();

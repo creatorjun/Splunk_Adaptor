@@ -3,6 +3,9 @@
 #include "application/CollectCountMonitor.hpp"
 #include "application/JavaProcessMonitor.hpp"
 #include "application/LogSilenceMonitor.hpp"
+#include "application/ProcessingFileMonitor.hpp"
+#include "infrastructure/linux/DirectoryProcessingFileScanner.hpp"
+#include "infrastructure/linux/ProcessingFileReader.hpp"
 #include "infrastructure/linux/ProcJavaProcessReader.hpp"
 #include "infrastructure/linux/LocalDayWindow.hpp"
 #include "application/SettingsController.hpp"
@@ -38,7 +41,7 @@ int main(int argc, char* argv[]) {
                 return 0;
             }
             if (argument == "--version") {
-                std::cout << "resource-monitor 1.7.0\n";
+                std::cout << "resource-monitor 1.8.0\n";
                 return 0;
             }
             if (argument == "--once") {
@@ -117,7 +120,11 @@ int main(int argc, char* argv[]) {
         monitor::ProcJavaProcessReader process_reader;
         monitor::JavaProcessMonitor processes{process_reader, settings};
         monitor::LogSilenceMonitor log_silence{database, settings};
-        monitor::CollectAndStore use_case{reader, store, settings, &collect_count, &processes, &log_silence};
+        monitor::DirectoryProcessingFileScanner file_scanner;
+        monitor::ProcessingFileReader file_reader{file_scanner};
+        monitor::ProcessingFileMonitor processing_files{file_reader, settings};
+        monitor::CollectAndStore use_case{reader, store, settings, &collect_count, &processes, &log_silence,
+            &processing_files};
         return monitor::run_daemon(use_case, options, &settings);
     } catch (const std::exception& error) {
         monitor::log_error({"runtime", "main", "unhandled_exception", error.what()});

@@ -1,7 +1,7 @@
 <!-- README.md -->
 # Resource Monitor
 
-Oracle Linux 8/9용 C++23 시스템 모니터링 데몬입니다. 기본 60초마다 CPU, 메모리, 마운트된 로컬 디스크 파일시스템을 수집하고 매 수집 주기의 전체 결과를 OS 시간대와 UTC 오프셋을 포함한 파일명으로 저장합니다. 예를 들어 OS가 Asia/Seoul이면 `/Monitor/20261019T123400+0900.json`에 저장합니다. `is_analyzer`에 맞는 Java `-DAPP` 프로세스의 실행 여부도 같은 JSON에 기록하며, 1.6.0부터 역할별 대상 목록을 설정 파일에서 재시작 없이 변경할 수 있습니다. 분석 장비에서는 `CloudESM.SUM_COLLECT_INFO_1DAY`의 일별 수집 건수 변동과 `CloudESM.SUM_COLLECT_INFO`의 장비별 로그 무수신 상태를 함께 기록합니다. 1.7.0부터 무수신 감시 대상 IP는 매 DB 조회에서 자동으로 발견합니다. `/etc/resource-monitor/settings.json`에서 수집 주기, 저장 경로, 장비 역할, DAPP 목록, 임계치, 분석 기준과 MySQL 연결을 관리합니다. DB 사용자명과 비밀번호는 `/etc/resource-monitor/secrets/mysql.json`으로 분리합니다. 임계치는 경고 판정에 적용하며 모든 수집 주기의 파일을 남깁니다.
+Oracle Linux 8/9용 C++23 시스템 모니터링 데몬입니다. 기본 60초마다 CPU, 메모리, 마운트된 로컬 디스크 파일시스템을 수집하고 매 수집 주기의 전체 결과를 OS 시간대와 UTC 오프셋을 포함한 파일명으로 저장합니다. 예를 들어 OS가 Asia/Seoul이면 `/Monitor/20261019T123400+0900.json`에 저장합니다. `is_analyzer`에 맞는 Java `-DAPP` 프로세스의 실행 여부도 같은 JSON에 기록하며, 1.6.0부터 역할별 대상 목록을 설정 파일에서 재시작 없이 변경할 수 있습니다. 분석 장비에서는 `CloudESM.SUM_COLLECT_INFO_1DAY`의 일별 수집 건수 변동과 `CloudESM.SUM_COLLECT_INFO`의 장비별 로그 무수신 상태를 함께 기록합니다. 1.7.0부터 무수신 감시 대상 IP는 매 DB 조회에서 자동으로 발견합니다. 1.8.0부터 수집 장비의 처리 폴더를 60초마다 검사하여 `.tmp`·`.done` 파일 개수가 설정한 임계치 이상인 항목만 결과에 추가합니다. `/etc/resource-monitor/settings.json`에서 수집 주기, 저장 경로, 장비 역할, DAPP 목록, 임계치, 분석 기준과 MySQL 연결을 관리합니다. DB 사용자명과 비밀번호는 `/etc/resource-monitor/secrets/mysql.json`으로 분리합니다. 리소스 임계치는 경고 판정에 적용하며 모든 수집 주기의 파일을 남깁니다.
 
 ## 구성
 
@@ -9,7 +9,7 @@ Oracle Linux 8/9용 C++23 시스템 모니터링 데몬입니다. 기본 60초�
 | --- | --- |
 | `src/domain` | 측정 모델, 계산식, 임계치 규칙, 상태 집계 |
 | `src/application` | 수집·설정 전체 적용·실패 시 기존 설정 유지·프로세스 대상 선택·저장 유스케이스와 포트 |
-| `src/infrastructure/linux` | procfs의 리소스·Java 프로세스, mountinfo, 파일시스템 용량 수집 |
+| `src/infrastructure/linux` | procfs의 리소스·Java 프로세스, mountinfo, 파일시스템 용량 수집과 비동기 처리 파일 검사 |
 | `src/infrastructure/config` | 사용자 설정·MySQL 계정 JSON 파싱·검증과 설정 포트 구현 |
 | `src/infrastructure/database` | MySQL 연결 준비·교체·연결 확인과 비동기 일별 수집 건수·마지막 로그 수신 시각 조회 |
 | `src/infrastructure/persistence` | 저장 경로 검증·잠금·전환, JSON 직렬화와 원자적 파일 저장 |
@@ -96,6 +96,12 @@ SELinux가 Enforcing인 실제 서버에서 파일 쓰기와 디렉터리 접근
     "default_timeout_seconds": 300,
     "overrides": []
   },
+  "processing_files": {
+    "thresholds": {
+      "collector": { "tmp_count": 100, "done_count": 100 },
+      "normalize": { "tmp_count": 100, "done_count": 100 }
+    }
+  },
   "process_monitor": {
     "analyzer": [
       "SearchEngine", "Normalizer", "CollectorForAgent", "CDMEngine",
@@ -139,13 +145,17 @@ SELinux가 Enforcing인 실제 서버에서 파일 쓰기와 디렉터리 접근
 | `process_monitor.collector` | `is_analyzer=false`일 때 감시할 DAPP 이름 배열, 기본값은 아래 수집 장비 목록 | 다음 설정 적용 후 수집부터 |
 | `log_silence.default_timeout_seconds` | 60~604800 정수, 기본 300초 | 다음 수집부터 모든 DB 장비의 기본 무수신 제한 변경, DB 재연결 없음 |
 | `log_silence.overrides` | 최대 256개 장비별 `{eqp_ip, timeout_seconds}` 예외 설정, 기본 `[]` | 다음 수집부터 해당 장비의 제한만 변경; 감시 대상은 항상 DB에서 자동 발견 |
+| `processing_files.thresholds.collector.tmp_count` | 0~1,000,000,000,000 정수, 기본 100개 | 다음 수집부터 collector 하위 `.tmp` 합계에 적용 |
+| `processing_files.thresholds.collector.done_count` | 0~1,000,000,000,000 정수, 기본 100개 | 다음 수집부터 collector 하위 `.done` 합계에 적용 |
+| `processing_files.thresholds.normalize.tmp_count` | 0~1,000,000,000,000 정수, 기본 100개 | 다음 수집부터 normalize 하위 `.tmp` 합계에 적용 |
+| `processing_files.thresholds.normalize.done_count` | 0~1,000,000,000,000 정수, 기본 100개 | 다음 수집부터 normalize 하위 `.done` 합계에 적용 |
 | `collection.interval_seconds` | 1~86400의 정수, 기본 60초 | 다음 설정 확인 후 새 주기 시작 |
 | `collection.output_directory` | 제어문자가 없는 절대 경로, 기본 `/Monitor` | 다음 설정 확인 후 저장부터 |
 | `thresholds.cpu_usage_percent` | 0~100의 숫자 | 다음 설정 확인 후 수집부터 |
 | `thresholds.memory_usage_percent` | 0~100의 숫자 | 다음 설정 확인 후 수집부터 |
 | `thresholds.storage_usage_percent` | 0~100의 숫자 | 다음 설정 확인 후 수집부터 |
 
-세 리소스 임계치는 필수이며 유한한 숫자여야 합니다. 리소스 임계치의 0은 항상 경고를 발생시킵니다. `collection`, `analyzer`, `process_monitor` 또는 그 하위 설정을 생략하면 해당 기본값을 사용하므로 이전 설정 JSON도 읽을 수 있습니다. 설정 키의 정확한 이름은 `is_analyzer`이며 `is_anlayzer`는 허용하지 않습니다. 잘못된 자료형, null, 필수 키 누락, 중복 키, 알 수 없는 키, 지원하지 않는 스키마 버전은 거부합니다. 설정은 최대 64KiB의 일반 파일이어야 하며 심볼릭 링크와 FIFO는 허용하지 않습니다. 새로운 동작 설정은 이름·자료형·검증 규칙을 정의해 추가합니다.
+세 리소스 임계치는 필수이며 유한한 숫자여야 합니다. 리소스 임계치의 0은 항상 경고를 발생시킵니다. `collection`, `analyzer`, `process_monitor`, `log_silence`, `processing_files` 또는 그 하위 설정을 생략하면 해당 기본값을 사용하므로 이전 설정 JSON도 읽을 수 있습니다. 설정 키의 정확한 이름은 `is_analyzer`이며 `is_anlayzer`는 허용하지 않습니다. 잘못된 자료형, null, 필수 키 누락, 중복 키, 알 수 없는 키, 지원하지 않는 스키마 버전은 거부합니다. 설정은 최대 64KiB의 일반 파일이어야 하며 심볼릭 링크와 FIFO는 허용하지 않습니다. 새로운 동작 설정은 이름·자료형·검증 규칙을 정의해 추가합니다.
 
 데몬은 수집 주기와 별도로 1초마다 설정 파일 전체를 확인하므로 재시작 없이 모든 항목을 자동 반영합니다. `is_analyzer`가 `true`인 경우에만 계정 파일을 확인하고 DB 연결을 준비합니다. 파일을 직접 수정하는 방식과 새 파일로 원자 교체하는 방식 모두 지원합니다. 진행 중인 동기 수집·파일 작업이 오래 걸리면 확인도 그 작업이 끝난 뒤 수행됩니다. 명시한 `--interval-seconds`와 `--output` 옵션은 실행 중에도 각각 JSON의 값을 덮어씁니다. 기본 systemd 서비스는 이 옵션들을 지정하지 않아 파일 설정을 사용합니다.
 
@@ -369,6 +379,35 @@ DB에는 초 단위 수신 시각이 없으므로 해당 분의 끝을 기준으
 
 무수신 경고는 최상위 `status=warning`에 반영합니다. `pending`, `no_data`, `error`는 다른 경고가 없으면 최상위 `unknown`에 반영하며 리소스 전용 `collection_status`에는 영향을 주지 않습니다. DB 오류 중에도 CPU·메모리·디스크·DAPP 수집과 JSON 저장은 계속합니다. 이 기능은 로그 수신을 관측하며 장비 프로세스를 중지·시작하거나 DB 원본 데이터를 변경하지 않습니다.
 
+## 수집 장비 처리 파일 개수 모니터링
+
+`is_analyzer=false`일 때만 `/CloudESM/data/processing/collector`와 `/CloudESM/data/processing/normalize`를 하위 폴더까지 검사합니다. 각 루트 폴더에서 일반 파일의 `.tmp`와 `.done` 개수를 따로 합산하므로 총 네 개의 임계치를 적용합니다. 하위 폴더별 목록이나 파일 내용은 기록하지 않습니다. 대소문자를 구분하며 숨김 파일도 포함합니다. 이름이 `.tmp`로 끝나더라도 디렉터리·FIFO·심볼릭 링크는 세지 않습니다. 하위 심볼릭 링크 디렉터리도 따라가지 않습니다. `/CloudESM/data` 같은 상위 경로의 링크는 허용하지만 검사 대상 루트인 `collector`·`normalize` 자체가 링크이면 오류로 처리합니다.
+
+기본 임계치는 모두 100개입니다. 예를 들어 collector의 `.tmp`가 99개면 해당 항목을 생략하고, 100개부터 출력합니다. 한 항목이라도 임계치 이상이면 `processing_files.alerts`에 그 항목만 추가하고 최상위 `status`를 `warning`으로 반영합니다. 네 항목 모두 임계치 미만이거나 분석 서버이면 `processing_files` 객체 자체를 생략합니다. CPU·메모리·디스크 등 기존 결과 파일은 매 수집 주기마다 계속 생성됩니다. 임계치 0은 명시적으로 허용하며, 정상 검사한 개수가 0이어도 해당 항목을 기록합니다.
+
+```json
+"processing_files": {
+  "status": "warning",
+  "scan_interval_seconds": 60,
+  "scan_started_at": "2026-10-19T15:00:00.000+09:00",
+  "scanned_at": "2026-10-19T15:00:00.125+09:00",
+  "alerts": [
+    {
+      "path": "/CloudESM/data/processing/collector",
+      "extension": ".tmp",
+      "count": 100,
+      "threshold": 100
+    }
+  ]
+}
+```
+
+파일 검사는 별도 작업 스레드에서 시작 직후 한 번, 이후 단조 시계 기준 60초마다 수행합니다. `collection.interval_seconds`를 변경해도 검사 주기는 60초로 유지합니다. 진행 중인 검사를 겹쳐 실행하지 않으며 오래 걸려 지나간 검사 시점은 건너뜁니다. JSON 저장 시 가장 최근 완료된 검사 결과를 사용하고, `scan_started_at`·`scanned_at`으로 실제 검사 구간을 표시합니다. 저장 주기가 짧으면 같은 검사 결과가 여러 JSON에 사용될 수 있고, 저장 주기가 길면 그 사이의 모든 검사 결과를 별도 파일로 남기지는 않습니다. 폴더가 검사 중 변경될 수 있으므로 동시에 고정된 파일시스템 스냅샷은 아닙니다.
+
+설정 파일의 임계치 변경은 재시작 없이 기존의 유효한 검사 결과에 적용합니다. 역할을 분석 서버로 바꾸면 진행 중인 검사에 취소를 요청하고 이전 결과를 버리며, 수집 서버로 돌아오면 새 검사를 시작합니다. 검사 준비 중이거나 완료 후 120초 넘게 오래된 결과는 경고 개수로 재사용하지 않습니다. 파일 작업이 커널에서 지연되면 취소 처리는 해당 호출이 반환된 뒤 진행됩니다.
+
+없는 폴더, 접근 권한 오류, 검사 제한 초과는 0개로 처리하지 않습니다. 오류가 발생한 루트의 개수는 경고 판정에 사용하지 않고 최상위 `errors`에 `component=processing_files`로 원인을 기록합니다. 다른 루트를 정상 검사했다면 그 결과는 사용합니다. 오류 외에 경고가 없으면 최상위 상태는 `unknown`이며 리소스 전용 `collection_status`에는 영향을 주지 않습니다. 과도한 탐색을 막기 위해 하위 깊이 128, 루트당 1천만 항목, 전체 검사 시간 55초의 제한을 적용합니다. 데몬은 감시 폴더나 파일을 생성·수정·삭제하지 않습니다. 서비스 계정에 대상 폴더와 하위 폴더의 읽기·탐색 권한을 제공해야 합니다.
+
 ## JSON 계약
 
 | 필드 | 값과 의미 |
@@ -389,9 +428,11 @@ DB에는 초 단위 수신 시각이 없으므로 해당 분의 끝을 기준으
 | `process_status` | 대상 모두 실행 중이면 `ok`, 미실행 대상이 있으면 `warning`, 관측 불가로 존재 여부를 확정하지 못하면 `unknown` |
 | `processes` | 선택한 모든 DAPP 이름을 키로 갖는 객체. 실행 중은 `true`, 미실행은 `false`, 확인 불가는 `null` |
 | `collect_count` | 조회 대상, `disabled`·`pending`·`ok`·`warning`·`no_data`·`error` 상태, 비교 날짜, 적용 임계치, 조회 완료 시각, 장비 수, 경고 목록과 오류 |
+| `log_silence` | DB에서 발견한 장비별 마지막 수신 시각·무수신 시간·상태·제한 시간과 조회 정보 |
+| `processing_files` | 수집 장비에서 파일 개수가 임계치 이상인 경우에만 존재. 검사 시각, 고정 검사 주기, 해당 경고 목록 |
 | `errors` | component, target, code, message로 구성된 오류 목록 |
 
-전체 `status`는 리소스, Java 프로세스, 일별 수집 건수 분석 중 하나라도 경고면 `warning`, 경고 없이 측정 불가가 있으면 `unknown`, 모두 정상 측정되고 임계치 미만이면 `ok`입니다. 분석의 `pending`, `error`, `no_data`와 프로세스 관측의 `unknown`은 다른 항목이 모두 정상이더라도 전체 `status=unknown`으로 반영하며 분석의 `disabled`는 전체 상태에 영향을 주지 않습니다. `ok`, `warning`, `unknown` 모두 매 수집 주기에 JSON으로 기록합니다. `collection_status`는 CPU·메모리·스토리지 수집 상태만 나타내며 프로세스·DB 분석·설정 오류로 변경하지 않습니다. 예를 들어 디스크 하나가 경고이고 다른 디스크가 수집 실패이면 `status=warning`, `collection_status=partial`인 전체 결과를 저장합니다. 실행 중 발생한 수집·프로세스 관측·설정·분석 오류는 해당 주기의 JSON `errors`와 journal에 기록하며 분석 오류는 `collect_count.error`에도 표시합니다.
+전체 `status`는 리소스, Java 프로세스, 일별 수집 건수 분석, 로그 무수신, 처리 파일 개수 중 하나라도 경고면 `warning`, 경고 없이 측정 불가가 있으면 `unknown`, 모두 정상 측정되고 임계치 미만이면 `ok`입니다. 분석의 `pending`, `error`, `no_data`와 프로세스 관측의 `unknown`은 다른 항목이 모두 정상이더라도 전체 `status=unknown`으로 반영하며 분석의 `disabled`는 전체 상태에 영향을 주지 않습니다. 처리 파일 검사의 `pending`, `partial`, `error`도 다른 경고가 없으면 전체 `unknown`에 반영하며 분석 서버에서 비활성화된 검사는 전체 상태에 영향을 주지 않습니다. `ok`, `warning`, `unknown` 모두 매 수집 주기에 JSON으로 기록합니다. `collection_status`는 CPU·메모리·스토리지 수집 상태만 나타내며 프로세스·DB 분석·파일 개수·설정 오류로 변경하지 않습니다. 예를 들어 디스크 하나가 경고이고 다른 디스크가 수집 실패이면 `status=warning`, `collection_status=partial`인 전체 결과를 저장합니다. 실행 중 발생한 수집·프로세스 관측·설정·분석·처리 파일 검사 오류는 해당 주기의 JSON `errors`와 journal에 기록하며 DB 분석 오류는 `collect_count.error` 또는 `log_silence.error`에도 표시합니다.
 
 측정할 수 없는 리소스 값은 0 대신 JSON null입니다. 리소스의 이전 결과를 현재 측정값처럼 재사용하지 않습니다. DB 분석은 위에서 설명한 캐시와 `queried_at`으로 조회 시점을 구분하며, 날짜별 행이 없는 경우에만 건수 0과 존재 여부를 함께 사용합니다. 빈 파일시스템 목록은 모든 디스크 정상으로 취급하지 않습니다.
 
@@ -457,7 +498,7 @@ RPM은 빌드할 OL8 또는 OL9 시스템에서 다음처럼 생성합니다. So
 ```bash
 sudo dnf install -y rpm-build gcc-toolset-15-gcc-c++ cmake make python3 pkgconf-pkg-config mariadb-connector-c-devel
 mkdir -p "$HOME/rpmbuild/SOURCES" "$HOME/rpmbuild/SPECS"
-cp artifacts/resource-monitor-1.7.0.tar.gz "$HOME/rpmbuild/SOURCES/"
+cp artifacts/resource-monitor-1.8.0.tar.gz "$HOME/rpmbuild/SOURCES/"
 curl --fail --location https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz --output "$HOME/rpmbuild/SOURCES/json.tar.xz"
 cp packaging/rpm/resource-monitor.spec "$HOME/rpmbuild/SPECS/"
 rpmbuild -ba "$HOME/rpmbuild/SPECS/resource-monitor.spec"

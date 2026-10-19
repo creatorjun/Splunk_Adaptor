@@ -1,6 +1,6 @@
 # CMakeLists.txt
 cmake_minimum_required(VERSION 3.20)
-project(resource-monitor VERSION 1.7.0 LANGUAGES CXX)
+project(resource-monitor VERSION 1.8.0 LANGUAGES CXX)
 
 if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
     set(CMAKE_INSTALL_PREFIX "/usr" CACHE PATH "Installation prefix" FORCE)
@@ -57,13 +57,15 @@ add_library(monitor_domain
 target_include_directories(monitor_domain PUBLIC src)
 target_link_libraries(monitor_domain PRIVATE monitor_options)
 
-add_library(monitor_application src/application/CollectAndStore.cpp src/application/SettingsController.cpp src/application/CollectCountMonitor.cpp src/application/JavaProcessMonitor.cpp src/application/LogSilenceMonitor.cpp)
+add_library(monitor_application src/application/CollectAndStore.cpp src/application/SettingsController.cpp src/application/CollectCountMonitor.cpp src/application/JavaProcessMonitor.cpp src/application/LogSilenceMonitor.cpp src/application/ProcessingFileMonitor.cpp)
 target_link_libraries(monitor_application PUBLIC monitor_domain PRIVATE monitor_options)
 
 find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(MARIADB REQUIRED IMPORTED_TARGET libmariadb>=3.1)
 add_library(monitor_infrastructure
+    src/infrastructure/linux/DirectoryProcessingFileScanner.cpp
+    src/infrastructure/linux/ProcessingFileReader.cpp
     src/infrastructure/linux/ProcJavaProcessReader.cpp
     src/infrastructure/linux/LocalDayWindow.cpp
     src/infrastructure/database/CollectCountQuery.cpp
@@ -86,12 +88,12 @@ target_link_libraries(resource-monitor PRIVATE monitor_runtime monitor_infrastru
 
 include(CTest)
 if(BUILD_TESTING)
-    foreach(test_name MetricCalculators CollectCountAnalysis LogSilenceAnalysis CollectCountMonitor LogSilenceMonitor JavaProcessMonitor ProcJavaProcessReader LocalDayWindow CollectCountQuery LogSilenceQuery CollectAndStore SettingsController LinuxCollectors JsonSnapshotStore JsonSettingsReader JsonMySqlCredentialsReader MySqlConfiguration)
+    foreach(test_name MetricCalculators CollectCountAnalysis LogSilenceAnalysis CollectCountMonitor LogSilenceMonitor ProcessingFileMonitor DirectoryProcessingFileScanner ProcessingFileReader JavaProcessMonitor ProcJavaProcessReader LocalDayWindow CollectCountQuery LogSilenceQuery CollectAndStore SettingsController LinuxCollectors JsonSnapshotStore JsonSettingsReader JsonMySqlCredentialsReader MySqlConfiguration)
         add_executable(${test_name}Test tests/${test_name}Test.cpp)
         target_include_directories(${test_name}Test PRIVATE tests)
         if(test_name STREQUAL "MetricCalculators" OR test_name STREQUAL "CollectCountAnalysis" OR test_name STREQUAL "LogSilenceAnalysis")
             target_link_libraries(${test_name}Test PRIVATE monitor_domain monitor_options)
-        elseif(test_name STREQUAL "CollectAndStore" OR test_name STREQUAL "SettingsController" OR test_name STREQUAL "CollectCountMonitor" OR test_name STREQUAL "JavaProcessMonitor" OR test_name STREQUAL "LogSilenceMonitor")
+        elseif(test_name STREQUAL "CollectAndStore" OR test_name STREQUAL "SettingsController" OR test_name STREQUAL "CollectCountMonitor" OR test_name STREQUAL "JavaProcessMonitor" OR test_name STREQUAL "LogSilenceMonitor" OR test_name STREQUAL "ProcessingFileMonitor")
             target_link_libraries(${test_name}Test PRIVATE monitor_application monitor_options)
         else()
             target_link_libraries(${test_name}Test PRIVATE monitor_infrastructure nlohmann_json::nlohmann_json monitor_options Threads::Threads)
