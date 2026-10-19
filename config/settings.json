@@ -5,6 +5,32 @@
     "collect_count_change_percent": 10.0,
     "comparison_day": "yesterday"
   },
+  "process_monitor": {
+    "analyzer": [
+      "SearchEngine",
+      "Normalizer",
+      "CollectorForAgent",
+      "CDMEngine",
+      "ShovelServer",
+      "AnalyzeEngine",
+      "AnalyzeAssistantEngine",
+      "SoarTicketMain",
+      "SoarPlaybookManager",
+      "pmsServer",
+      "pmsClient",
+      "ProcessMonitor"
+    ],
+    "collector": [
+      "SearchEngine",
+      "Reducer",
+      "Normalizer",
+      "CloudESMCollector",
+      "CollectorForAgent",
+      "CDMEngine",
+      "pmsClient",
+      "ProcessMonitor"
+    ]
+  },
   "collection": {
     "interval_seconds": 60,
     "output_directory": "/Monitor"

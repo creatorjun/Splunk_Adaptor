@@ -117,5 +117,69 @@ int main() {
         CHECK(snapshot.status == MetricStatus::warning);
         CHECK(snapshot.errors.empty());
         CHECK(reader.reads == 8);
+
+        settings.value.process_monitor.collector = {"custom-collector", "case.Sensitive"};
+        settings.value.process_monitor.analyzer = {"custom-analyzer", "Analyzer2"};
+        reader.next.running_apps = {"custom-collector", "case.sensitive", "custom-analyzer"};
+        snapshot = monitor.collect();
+        CHECK(names(snapshot) == (std::set<std::string>{"custom-collector", "case.Sensitive"}));
+        CHECK(snapshot.apps.at("custom-collector") == true);
+        CHECK(snapshot.apps.at("case.Sensitive") == false);
+        CHECK(snapshot.status == MetricStatus::warning);
+        CHECK(!snapshot.apps.contains("SearchEngine"));
+
+        settings.value.process_monitor.collector = {"custom-collector"};
+        snapshot = monitor.collect();
+        CHECK(names(snapshot) == (std::set<std::string>{"custom-collector"}));
+        CHECK(snapshot.apps.at("custom-collector") == true);
+        CHECK(snapshot.status == MetricStatus::ok);
+        CHECK(!snapshot.apps.contains("case.Sensitive"));
+
+        settings.value.process_monitor.analyzer.push_back("InactiveNewApp");
+        snapshot = monitor.collect();
+        CHECK(names(snapshot) == (std::set<std::string>{"custom-collector"}));
+        CHECK(snapshot.status == MetricStatus::ok);
+
+        settings.value.is_analyzer = true;
+        snapshot = monitor.collect();
+        CHECK(snapshot.is_analyzer);
+        CHECK(names(snapshot) == (std::set<std::string>{"custom-analyzer", "Analyzer2", "InactiveNewApp"}));
+        CHECK(snapshot.apps.at("custom-analyzer") == true);
+        CHECK(snapshot.apps.at("Analyzer2") == false);
+        CHECK(snapshot.apps.at("InactiveNewApp") == false);
+        CHECK(snapshot.status == MetricStatus::warning);
+
+        settings.value.process_monitor.analyzer = {"custom-analyzer"};
+        snapshot = monitor.collect();
+        CHECK(names(snapshot) == (std::set<std::string>{"custom-analyzer"}));
+        CHECK(snapshot.status == MetricStatus::ok);
+        CHECK(!snapshot.apps.contains("Analyzer2"));
+
+        reader.next.errors.push_back(Error{"java_processes", "/proc", "permission_denied", "Access denied"});
+        settings.value.process_monitor.analyzer.clear();
+        const auto before_empty = reader.reads;
+        snapshot = monitor.collect();
+        CHECK(snapshot.is_analyzer);
+        CHECK(snapshot.apps.empty());
+        CHECK(snapshot.status == MetricStatus::ok);
+        CHECK(snapshot.errors.empty());
+        CHECK(reader.reads == before_empty);
+
+        settings.value.is_analyzer = false;
+        settings.value.process_monitor.collector.clear();
+        snapshot = monitor.collect();
+        CHECK(!snapshot.is_analyzer);
+        CHECK(snapshot.apps.empty());
+        CHECK(snapshot.status == MetricStatus::ok);
+        CHECK(snapshot.errors.empty());
+        CHECK(reader.reads == before_empty);
+
+        settings.value.process_monitor.collector = {"RestoredApp"};
+        snapshot = monitor.collect();
+        CHECK(names(snapshot) == (std::set<std::string>{"RestoredApp"}));
+        CHECK(!snapshot.apps.at("RestoredApp").has_value());
+        CHECK(snapshot.status == MetricStatus::unknown);
+        CHECK(snapshot.errors.size() == 1);
+        CHECK(reader.reads == before_empty + 1);
     });
 }

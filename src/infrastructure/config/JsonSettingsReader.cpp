@@ -53,6 +53,24 @@ bool has_control_characters(const std::string& value) {
     return false;
 }
 
+bool read_process_apps(const nlohmann::json& value, std::vector<std::string>& destination) {
+    if (!value.is_array() || value.size() > 256) return false;
+    std::set<std::string> unique;
+    std::vector<std::string> apps;
+    apps.reserve(value.size());
+    for (const auto& item : value) {
+        if (!item.is_string()) return false;
+        const auto& app = item.get_ref<const std::string&>();
+        if (app.empty() || app.size() > 128 || has_control_characters(app) ||
+            app.front() == ' ' || app.back() == ' ' || !unique.insert(app).second) {
+            return false;
+        }
+        apps.push_back(app);
+    }
+    destination = std::move(apps);
+    return true;
+}
+
 }
 
 JsonSettingsReader::JsonSettingsReader(std::filesystem::path path)
@@ -114,10 +132,10 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::read_settings() {
         const auto json = nlohmann::json::parse(document, callback);
         if (!json.is_object() || !json.contains("schema_version") ||
             !json.contains("thresholds")) {
-            return std::unexpected(config_error(path_, "invalid_schema", "Expected schema_version, thresholds, and optional is_analyzer, collection and mysql"));
+            return std::unexpected(config_error(path_, "invalid_schema", "Expected schema_version, thresholds, and optional is_analyzer, analyzer, process_monitor, collection and mysql"));
         }
         for (const auto& [key, value] : json.items()) {
-            if (key != "schema_version" && key != "thresholds" && key != "collection" && key != "mysql" && key != "is_analyzer" && key != "analyzer") {
+            if (key != "schema_version" && key != "thresholds" && key != "collection" && key != "mysql" && key != "is_analyzer" && key != "analyzer" && key != "process_monitor") {
                 return std::unexpected(config_error(path_, "invalid_schema", "Unknown configuration key"));
             }
         }
@@ -179,6 +197,22 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::read_settings() {
                     return std::unexpected(config_error(path_, "invalid_analyzer", "comparison_day must be today or yesterday"));
                 }
                 settings.analyzer.comparison_day = value == "today" ? ComparisonDay::today : ComparisonDay::yesterday;
+            }
+        }
+        if (json.contains("process_monitor")) {
+            const auto& process_monitor = json["process_monitor"];
+            if (!process_monitor.is_object()) {
+                return std::unexpected(config_error(path_, "invalid_process_monitor", "process_monitor must be an object"));
+            }
+            for (const auto& [key, value] : process_monitor.items()) {
+                if (key != "analyzer" && key != "collector") {
+                    return std::unexpected(config_error(path_, "invalid_process_monitor", "Unknown process_monitor setting"));
+                }
+                auto& destination = key == "analyzer"
+                    ? settings.process_monitor.analyzer : settings.process_monitor.collector;
+                if (!read_process_apps(value, destination)) {
+                    return std::unexpected(config_error(path_, "invalid_process_monitor", "Process lists must contain at most 256 unique names, each 1..128 UTF-8 bytes without control characters or leading or trailing ASCII whitespace"));
+                }
             }
         }
         if (json.contains("collection")) {

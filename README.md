@@ -1,7 +1,7 @@
 <!-- README.md -->
 # Resource Monitor
 
-Oracle Linux 8/9용 C++23 시스템 모니터링 데몬입니다. 기본 60초마다 CPU, 메모리, 마운트된 로컬 디스크 파일시스템을 수집하고 매 수집 주기의 전체 결과를 OS 시간대와 UTC 오프셋을 포함한 파일명으로 저장합니다. 예를 들어 OS가 Asia/Seoul이면 `/Monitor/20261019T123400+0900.json`에 저장합니다. 1.5.0에서는 `is_analyzer`에 맞는 Java `-DAPP` 프로세스의 실행 여부도 같은 JSON에 기록합니다. 분석 장비에서는 `CloudESM.SUM_COLLECT_INFO_1DAY`를 조회하여 장비 IP별 수집 건수의 전일 대비 변동을 함께 기록합니다. `/etc/resource-monitor/settings.json`에서 수집 주기, 저장 경로, 장비 역할, 임계치, 분석 기준과 MySQL 연결을 관리합니다. DB 사용자명과 비밀번호는 `/etc/resource-monitor/secrets/mysql.json`으로 분리합니다. 임계치는 경고 판정에 적용하며 모든 수집 주기의 파일을 남깁니다.
+Oracle Linux 8/9용 C++23 시스템 모니터링 데몬입니다. 기본 60초마다 CPU, 메모리, 마운트된 로컬 디스크 파일시스템을 수집하고 매 수집 주기의 전체 결과를 OS 시간대와 UTC 오프셋을 포함한 파일명으로 저장합니다. 예를 들어 OS가 Asia/Seoul이면 `/Monitor/20261019T123400+0900.json`에 저장합니다. `is_analyzer`에 맞는 Java `-DAPP` 프로세스의 실행 여부도 같은 JSON에 기록하며, 1.6.0부터 역할별 대상 목록을 설정 파일에서 재시작 없이 변경할 수 있습니다. 분석 장비에서는 `CloudESM.SUM_COLLECT_INFO_1DAY`를 조회하여 장비 IP별 수집 건수의 전일 대비 변동을 함께 기록합니다. `/etc/resource-monitor/settings.json`에서 수집 주기, 저장 경로, 장비 역할, DAPP 목록, 임계치, 분석 기준과 MySQL 연결을 관리합니다. DB 사용자명과 비밀번호는 `/etc/resource-monitor/secrets/mysql.json`으로 분리합니다. 임계치는 경고 판정에 적용하며 모든 수집 주기의 파일을 남깁니다.
 
 ## 구성
 
@@ -25,6 +25,7 @@ Java 프로세스 모니터링의 의존성은 다음 파일로 나눕니다. Ap
 ```text
 src/
   application/
+    ProcessMonitorSettings.hpp
     JavaProcessMonitor.hpp
     JavaProcessMonitor.cpp
     ports/
@@ -91,6 +92,17 @@ SELinux가 Enforcing인 실제 서버에서 파일 쓰기와 디렉터리 접근
     "collect_count_change_percent": 10.0,
     "comparison_day": "yesterday"
   },
+  "process_monitor": {
+    "analyzer": [
+      "SearchEngine", "Normalizer", "CollectorForAgent", "CDMEngine",
+      "ShovelServer", "AnalyzeEngine", "AnalyzeAssistantEngine", "SoarTicketMain",
+      "SoarPlaybookManager", "pmsServer", "pmsClient", "ProcessMonitor"
+    ],
+    "collector": [
+      "SearchEngine", "Reducer", "Normalizer", "CloudESMCollector",
+      "CollectorForAgent", "CDMEngine", "pmsClient", "ProcessMonitor"
+    ]
+  },
   "collection": {
     "interval_seconds": 60,
     "output_directory": "/Monitor"
@@ -119,13 +131,15 @@ SELinux가 Enforcing인 실제 서버에서 파일 쓰기와 디렉터리 접근
 | `is_analyzer` | JSON 불리언 `true` 또는 `false`, 생략 시 기본 `false` | 다음 설정 적용 후 DB 연결·쿼리 허용 여부 변경, 다음 수집부터 Java 프로세스 대상 변경 |
 | `analyzer.collect_count_change_percent` | 0 초과 1,000,000 이하의 유한한 숫자, 기본 10.0% | 다음 설정 확인 후 분석부터, DB 재연결 없음 |
 | `analyzer.comparison_day` | `yesterday` 또는 `today`, 기본 `yesterday` | 다음 설정 확인 후 새 날짜 쌍 조회 요청 |
+| `process_monitor.analyzer` | `is_analyzer=true`일 때 감시할 DAPP 이름 배열, 기본값은 아래 분석 장비 목록 | 다음 설정 적용 후 수집부터, DB 재연결 없음 |
+| `process_monitor.collector` | `is_analyzer=false`일 때 감시할 DAPP 이름 배열, 기본값은 아래 수집 장비 목록 | 다음 설정 적용 후 수집부터 |
 | `collection.interval_seconds` | 1~86400의 정수, 기본 60초 | 다음 설정 확인 후 새 주기 시작 |
 | `collection.output_directory` | 제어문자가 없는 절대 경로, 기본 `/Monitor` | 다음 설정 확인 후 저장부터 |
 | `thresholds.cpu_usage_percent` | 0~100의 숫자 | 다음 설정 확인 후 수집부터 |
 | `thresholds.memory_usage_percent` | 0~100의 숫자 | 다음 설정 확인 후 수집부터 |
 | `thresholds.storage_usage_percent` | 0~100의 숫자 | 다음 설정 확인 후 수집부터 |
 
-세 리소스 임계치는 필수이며 유한한 숫자여야 합니다. 리소스 임계치의 0은 항상 경고를 발생시킵니다. `collection`, `analyzer` 또는 그 하위 설정을 생략하면 해당 기본값을 사용하므로 이전 임계치 전용 JSON도 읽을 수 있습니다. 설정 키의 정확한 이름은 `is_analyzer`이며 `is_anlayzer`는 허용하지 않습니다. 잘못된 자료형, null, 필수 키 누락, 중복 키, 알 수 없는 키, 지원하지 않는 스키마 버전은 거부합니다. 설정은 최대 64KiB의 일반 파일이어야 하며 심볼릭 링크와 FIFO는 허용하지 않습니다. 새로운 동작 설정은 이름·자료형·검증 규칙을 정의해 추가합니다.
+세 리소스 임계치는 필수이며 유한한 숫자여야 합니다. 리소스 임계치의 0은 항상 경고를 발생시킵니다. `collection`, `analyzer`, `process_monitor` 또는 그 하위 설정을 생략하면 해당 기본값을 사용하므로 이전 설정 JSON도 읽을 수 있습니다. 설정 키의 정확한 이름은 `is_analyzer`이며 `is_anlayzer`는 허용하지 않습니다. 잘못된 자료형, null, 필수 키 누락, 중복 키, 알 수 없는 키, 지원하지 않는 스키마 버전은 거부합니다. 설정은 최대 64KiB의 일반 파일이어야 하며 심볼릭 링크와 FIFO는 허용하지 않습니다. 새로운 동작 설정은 이름·자료형·검증 규칙을 정의해 추가합니다.
 
 데몬은 수집 주기와 별도로 1초마다 설정 파일 전체를 확인하므로 재시작 없이 모든 항목을 자동 반영합니다. `is_analyzer`가 `true`인 경우에만 계정 파일을 확인하고 DB 연결을 준비합니다. 파일을 직접 수정하는 방식과 새 파일로 원자 교체하는 방식 모두 지원합니다. 진행 중인 동기 수집·파일 작업이 오래 걸리면 확인도 그 작업이 끝난 뒤 수행됩니다. 명시한 `--interval-seconds`와 `--output` 옵션은 실행 중에도 각각 JSON의 값을 덮어씁니다. 기본 systemd 서비스는 이 옵션들을 지정하지 않아 파일 설정을 사용합니다.
 
@@ -264,12 +278,14 @@ LIMIT 10001;
 
 ## Java 프로세스 모니터링
 
-`is_analyzer`의 값과 관계없이 매 수집 주기에 Java 프로세스를 관측합니다. `true`이면 분석 장비의 12개 대상, `false`이면 수집 장비의 8개 대상을 선택합니다. 대상은 제공된 프로세스 목록의 `-DAPP=<이름>`을 기준으로 하며 대소문자를 구분합니다.
+`is_analyzer=true`이면 `process_monitor.analyzer`, `false`이면 `process_monitor.collector` 목록을 선택하여 매 수집 주기에 Java 프로세스를 관측합니다. 대상은 `-DAPP=<이름>`을 기준으로 하며 대소문자를 구분합니다. 다음은 각 목록을 생략했을 때 사용하는 기본값입니다.
 
 | `is_analyzer` | `process_profile` | 대상 DAPP 이름 |
 | --- | --- | --- |
 | `true` | `analyzer` | `SearchEngine`, `Normalizer`, `CollectorForAgent`, `CDMEngine`, `ShovelServer`, `AnalyzeEngine`, `AnalyzeAssistantEngine`, `SoarTicketMain`, `SoarPlaybookManager`, `pmsServer`, `pmsClient`, `ProcessMonitor` |
 | `false` | `collector` | `SearchEngine`, `Reducer`, `Normalizer`, `CloudESMCollector`, `CollectorForAgent`, `CDMEngine`, `pmsClient`, `ProcessMonitor` |
+
+두 목록은 각각 0~256개의 문자열을 허용합니다. 이름은 UTF-8 기준 1~128바이트이며 제어문자와 앞뒤 ASCII 공백을 허용하지 않습니다. 이름 내부의 공백은 허용하며 JVM 인자 값 전체와 정확히 비교합니다. 같은 목록에서 동일한 이름을 중복 지정할 수 없으며 대소문자가 다른 이름은 서로 다른 대상입니다. 현재 선택되지 않은 역할의 목록도 함께 검증합니다. `process_monitor` 객체 전체를 생략하거나 한쪽 목록만 생략하면 해당 목록에 기존 기본값을 사용합니다. 빈 배열 `[]`을 명시하면 해당 역할의 프로세스 관측을 생략하고 `processes={}`, `process_status=ok`를 기록합니다. 이 경우에도 리소스 수집과 `is_analyzer`에 따른 DB 동작은 계속합니다.
 
 `/proc`에서 Java 프로세스의 인자를 확인하며 `ps`나 `grep` 명령을 실행하지 않습니다. `-DAPP`가 없는 Tomcat·메신저 등의 Java 프로세스와 `grep java`는 대상에 포함하지 않습니다. 이름의 일부가 일치하는 것만으로는 실행 중으로 판정하지 않습니다. 같은 DAPP 이름으로 여러 프로세스가 실행 중이면 살아 있는 인스턴스가 하나라도 있을 때 `true`입니다.
 
@@ -297,7 +313,7 @@ LIMIT 10001;
 }
 ```
 
-`settings.json`의 `is_analyzer`를 수정하여 설정 전체 적용이 성공하면 재시작 없이 다음 수집부터 새 역할의 대상 목록을 사용합니다. 적용에 실패하면 기존 설정과 대상 목록을 유지합니다. 프로세스 관측은 DB 쿼리 결과에 의존하지 않으며 DB 분석 중단이나 조회 실패 중에도 계속합니다. 수집 주기와 저장 경로는 기존 `collection` 설정을 함께 사용합니다.
+`settings.json`의 `is_analyzer` 또는 `process_monitor` 목록을 수정하면 1초마다 수행하는 설정 확인을 거쳐 재시작 없이 다음 수집부터 적용합니다. 목록에 추가한 이름은 다음 결과에 나타나고 삭제한 이름은 결과에서 사라집니다. 목록만 변경하면 DB를 재연결하지 않습니다. 중복 이름이나 문자열이 아닌 항목 등으로 적용에 실패하면 기존 설정 전체와 대상 목록을 유지하고 `config_status=using_last_valid`를 기록합니다. 올바른 파일로 수정하면 자동으로 복구합니다. 프로세스 관측은 DB 쿼리 결과에 의존하지 않으며 DB 분석 중단이나 조회 실패 중에도 계속합니다. 수집 주기와 저장 경로는 기존 `collection` 설정을 함께 사용합니다.
 
 ## JSON 계약
 
@@ -387,7 +403,7 @@ RPM은 빌드할 OL8 또는 OL9 시스템에서 다음처럼 생성합니다. So
 ```bash
 sudo dnf install -y rpm-build gcc-toolset-15-gcc-c++ cmake make python3 pkgconf-pkg-config mariadb-connector-c-devel
 mkdir -p "$HOME/rpmbuild/SOURCES" "$HOME/rpmbuild/SPECS"
-cp artifacts/resource-monitor-1.5.0.tar.gz "$HOME/rpmbuild/SOURCES/"
+cp artifacts/resource-monitor-1.6.0.tar.gz "$HOME/rpmbuild/SOURCES/"
 curl --fail --location https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz --output "$HOME/rpmbuild/SOURCES/json.tar.xz"
 cp packaging/rpm/resource-monitor.spec "$HOME/rpmbuild/SPECS/"
 rpmbuild -ba "$HOME/rpmbuild/SPECS/resource-monitor.spec"

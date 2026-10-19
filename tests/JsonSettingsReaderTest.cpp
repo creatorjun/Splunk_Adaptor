@@ -2,6 +2,8 @@
 #include "TestSupport.hpp"
 #include "infrastructure/config/JsonSettingsReader.hpp"
 
+#include <nlohmann/json.hpp>
+
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -51,6 +53,11 @@ std::string document_with_analyzer(const std::string& analyzer) {
         + analyzer + "}";
 }
 
+std::string document_with_process_monitor(const std::string& processes, bool is_analyzer = false) {
+    return R"({"schema_version":1,"thresholds":{"cpu_usage_percent":80,"memory_usage_percent":85.5,"storage_usage_percent":90},"mysql":{"database":"monitoring","tls_mode":"disabled"},"is_analyzer":)"
+        + std::string{is_analyzer ? "true" : "false"} + ",\"process_monitor\":" + processes + "}";
+}
+
 void check_failure(monitor::JsonSettingsReader& reader, const std::filesystem::path& path) {
     const auto settings = reader.read_settings();
     CHECK(!settings);
@@ -81,12 +88,120 @@ int main() {
         CHECK(!settings->is_analyzer);
         CHECK(settings->analyzer.collect_count_change_percent == 10.0);
         CHECK(settings->analyzer.comparison_day == monitor::ComparisonDay::yesterday);
+        const std::vector<std::string> default_analyzer{
+            "SearchEngine", "Normalizer", "CollectorForAgent", "CDMEngine", "ShovelServer",
+            "AnalyzeEngine", "AnalyzeAssistantEngine", "SoarTicketMain", "SoarPlaybookManager",
+            "pmsServer", "pmsClient", "ProcessMonitor"};
+        const std::vector<std::string> default_collector{
+            "SearchEngine", "Reducer", "Normalizer", "CloudESMCollector", "CollectorForAgent",
+            "CDMEngine", "pmsClient", "ProcessMonitor"};
+        CHECK(settings->process_monitor.analyzer == default_analyzer);
+        CHECK(settings->process_monitor.collector == default_collector);
         auto policy = reader.read();
         CHECK(policy);
         CHECK(settings->thresholds == *policy);
         CHECK(test::near(policy->cpu_usage_percent, 80));
         CHECK(test::near(policy->memory_usage_percent, 85.5));
         CHECK(test::near(policy->storage_usage_percent, 90));
+
+        write_file(path, document_with_process_monitor("{}"));
+        settings = reader.read_settings();
+        CHECK(settings);
+        CHECK(settings->process_monitor.analyzer == default_analyzer);
+        CHECK(settings->process_monitor.collector == default_collector);
+        const std::vector<std::string> custom_analyzer{"SearchEngine", "searchengine", "Custom App", "\uBD84\uC11D\uAE30"};
+        const std::vector<std::string> custom_collector{"Reducer", "Collector v2"};
+        write_file(path, document_with_process_monitor(nlohmann::json{
+            {"analyzer", custom_analyzer}, {"collector", custom_collector}}.dump(), true));
+        settings = reader.read_settings();
+        CHECK(settings);
+        CHECK(settings->is_analyzer);
+        CHECK(settings->process_monitor.analyzer == custom_analyzer);
+        CHECK(settings->process_monitor.collector == custom_collector);
+        CHECK(settings->thresholds == *policy);
+        for (const auto* profile : {"analyzer", "collector"}) {
+            write_file(path, document_with_process_monitor(nlohmann::json{
+                {profile, std::vector<std::string>{"OnlyThisApp"}}}.dump()));
+            settings = reader.read_settings();
+            CHECK(settings);
+            const bool analyzer = std::string_view{profile} == "analyzer";
+            const auto& customized = analyzer
+                ? settings->process_monitor.analyzer : settings->process_monitor.collector;
+            CHECK(customized.size() == 1);
+            CHECK(customized.front() == "OnlyThisApp");
+            CHECK((analyzer ? settings->process_monitor.collector : settings->process_monitor.analyzer)
+                == (analyzer ? default_collector : default_analyzer));
+            write_file(path, document_with_process_monitor(nlohmann::json{
+                {profile, nlohmann::json::array()}}.dump()));
+            settings = reader.read_settings();
+            CHECK(settings);
+            CHECK((analyzer ? settings->process_monitor.analyzer : settings->process_monitor.collector).empty());
+            CHECK((analyzer ? settings->process_monitor.collector : settings->process_monitor.analyzer)
+                == (analyzer ? default_collector : default_analyzer));
+        }
+        write_file(path, document_with_process_monitor(R"({"analyzer":[],"collector":[]})"));
+        settings = reader.read_settings();
+        CHECK(settings);
+        CHECK(settings->process_monitor.analyzer.empty());
+        CHECK(settings->process_monitor.collector.empty());
+
+        std::string multibyte_limit;
+        for (int index = 0; index < 64; ++index) multibyte_limit += "\xc3\xa9";
+        const std::vector<std::string> length_boundaries{"A", std::string(128, 'X'), multibyte_limit};
+        write_file(path, document_with_process_monitor(nlohmann::json{
+            {"analyzer", length_boundaries}, {"collector", length_boundaries}}.dump()));
+        settings = reader.read_settings();
+        CHECK(settings);
+        CHECK(settings->process_monitor.analyzer == length_boundaries);
+        CHECK(settings->process_monitor.collector == length_boundaries);
+        nlohmann::json maximum_apps = nlohmann::json::array();
+        for (int index = 0; index < 256; ++index) maximum_apps.push_back("App" + std::to_string(index));
+        write_file(path, document_with_process_monitor(nlohmann::json{
+            {"analyzer", maximum_apps}, {"collector", maximum_apps}}.dump()));
+        settings = reader.read_settings();
+        CHECK(settings);
+        CHECK(settings->process_monitor.analyzer.size() == 256);
+        CHECK(settings->process_monitor.collector.size() == 256);
+        CHECK(settings->process_monitor.analyzer.front() == "App0");
+        CHECK(settings->process_monitor.analyzer.back() == "App255");
+        maximum_apps.push_back("App256");
+        const std::vector<std::string> invalid_process_lists{
+            "null", "true", "1", "\"redaction-marker\"", "{}",
+            "[null]", "[false]", "[1]", "[{}]", "[[]]", "[\"\"]",
+            R"(["redaction-marker","redaction-marker"])",
+            R"([" redaction-marker"])", R"(["redaction-marker "])", R"([" "])",
+            R"(["redaction-marker\t"])", R"(["\rredaction-marker"])",
+            R"(["redaction\nmarker"])", R"(["redaction\fmarker"])",
+            R"(["redaction\u0000marker"])", R"(["redaction\u000bmarker"])",
+            R"(["redaction\u001fmarker"])", R"(["redaction\u007fmarker"])",
+            R"(["redaction\u0080marker"])", R"(["redaction\u009fmarker"])",
+            nlohmann::json(std::vector<std::string>{std::string(129, 'X')}).dump(),
+            nlohmann::json(std::vector<std::string>{multibyte_limit + "X"}).dump(),
+            maximum_apps.dump()
+        };
+        for (const auto is_analyzer : {false, true}) {
+            for (const auto* profile : {"analyzer", "collector"}) {
+                for (const auto& apps : invalid_process_lists) {
+                    write_file(path, document_with_process_monitor(
+                        "{\"" + std::string{profile} + "\":" + apps + "}", is_analyzer));
+                    const auto result = reader.read_settings();
+                    CHECK(!result);
+                    CHECK(result.error().code == "invalid_process_monitor");
+                    CHECK(result.error().message.find("redaction-marker") == std::string::npos);
+                    check_failure(reader, path);
+                }
+            }
+        }
+        for (const auto& processes : {"null", "true", "1", "\"redaction-marker\"", "[]",
+            R"({"redaction-marker":[]})"}) {
+            write_file(path, document_with_process_monitor(processes));
+            const auto result = reader.read_settings();
+            CHECK(!result);
+            CHECK(result.error().code == "invalid_process_monitor");
+            CHECK(result.error().message.find("redaction-marker") == std::string::npos);
+        }
+        write_file(path, document_with_process_monitor(R"({"analyzer":[],"analyzer":["DuplicateKey"]})"));
+        check_failure(reader, path);
 
         write_file(path, document_with_analyzer("{}"));
         settings = reader.read_settings();

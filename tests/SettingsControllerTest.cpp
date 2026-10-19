@@ -488,6 +488,74 @@ void analyzer_settings_reload_tests() {
     CHECK(database.connection_changes == connections);
 }
 
+void process_monitor_settings_reload_tests() {
+    Reader reader;
+    reader.next->is_analyzer = true;
+    reader.next->mysql.database = "CloudESM";
+    Output output;
+    Database database;
+    SettingsController controller(reader, output, {}, &database);
+    CHECK(controller.initialize());
+    const auto original_mysql = database.active;
+    const auto connections = database.connection_changes;
+    CHECK(connections == 1);
+
+    reader.next->process_monitor.analyzer = {"AnalyzerOne", "AnalyzerTwo"};
+    auto changed = controller.reload();
+    CHECK(changed && *changed);
+    CHECK(controller.current().process_monitor.analyzer == reader.next->process_monitor.analyzer);
+    CHECK(controller.current().process_monitor.collector == ProcessMonitorSettings{}.collector);
+    CHECK(controller.current().is_analyzer);
+    CHECK(database.active == original_mysql);
+    CHECK(database.connection_changes == connections);
+    CHECK(output.attempts.size() == 1);
+
+    reader.next->process_monitor.collector = {"CollectorOne"};
+    changed = controller.reload();
+    CHECK(changed && *changed);
+    CHECK(controller.current().process_monitor == reader.next->process_monitor);
+    CHECK(database.connection_changes == connections);
+
+    reader.next->process_monitor.analyzer.clear();
+    changed = controller.reload();
+    CHECK(changed && *changed);
+    CHECK(controller.current().process_monitor.analyzer.empty());
+    CHECK(controller.current().mysql.enabled);
+    CHECK(database.active.enabled);
+    CHECK(database.connection_changes == connections);
+    changed = controller.reload();
+    CHECK(changed && !*changed);
+
+    const auto accepted = controller.current();
+    reader.next = std::unexpected(Error{"settings_config", "settings.json", "invalid_process_monitor",
+        "Duplicate process name"});
+    CHECK(!controller.reload());
+    CHECK(controller.current() == accepted);
+    CHECK(controller.reload_error()->code == "invalid_process_monitor");
+    CHECK(database.active == original_mysql);
+    CHECK(database.connection_changes == connections);
+    reader.next = accepted;
+    changed = controller.reload();
+    CHECK(changed && !*changed);
+    CHECK(!controller.reload_error());
+
+    reader.next->is_analyzer = false;
+    changed = controller.reload();
+    CHECK(changed && *changed);
+    CHECK(!controller.current().mysql.enabled);
+    CHECK(!database.active.enabled);
+    const auto disabled_connections = database.connection_changes;
+    reader.next->process_monitor.collector = {"CollectorTwo", "CollectorThree"};
+    reader.next->process_monitor.analyzer = {"InactiveAnalyzer"};
+    changed = controller.reload();
+    CHECK(changed && *changed);
+    CHECK(controller.current().process_monitor == reader.next->process_monitor);
+    CHECK(!controller.current().is_analyzer);
+    CHECK(!controller.current().mysql.enabled);
+    CHECK(database.connection_changes == disabled_connections);
+    CHECK(output.attempts.size() == 1);
+}
+
 }
 
 int main() {
@@ -501,5 +569,6 @@ int main() {
         database_startup_tests();
         analyzer_gate_tests();
         analyzer_settings_reload_tests();
+        process_monitor_settings_reload_tests();
     });
 }

@@ -14,7 +14,13 @@ import tempfile
 import time
 
 
-def write_config(path, cpu=0, memory=0, storage=0, collection=None, is_analyzer=None, mysql=None):
+COLLECTOR_APPS = {
+    'SearchEngine', 'Reducer', 'Normalizer', 'CloudESMCollector',
+    'CollectorForAgent', 'CDMEngine', 'pmsClient', 'ProcessMonitor',
+}
+
+
+def write_config(path, cpu=0, memory=0, storage=0, collection=None, is_analyzer=None, mysql=None, process_monitor=None):
     temporary = path.with_suffix('.new')
     settings = {
         'schema_version': 1,
@@ -30,6 +36,8 @@ def write_config(path, cpu=0, memory=0, storage=0, collection=None, is_analyzer=
         settings['is_analyzer'] = is_analyzer
     if mysql is not None:
         settings['mysql'] = mysql
+    if process_monitor is not None:
+        settings['process_monitor'] = process_monitor
     temporary.write_text(json.dumps(settings), encoding='utf-8')
     os.replace(temporary, path)
 
@@ -58,7 +66,7 @@ def assert_snapshot_timezone(path, payload):
     assert re.fullmatch(re.escape(basename) + r'(?:_[1-9]\d*)?\.json', path.name), path.name
 
 
-def wait_snapshot(output, seen, predicate, process, seconds=7):
+def wait_snapshot(output, seen, predicate, process, seconds=7, expected_apps=COLLECTOR_APPS, expected_profile='collector', previous_apps=None):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         assert process.poll() is None, 'daemon exited unexpectedly'
@@ -69,11 +77,11 @@ def wait_snapshot(output, seen, predicate, process, seconds=7):
             seen.add(path.name)
             assert payload['schema_version'] == 1
             assert payload['status'] in ('ok', 'warning', 'unknown')
-            assert payload['process_profile'] == 'collector'
-            assert set(payload['processes']) == {
-                'SearchEngine', 'Reducer', 'Normalizer', 'CloudESMCollector',
-                'CollectorForAgent', 'CDMEngine', 'pmsClient', 'ProcessMonitor',
-            }
+            assert payload['process_profile'] == expected_profile
+            expected_names = [set(expected_apps)]
+            if previous_apps is not None:
+                expected_names.append(set(previous_apps))
+            assert set(payload['processes']) in expected_names
             assert payload['process_status'] in ('ok', 'warning', 'unknown')
             assert all(value is None or type(value) is bool for value in payload['processes'].values())
             if any(value is False for value in payload['processes'].values()):
@@ -83,6 +91,8 @@ def wait_snapshot(output, seen, predicate, process, seconds=7):
             assert 0 <= payload['memory']['usage_percent'] <= 100
             assert_snapshot_timezone(path, payload)
             if predicate(payload):
+                assert payload['process_profile'] == expected_profile
+                assert set(payload['processes']) == set(expected_apps)
                 return payload
         time.sleep(0.03)
     raise AssertionError('expected snapshot did not arrive in ' + str(output))
@@ -162,6 +172,15 @@ def validate_settings(executable, config, output):
         assert 'component=settings_config' in result.stderr
     for is_analyzer in ('true', 'false', 1, 0, [], {}):
         write_config(config, is_analyzer=is_analyzer)
+        result = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
+        assert result.returncode == 78, result.stderr
+        assert 'component=settings_config' in result.stderr
+    for profiles in ({}, {'analyzer': [], 'collector': []}, {'collector': ['custom.App-1']}):
+        write_config(config, process_monitor=profiles)
+        result = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
+        assert result.returncode == 0, result.stderr
+    for profiles in ({'collector': ['Duplicate', 'Duplicate']}, {'analyzer': ['']}, {'collector': 'App'}):
+        write_config(config, process_monitor=profiles)
         result = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
         assert result.returncode == 78, result.stderr
         assert 'component=settings_config' in result.stderr
@@ -352,6 +371,65 @@ def hot_reload_test(executable, root, config, output):
     assert 'snapshot_skipped' not in log_text
 
 
+def process_list_reload_test(executable, root, config):
+    output = root / 'process-list-snapshots'
+    output.mkdir()
+    log_path = root / 'process-list.log'
+    profiles = {'analyzer': ['InactiveAnalyzer'], 'collector': ['IntegrationAlpha']}
+    write_config(config, 100, 100, 100, collection=collection(1, output), process_monitor=profiles)
+    with running_daemon([executable, '--config', str(config)], log_path) as process:
+        original_pid = process.pid
+        seen = set()
+        previous_apps = ['IntegrationAlpha']
+
+        def wait_apps(expected, config_status='ok'):
+            nonlocal previous_apps
+            payload = wait_snapshot(output, seen,
+                lambda value: value['config_status'] == config_status and set(value['processes']) == set(expected),
+                process, expected_apps=expected, previous_apps=previous_apps)
+            assert payload['processes'] == {name: False for name in expected}
+            assert payload['process_status'] == ('warning' if expected else 'ok')
+            assert process.pid == original_pid and process.poll() is None
+            previous_apps = list(expected)
+            return payload
+
+        wait_apps(['IntegrationAlpha'])
+        profiles['collector'].append('IntegrationBeta')
+        write_config(config, 100, 100, 100, collection=collection(1, output), process_monitor=profiles)
+        wait_apps(['IntegrationAlpha', 'IntegrationBeta'])
+
+        profiles['collector'] = ['IntegrationBeta']
+        write_config(config, 100, 100, 100, collection=collection(1, output), process_monitor=profiles)
+        removed = wait_apps(['IntegrationBeta'])
+        assert 'IntegrationAlpha' not in removed['processes']
+
+        profiles['analyzer'] = ['ChangedInactiveAnalyzer']
+        log_offset = len(log_path.read_text(encoding='utf-8'))
+        write_config(config, 100, 100, 100, collection=collection(1, output), process_monitor=profiles)
+        wait_log(log_path, 'settings_reloaded', process, offset=log_offset)
+        inactive = wait_apps(['IntegrationBeta'])
+        assert 'ChangedInactiveAnalyzer' not in inactive['processes']
+
+        profiles['collector'] = ['Duplicate', 'Duplicate']
+        write_config(config, 100, 100, 100, collection=collection(1, output), process_monitor=profiles)
+        rejected = wait_apps(['IntegrationBeta'], config_status='using_last_valid')
+        assert any(error['component'] == 'settings_config' for error in rejected['errors'])
+
+        profiles['collector'] = []
+        write_config(config, 100, 100, 100, collection=collection(1, output), process_monitor=profiles)
+        empty = wait_apps([])
+        assert empty['collect_count']['status'] == 'disabled'
+        assert empty['processes'] == {}
+        assert not any(error['component'] == 'java_processes' for error in empty['errors'])
+
+        profiles['collector'] = ['IntegrationRestored']
+        write_config(config, 100, 100, 100, collection=collection(1, output), process_monitor=profiles)
+        wait_apps(['IntegrationRestored'])
+        process.send_signal(signal.SIGTERM)
+        assert process.wait(timeout=3) == 0
+    assert log_path.read_text(encoding='utf-8').count('resource-monitor started') == 1
+
+
 def override_and_once_tests(executable, root, config):
     interval_output = root / 'interval-override-first'
     interval_other = root / 'interval-override-next'
@@ -413,8 +491,9 @@ def main():
         validate_settings(executable, config, output)
         analyzer_reload_test(executable, root, config)
         hot_reload_test(executable, root, config, output)
+        process_list_reload_test(executable, root, config)
         override_and_once_tests(executable, root, config)
-    print('Settings validation, analyzer database connection gating and live reload, OS timezone timestamps and filenames, atomic live interval/output/threshold reload, retry, aliases, CLI overrides, legacy config, once saves and SIGTERM passed')
+    print('Settings validation, analyzer database connection gating and live reload, process list reload and last-valid fallback, OS timezone timestamps and filenames, atomic live interval/output/threshold reload, retry, aliases, CLI overrides, legacy config, once saves and SIGTERM passed')
 
 
 if __name__ == '__main__':

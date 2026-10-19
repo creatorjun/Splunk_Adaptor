@@ -31,6 +31,18 @@ def main():
         assert original['collection'] == {'interval_seconds': 60, 'output_directory': '/Monitor'}
         assert original['thresholds']['cpu_usage_percent'] == 80
         assert original['is_analyzer'] is False
+        default_profiles = {
+            'analyzer': [
+                'SearchEngine', 'Normalizer', 'CollectorForAgent', 'CDMEngine', 'ShovelServer',
+                'AnalyzeEngine', 'AnalyzeAssistantEngine', 'SoarTicketMain', 'SoarPlaybookManager',
+                'pmsServer', 'pmsClient', 'ProcessMonitor',
+            ],
+            'collector': [
+                'SearchEngine', 'Reducer', 'Normalizer', 'CloudESMCollector', 'CollectorForAgent',
+                'CDMEngine', 'pmsClient', 'ProcessMonitor',
+            ],
+        }
+        assert original['process_monitor'] == default_profiles
         assert 'enabled' not in original['mysql']
         assert original['mysql']['credentials_file'] == '/etc/resource-monitor/secrets/mysql.json'
         assert original['mysql']['tls_mode'] == 'verify_identity'
@@ -50,6 +62,7 @@ def main():
         assert len(list(fresh.rglob('settings.json'))) == 2
         original['thresholds']['cpu_usage_percent'] = 42
         original['is_analyzer'] = True
+        original['process_monitor'] = {'analyzer': ['CustomAnalyzer'], 'collector': []}
         original['collection'] = {'interval_seconds': 17, 'output_directory': '/custom-monitor'}
         existing_settings = (json.dumps(original, indent=4) + '\n').encode('utf-8')
         config.write_bytes(existing_settings)
@@ -65,6 +78,7 @@ def main():
         assert (fresh / 'usr/share/doc/resource-monitor/THIRD_PARTY_NOTICES.txt').is_file()
         assert json.loads(shared.read_text())['thresholds']['cpu_usage_percent'] == 80
         assert json.loads(shared.read_text())['is_analyzer'] is False
+        assert json.loads(shared.read_text())['process_monitor'] == default_profiles
         assert 'enabled' not in json.loads(shared.read_text())['mysql']
         assert not list(fresh.rglob('thresholds.json'))
 
@@ -87,6 +101,7 @@ def main():
         assert legacy_config.read_bytes() == legacy_bytes
         assert 'collection' not in json.loads(migrated.read_text())
         assert 'is_analyzer' not in json.loads(migrated.read_text())
+        assert 'process_monitor' not in json.loads(migrated.read_text())
         install(legacy_stage)
         assert migrated.read_bytes() == legacy_bytes
 
