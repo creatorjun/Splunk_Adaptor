@@ -2,7 +2,7 @@
 %global debug_package %{nil}
 
 Name:           resource-monitor
-Version:        1.4.0
+Version:        1.5.0
 Release:        1%{?dist}
 Summary:        System resource snapshots with JSON settings
 License:        Proprietary
@@ -23,7 +23,8 @@ Requires(postun): systemd
 
 %description
 C++23 system resource daemon for Oracle Linux 8 and 9. Collects CPU, memory
-and local mounted filesystem metrics at a configurable interval. Writes an
+and local mounted filesystem metrics and role-specific Java DAPP process
+presence at a configurable interval. Writes an
 atomic timestamped JSON snapshot every collection cycle. Collection interval,
 output directory, status thresholds and optional MySQL connections reload
 without restarting the daemon. Database credentials are stored separately.

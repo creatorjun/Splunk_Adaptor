@@ -141,6 +141,10 @@ nlohmann::json nullable(const std::optional<T>& value) {
 
 nlohmann::json serialize(const ResourceSnapshot& snapshot, const std::string& timestamp,
     const std::string& applied_at) {
+    auto processes = nlohmann::json::object();
+    for (const auto& [app, active] : snapshot.java_processes.apps) {
+        processes[app] = nullable(active);
+    }
     auto alerts = nlohmann::json::array();
     for (const auto& alert : snapshot.collect_count.alerts) {
         alerts.push_back({{"eqp_ip", alert.eqp_ip}, {"current_count", alert.current_count},
@@ -185,6 +189,9 @@ nlohmann::json serialize(const ResourceSnapshot& snapshot, const std::string& ti
         {"thresholds_applied_at", applied_at},
         {"hostname", snapshot.hostname},
         {"status", to_string(snapshot.status)},
+        {"processes", std::move(processes)},
+        {"process_status", to_string(snapshot.java_processes.status)},
+        {"process_profile", snapshot.java_processes.is_analyzer ? "analyzer" : "collector"},
         {"collection_status", to_string(snapshot.collection_status)},
         {"config_status", to_string(snapshot.config_status)},
         {"missed_intervals", snapshot.missed_intervals},

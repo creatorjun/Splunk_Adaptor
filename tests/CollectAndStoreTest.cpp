@@ -98,6 +98,16 @@ struct CountMonitor final : ICollectCountMonitor {
     }
 };
 
+struct ProcessMonitor final : IJavaProcessMonitor {
+    JavaProcessSnapshot next;
+    unsigned reads{};
+
+    JavaProcessSnapshot collect() override {
+        ++reads;
+        return next;
+    }
+};
+
 bool has_error(const ResourceSnapshot& snapshot, const std::string& code) {
     return std::ranges::any_of(snapshot.errors, [&](const Error& error) {
         return error.code == code;
@@ -216,6 +226,83 @@ void count_analysis_tests() {
     CHECK(store.attempts.size() == 7);
     CHECK(monitor.observed.size() == 8);
     CHECK(monitor.observed.back() == sample(7).timestamp);
+}
+
+void process_monitor_tests() {
+    Reader reader;
+    Store store;
+    Config config;
+    CountMonitor counts;
+    ProcessMonitor processes;
+    processes.next.status = MetricStatus::warning;
+    processes.next.apps = {{"SearchEngine", true}, {"Reducer", false}};
+    CollectAndStore use_case(reader, store, config, &counts, &processes);
+    CHECK(!use_case.run());
+    CHECK(processes.reads == 0);
+    CHECK(use_case.initialize());
+    CHECK(processes.reads == 0);
+    reader.next = sample(1);
+    auto result = use_case.run();
+    CHECK(result);
+    CHECK(processes.reads == 1);
+    CHECK(result->status == MetricStatus::warning);
+    CHECK(result->collection_status == CollectionStatus::ok);
+    CHECK(result->java_processes.status == MetricStatus::warning);
+    CHECK(result->java_processes.apps.at("SearchEngine") == true);
+    CHECK(result->java_processes.apps.at("Reducer") == false);
+    CHECK(store.attempts.back().java_processes.apps == processes.next.apps);
+
+    processes.next.status = MetricStatus::unknown;
+    processes.next.apps["Reducer"].reset();
+    processes.next.errors = {{"java_processes", "/proc", "read_failed", "Cannot enumerate processes"}};
+    reader.next = sample(2);
+    result = use_case.run();
+    CHECK(result);
+    CHECK(result->status == MetricStatus::unknown);
+    CHECK(result->collection_status == CollectionStatus::ok);
+    CHECK(has_error(*result, "read_failed"));
+    CHECK(has_error(store.attempts.back(), "read_failed"));
+    CHECK(!result->java_processes.apps.at("Reducer").has_value());
+    CHECK(result->cpu.usage_percent == 50.0);
+
+    reader.next = sample(3);
+    reader.next.memory.value = MemoryCounters{1000, 100};
+    result = use_case.run();
+    CHECK(result);
+    CHECK(result->status == MetricStatus::warning);
+    CHECK(result->java_processes.status == MetricStatus::unknown);
+
+    reader.next = sample(4);
+    counts.next.status = CollectCountStatus::warning;
+    result = use_case.run();
+    CHECK(result);
+    CHECK(result->status == MetricStatus::warning);
+
+    reader.next = sample(5);
+    counts.next.status = CollectCountStatus::error;
+    processes.next.status = MetricStatus::warning;
+    processes.next.apps["Reducer"] = false;
+    processes.next.errors.clear();
+    result = use_case.run();
+    CHECK(result);
+    CHECK(result->status == MetricStatus::warning);
+
+    reader.next = sample(6);
+    processes.next.status = MetricStatus::ok;
+    processes.next.apps["Reducer"] = true;
+    result = use_case.run();
+    CHECK(result);
+    CHECK(result->status == MetricStatus::unknown);
+
+    reader.next = sample(7);
+    counts.next.status = CollectCountStatus::disabled;
+    result = use_case.run();
+    CHECK(result);
+    CHECK(result->status == MetricStatus::ok);
+    CHECK(result->collection_status == CollectionStatus::ok);
+    CHECK(result->errors.empty());
+    CHECK(processes.reads == 7);
+    CHECK(store.attempts.size() == 7);
 }
 
 void reload_tests() {
@@ -637,6 +724,7 @@ int main() {
     return test::run([] {
         initialization_tests();
         count_analysis_tests();
+        process_monitor_tests();
         reload_tests();
         partial_failure_tests();
         write_failure_baseline_test();

@@ -164,6 +164,42 @@ void check_timezone_snapshots() {
     check_no_temporary_files(directory.path);
 }
 
+void check_process_snapshots() {
+    ScopedTimezone scoped_zone("UTC0");
+    TemporaryDirectory directory;
+    monitor::JsonSnapshotStore store(directory.path);
+    auto snapshot = make_snapshot();
+    snapshot.java_processes.is_analyzer = true;
+    snapshot.java_processes.status = monitor::MetricStatus::warning;
+    snapshot.java_processes.apps = {{"SearchEngine", true}, {"AnalyzeEngine", false},
+        {"pmsServer", std::nullopt}};
+    CHECK(store.save(snapshot));
+    const auto analyzer = read_json(directory.path / "20261014T123400+0000.json");
+    CHECK(analyzer["process_profile"] == "analyzer");
+    CHECK(analyzer["process_status"] == "warning");
+    CHECK(analyzer["processes"].is_object());
+    CHECK(analyzer["processes"].size() == 3);
+    CHECK(analyzer["processes"]["SearchEngine"].is_boolean());
+    CHECK(analyzer["processes"]["SearchEngine"] == true);
+    CHECK(analyzer["processes"]["AnalyzeEngine"].is_boolean());
+    CHECK(analyzer["processes"]["AnalyzeEngine"] == false);
+    CHECK(analyzer["processes"]["pmsServer"].is_null());
+
+    snapshot.timestamp += std::chrono::seconds(1);
+    snapshot.java_processes.is_analyzer = false;
+    snapshot.java_processes.status = monitor::MetricStatus::ok;
+    snapshot.java_processes.apps = {{"Reducer", true}, {"CloudESMCollector", true}};
+    CHECK(store.save(snapshot));
+    const auto collector = read_json(directory.path / "20261014T123401+0000.json");
+    CHECK(collector["process_profile"] == "collector");
+    CHECK(collector["process_status"] == "ok");
+    CHECK(collector["processes"].size() == 2);
+    CHECK(collector["processes"]["Reducer"] == true);
+    CHECK(collector["processes"]["CloudESMCollector"] == true);
+    CHECK(!collector["processes"].contains("AnalyzeEngine"));
+    check_no_temporary_files(directory.path);
+}
+
 void check_collect_count_snapshots() {
     ScopedTimezone scoped_zone("KST-9");
     TemporaryDirectory directory;
@@ -276,6 +312,10 @@ int main() {
         CHECK(json["collect_count"]["alerts"].is_array());
         CHECK(json["collect_count"]["alerts"].empty());
         CHECK(json["collect_count"]["error"].is_null());
+        CHECK(json["processes"].is_object());
+        CHECK(json["processes"].empty());
+        CHECK(json["process_profile"] == "collector");
+        CHECK(json["process_status"] == "unknown");
 
         snapshot.hostname = "second-host";
         CHECK(store.save(snapshot));
@@ -473,5 +513,6 @@ int main() {
         check_no_temporary_files(invalid_directory.path);
         check_timezone_snapshots();
         check_collect_count_snapshots();
+        check_process_snapshots();
     });
 }

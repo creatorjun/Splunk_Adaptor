@@ -4,6 +4,7 @@
 #include "domain/ResourceSample.hpp"
 #include "domain/ThresholdPolicy.hpp"
 #include "domain/CollectCountAnalysis.hpp"
+#include "domain/JavaProcessSnapshot.hpp"
 
 namespace monitor {
 
@@ -50,6 +51,7 @@ struct ResourceSnapshot {
     std::vector<FilesystemMetrics> filesystems;
     std::vector<Error> errors;
     CollectCountAnalysis collect_count;
+    JavaProcessSnapshot java_processes;
 };
 
 }

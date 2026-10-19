@@ -1,6 +1,8 @@
 // src/main.cpp
 #include "application/CollectAndStore.hpp"
 #include "application/CollectCountMonitor.hpp"
+#include "application/JavaProcessMonitor.hpp"
+#include "infrastructure/linux/ProcJavaProcessReader.hpp"
 #include "infrastructure/linux/LocalDayWindow.hpp"
 #include "application/SettingsController.hpp"
 #include "infrastructure/config/JsonSettingsReader.hpp"
@@ -35,7 +37,7 @@ int main(int argc, char* argv[]) {
                 return 0;
             }
             if (argument == "--version") {
-                std::cout << "resource-monitor 1.4.0\n";
+                std::cout << "resource-monitor 1.5.0\n";
                 return 0;
             }
             if (argument == "--once") {
@@ -111,7 +113,9 @@ int main(int argc, char* argv[]) {
         monitor::ProcResourceReader reader;
         monitor::LocalDayWindow calendar;
         monitor::CollectCountMonitor collect_count{database, settings, calendar};
-        monitor::CollectAndStore use_case{reader, store, settings, &collect_count};
+        monitor::ProcJavaProcessReader process_reader;
+        monitor::JavaProcessMonitor processes{process_reader, settings};
+        monitor::CollectAndStore use_case{reader, store, settings, &collect_count, &processes};
         return monitor::run_daemon(use_case, options, &settings);
     } catch (const std::exception& error) {
         monitor::log_error({"runtime", "main", "unhandled_exception", error.what()});

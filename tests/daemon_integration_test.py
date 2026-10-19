@@ -69,6 +69,16 @@ def wait_snapshot(output, seen, predicate, process, seconds=7):
             seen.add(path.name)
             assert payload['schema_version'] == 1
             assert payload['status'] in ('ok', 'warning', 'unknown')
+            assert payload['process_profile'] == 'collector'
+            assert set(payload['processes']) == {
+                'SearchEngine', 'Reducer', 'Normalizer', 'CloudESMCollector',
+                'CollectorForAgent', 'CDMEngine', 'pmsClient', 'ProcessMonitor',
+            }
+            assert payload['process_status'] in ('ok', 'warning', 'unknown')
+            assert all(value is None or type(value) is bool for value in payload['processes'].values())
+            if any(value is False for value in payload['processes'].values()):
+                assert payload['process_status'] == 'warning'
+                assert payload['status'] == 'warning'
             assert payload['cpu']['window_seconds'] > 0
             assert 0 <= payload['memory']['usage_percent'] <= 100
             assert_snapshot_timezone(path, payload)

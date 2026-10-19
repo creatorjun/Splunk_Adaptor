@@ -8,8 +8,10 @@
 namespace monitor {
 
 CollectAndStore::CollectAndStore(IResourceReader& reader, ISnapshotStore& store,
-    IThresholdConfigReader& config, ICollectCountMonitor* collect_count)
-    : reader_(reader), store_(store), config_(config), collect_count_(collect_count) {
+    IThresholdConfigReader& config, ICollectCountMonitor* collect_count,
+    IJavaProcessMonitor* java_processes)
+    : reader_(reader), store_(store), config_(config), collect_count_(collect_count),
+      java_processes_(java_processes) {
 }
 
 std::expected<void, Error> CollectAndStore::initialize() {
@@ -142,6 +144,17 @@ std::expected<ResourceSnapshot, Error> CollectAndStore::run(std::uint64_t missed
             snapshot.status = MetricStatus::warning;
         } else if (snapshot.collect_count.status != CollectCountStatus::ok &&
             snapshot.collect_count.status != CollectCountStatus::disabled && snapshot.status == MetricStatus::ok) {
+            snapshot.status = MetricStatus::unknown;
+        }
+    }
+    if (java_processes_) {
+        snapshot.java_processes = java_processes_->collect();
+        snapshot.errors.insert(snapshot.errors.end(), snapshot.java_processes.errors.begin(),
+            snapshot.java_processes.errors.end());
+        if (snapshot.java_processes.status == MetricStatus::warning) {
+            snapshot.status = MetricStatus::warning;
+        } else if (snapshot.java_processes.status == MetricStatus::unknown &&
+            snapshot.status == MetricStatus::ok) {
             snapshot.status = MetricStatus::unknown;
         }
     }

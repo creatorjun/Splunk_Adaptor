@@ -1,15 +1,15 @@
 <!-- README.md -->
 # Resource Monitor
 
-Oracle Linux 8/9용 C++23 시스템 모니터링 데몬입니다. 기본 60초마다 CPU, 메모리, 마운트된 로컬 디스크 파일시스템을 수집하고 매 수집 주기의 전체 결과를 OS 시간대와 UTC 오프셋을 포함한 파일명으로 저장합니다. 예를 들어 OS가 Asia/Seoul이면 `/Monitor/20261019T123400+0900.json`에 저장합니다. 1.4.0에서는 선택적으로 `CloudESM.SUM_COLLECT_INFO_1DAY`를 조회하여 장비 IP별 수집 건수의 전일 대비 변동을 같은 JSON에 기록합니다. `/etc/resource-monitor/settings.json`에서 수집 주기, 저장 경로, 임계치, 분석 기준과 MySQL 연결을 관리합니다. DB 사용자명과 비밀번호는 `/etc/resource-monitor/secrets/mysql.json`으로 분리합니다. 임계치는 경고 판정에 적용하며 모든 수집 주기의 파일을 남깁니다.
+Oracle Linux 8/9용 C++23 시스템 모니터링 데몬입니다. 기본 60초마다 CPU, 메모리, 마운트된 로컬 디스크 파일시스템을 수집하고 매 수집 주기의 전체 결과를 OS 시간대와 UTC 오프셋을 포함한 파일명으로 저장합니다. 예를 들어 OS가 Asia/Seoul이면 `/Monitor/20261019T123400+0900.json`에 저장합니다. 1.5.0에서는 `is_analyzer`에 맞는 Java `-DAPP` 프로세스의 실행 여부도 같은 JSON에 기록합니다. 분석 장비에서는 `CloudESM.SUM_COLLECT_INFO_1DAY`를 조회하여 장비 IP별 수집 건수의 전일 대비 변동을 함께 기록합니다. `/etc/resource-monitor/settings.json`에서 수집 주기, 저장 경로, 장비 역할, 임계치, 분석 기준과 MySQL 연결을 관리합니다. DB 사용자명과 비밀번호는 `/etc/resource-monitor/secrets/mysql.json`으로 분리합니다. 임계치는 경고 판정에 적용하며 모든 수집 주기의 파일을 남깁니다.
 
 ## 구성
 
 | 위치 | 책임 |
 | --- | --- |
 | `src/domain` | 측정 모델, 계산식, 임계치 규칙, 상태 집계 |
-| `src/application` | 수집·설정 전체 적용·실패 시 기존 설정 유지·저장 유스케이스와 포트 |
-| `src/infrastructure/linux` | procfs, mountinfo, 파일시스템 용량 수집 |
+| `src/application` | 수집·설정 전체 적용·실패 시 기존 설정 유지·프로세스 대상 선택·저장 유스케이스와 포트 |
+| `src/infrastructure/linux` | procfs의 리소스·Java 프로세스, mountinfo, 파일시스템 용량 수집 |
 | `src/infrastructure/config` | 사용자 설정·MySQL 계정 JSON 파싱·검증과 설정 포트 구현 |
 | `src/infrastructure/database` | MySQL 연결 준비·교체·연결 확인과 비동기 일별 수집 건수 조회 |
 | `src/infrastructure/persistence` | 저장 경로 검증·잠금·전환, JSON 직렬화와 원자적 파일 저장 |
@@ -19,6 +19,24 @@ Oracle Linux 8/9용 C++23 시스템 모니터링 데몬입니다. 기본 60초�
 | `packaging` | systemd 서비스, RPM 명세, Docker 빌드 환경 |
 
 Domain은 Linux와 JSON을 참조하지 않습니다. Application은 자신의 포트와 Domain에만 의존합니다. 운영체제 호출과 JSON 라이브러리는 외부 계층에 있습니다. 테스트에서 의존성 방향과 작성한 소스의 파일 상단 경로 주석 규칙을 검사합니다.
+
+Java 프로세스 모니터링의 의존성은 다음 파일로 나눕니다. Application은 현재 적용된 설정으로 대상 목록을 선택하고, Linux 어댑터는 프로세스 관측을 담당합니다. JSON 저장기는 같은 수집 결과에 관측값을 직렬화합니다.
+
+```text
+src/
+  application/
+    JavaProcessMonitor.hpp
+    JavaProcessMonitor.cpp
+    ports/
+      IJavaProcessMonitor.hpp
+      IJavaProcessReader.hpp
+  infrastructure/
+    linux/
+      ProcJavaProcessReader.hpp
+      ProcJavaProcessReader.cpp
+    persistence/
+      JsonSnapshotStore.cpp
+```
 
 ## 빌드
 
@@ -98,7 +116,7 @@ SELinux가 Enforcing인 실제 서버에서 파일 쓰기와 디렉터리 접근
 
 | 설정 | 허용 값과 기본값 | 변경 적용 시점 |
 | --- | --- | --- |
-| `is_analyzer` | JSON 불리언 `true` 또는 `false`, 생략 시 기본 `false` | 다음 설정 확인 후 DB 연결·쿼리 허용 여부 변경 |
+| `is_analyzer` | JSON 불리언 `true` 또는 `false`, 생략 시 기본 `false` | 다음 설정 적용 후 DB 연결·쿼리 허용 여부 변경, 다음 수집부터 Java 프로세스 대상 변경 |
 | `analyzer.collect_count_change_percent` | 0 초과 1,000,000 이하의 유한한 숫자, 기본 10.0% | 다음 설정 확인 후 분석부터, DB 재연결 없음 |
 | `analyzer.comparison_day` | `yesterday` 또는 `today`, 기본 `yesterday` | 다음 설정 확인 후 새 날짜 쌍 조회 요청 |
 | `collection.interval_seconds` | 1~86400의 정수, 기본 60초 | 다음 설정 확인 후 새 주기 시작 |
@@ -107,7 +125,7 @@ SELinux가 Enforcing인 실제 서버에서 파일 쓰기와 디렉터리 접근
 | `thresholds.memory_usage_percent` | 0~100의 숫자 | 다음 설정 확인 후 수집부터 |
 | `thresholds.storage_usage_percent` | 0~100의 숫자 | 다음 설정 확인 후 수집부터 |
 
-세 리소스 임계치는 필수이며 유한한 숫자여야 합니다. 리소스 임계치의 0은 항상 경고를 발생시킵니다. `collection`, `analyzer` 또는 그 하위 설정을 생략하면 해당 기본값을 사용하므로 이전 임계치 전용 JSON도 읽을 수 있습니다. 잘못된 자료형, null, 필수 키 누락, 중복 키, 알 수 없는 키, 지원하지 않는 스키마 버전은 거부합니다. 설정은 최대 64KiB의 일반 파일이어야 하며 심볼릭 링크와 FIFO는 허용하지 않습니다. 새로운 동작 설정은 이름·자료형·검증 규칙을 정의해 추가합니다.
+세 리소스 임계치는 필수이며 유한한 숫자여야 합니다. 리소스 임계치의 0은 항상 경고를 발생시킵니다. `collection`, `analyzer` 또는 그 하위 설정을 생략하면 해당 기본값을 사용하므로 이전 임계치 전용 JSON도 읽을 수 있습니다. 설정 키의 정확한 이름은 `is_analyzer`이며 `is_anlayzer`는 허용하지 않습니다. 잘못된 자료형, null, 필수 키 누락, 중복 키, 알 수 없는 키, 지원하지 않는 스키마 버전은 거부합니다. 설정은 최대 64KiB의 일반 파일이어야 하며 심볼릭 링크와 FIFO는 허용하지 않습니다. 새로운 동작 설정은 이름·자료형·검증 규칙을 정의해 추가합니다.
 
 데몬은 수집 주기와 별도로 1초마다 설정 파일 전체를 확인하므로 재시작 없이 모든 항목을 자동 반영합니다. `is_analyzer`가 `true`인 경우에만 계정 파일을 확인하고 DB 연결을 준비합니다. 파일을 직접 수정하는 방식과 새 파일로 원자 교체하는 방식 모두 지원합니다. 진행 중인 동기 수집·파일 작업이 오래 걸리면 확인도 그 작업이 끝난 뒤 수행됩니다. 명시한 `--interval-seconds`와 `--output` 옵션은 실행 중에도 각각 JSON의 값을 덮어씁니다. 기본 systemd 서비스는 이 옵션들을 지정하지 않아 파일 설정을 사용합니다.
 
@@ -131,7 +149,7 @@ resource-monitor --config /etc/resource-monitor/settings.json --check-config
 
 MySQL 연결과 쿼리는 최상위 `is_analyzer`가 `true`일 때만 실행합니다. `is_analyzer`는 생략하면 `false`이며 문자열 `"true"`, 숫자 `1`, `null`은 허용하지 않습니다. JSON에는 소문자 `true` 또는 `false`를 입력하십시오. `is_analyzer`가 `true`이면 `mysql` 객체와 `mysql.database`를 반드시 지정해야 합니다. `settings.json`의 `mysql`에는 접속 대상과 동작 설정만 저장하고 `username` 또는 `password`를 직접 넣으면 설정을 거부합니다.
 
-1.3.3부터 `mysql.enabled`를 제거하고 `is_analyzer` 하나로 DB 사용 여부를 제어합니다. 업그레이드 전에 기존 `settings.json`의 `mysql.enabled`를 삭제하고 원하는 동작에 맞게 최상위 `is_analyzer`를 지정하십시오. 제거된 키가 남아 있으면 알 수 없는 키로 설정을 거부하며, RPM 업그레이드는 기존 사용자 설정을 자동으로 수정하지 않습니다. `is_analyzer`가 없거나 `false`이면 DB에 연결하거나 쿼리를 실행하지 않고 계정 파일도 읽지 않습니다. CPU·메모리·스토리지 수집과 JSON 저장은 계속합니다.
+1.3.3부터 `mysql.enabled`를 제거하고 `is_analyzer` 하나로 DB 사용 여부를 제어합니다. 업그레이드 전에 기존 `settings.json`의 `mysql.enabled`를 삭제하고 원하는 동작에 맞게 최상위 `is_analyzer`를 지정하십시오. 제거된 키가 남아 있으면 알 수 없는 키로 설정을 거부하며, RPM 업그레이드는 기존 사용자 설정을 자동으로 수정하지 않습니다. `is_analyzer`가 없거나 `false`이면 DB에 연결하거나 쿼리를 실행하지 않고 계정 파일도 읽지 않습니다. CPU·메모리·스토리지 수집, 수집 장비의 Java 프로세스 모니터링과 JSON 저장은 계속합니다.
 
 | 설정 | 의미와 기본값 |
 | --- | --- |
@@ -244,6 +262,43 @@ LIMIT 10001;
 }
 ```
 
+## Java 프로세스 모니터링
+
+`is_analyzer`의 값과 관계없이 매 수집 주기에 Java 프로세스를 관측합니다. `true`이면 분석 장비의 12개 대상, `false`이면 수집 장비의 8개 대상을 선택합니다. 대상은 제공된 프로세스 목록의 `-DAPP=<이름>`을 기준으로 하며 대소문자를 구분합니다.
+
+| `is_analyzer` | `process_profile` | 대상 DAPP 이름 |
+| --- | --- | --- |
+| `true` | `analyzer` | `SearchEngine`, `Normalizer`, `CollectorForAgent`, `CDMEngine`, `ShovelServer`, `AnalyzeEngine`, `AnalyzeAssistantEngine`, `SoarTicketMain`, `SoarPlaybookManager`, `pmsServer`, `pmsClient`, `ProcessMonitor` |
+| `false` | `collector` | `SearchEngine`, `Reducer`, `Normalizer`, `CloudESMCollector`, `CollectorForAgent`, `CDMEngine`, `pmsClient`, `ProcessMonitor` |
+
+`/proc`에서 Java 프로세스의 인자를 확인하며 `ps`나 `grep` 명령을 실행하지 않습니다. `-DAPP`가 없는 Tomcat·메신저 등의 Java 프로세스와 `grep java`는 대상에 포함하지 않습니다. 이름의 일부가 일치하는 것만으로는 실행 중으로 판정하지 않습니다. 같은 DAPP 이름으로 여러 프로세스가 실행 중이면 살아 있는 인스턴스가 하나라도 있을 때 `true`입니다.
+
+`processes`는 선택한 대상 이름을 모두 포함합니다. 실행 중인 대상은 `true`, 관측을 완료했으나 해당 프로세스가 없거나 종료·좀비 상태이면 `false`입니다. 실행 여부를 확인하는 기능이므로 `true`가 애플리케이션의 응답 정상이나 처리 정상까지 보장하지는 않습니다. 대상의 미실행을 확인하면 `process_status=warning`이며 전체 `status`에도 경고를 반영합니다. 누락된 프로세스를 자동으로 시작하거나 재시작하지 않습니다.
+
+프로세스 목록이나 인자를 권한 문제 등으로 충분히 확인하지 못하면 발견된 실행 중 대상은 `true`로 유지하고, 존재 여부를 확정할 수 없는 대상은 `null`로 기록합니다. 이 경우 `process_status=unknown`과 `errors`에 관측 오류를 남깁니다. 서비스 계정이 호스트의 프로세스를 볼 수 있도록 `/proc` 접근 권한을 준비해야 합니다. 프로세스 조회도 순차적으로 수행하므로 저장 순간과 완전히 동일한 시점의 원자적 상태는 아닙니다.
+
+다음은 수집 장비에서 `Reducer`가 미실행인 경우의 JSON 일부입니다. 값은 문자열이 아닌 JSON 불리언입니다.
+
+```json
+{
+  "status": "warning",
+  "process_profile": "collector",
+  "process_status": "warning",
+  "processes": {
+    "SearchEngine": true,
+    "Reducer": false,
+    "Normalizer": true,
+    "CloudESMCollector": true,
+    "CollectorForAgent": true,
+    "CDMEngine": true,
+    "pmsClient": true,
+    "ProcessMonitor": true
+  }
+}
+```
+
+`settings.json`의 `is_analyzer`를 수정하여 설정 전체 적용이 성공하면 재시작 없이 다음 수집부터 새 역할의 대상 목록을 사용합니다. 적용에 실패하면 기존 설정과 대상 목록을 유지합니다. 프로세스 관측은 DB 쿼리 결과에 의존하지 않으며 DB 분석 중단이나 조회 실패 중에도 계속합니다. 수집 주기와 저장 경로는 기존 `collection` 설정을 함께 사용합니다.
+
 ## JSON 계약
 
 | 필드 | 값과 의미 |
@@ -260,10 +315,13 @@ LIMIT 10001;
 | `cpu` | 관측 구간 초, 사용률, iowait 비율, steal 비율, 상태 |
 | `memory` | 전체·사용·가용 bytes, 사용률, 상태 |
 | `filesystems` | 장치, 장치 식별자, 마운트 목록, 유형, 전체·사용·미사용·가용 bytes, 사용률, 상태 |
+| `process_profile` | 현재 적용된 `is_analyzer`에 따른 `analyzer` 또는 `collector` |
+| `process_status` | 대상 모두 실행 중이면 `ok`, 미실행 대상이 있으면 `warning`, 관측 불가로 존재 여부를 확정하지 못하면 `unknown` |
+| `processes` | 선택한 모든 DAPP 이름을 키로 갖는 객체. 실행 중은 `true`, 미실행은 `false`, 확인 불가는 `null` |
 | `collect_count` | 조회 대상, `disabled`·`pending`·`ok`·`warning`·`no_data`·`error` 상태, 비교 날짜, 적용 임계치, 조회 완료 시각, 장비 수, 경고 목록과 오류 |
 | `errors` | component, target, code, message로 구성된 오류 목록 |
 
-전체 `status`는 리소스나 일별 수집 건수 분석 중 하나라도 경고면 `warning`, 경고 없이 측정 불가가 있으면 `unknown`, 모두 정상 측정되고 임계치 미만이면 `ok`입니다. 분석의 `pending`, `error`, `no_data`는 리소스가 모두 정상이더라도 전체 `status=unknown`으로 반영하며 `disabled`는 전체 상태에 영향을 주지 않습니다. `ok`, `warning`, `unknown` 모두 매 수집 주기에 JSON으로 기록합니다. `collection_status`는 CPU·메모리·스토리지 수집 상태만 나타내며 DB 분석·설정 오류로 변경하지 않습니다. 예를 들어 디스크 하나가 경고이고 다른 디스크가 수집 실패이면 `status=warning`, `collection_status=partial`인 전체 결과를 저장합니다. 실행 중 발생한 수집·설정·분석 오류는 해당 주기의 JSON `errors`와 journal에 기록하며 분석 오류는 `collect_count.error`에도 표시합니다.
+전체 `status`는 리소스, Java 프로세스, 일별 수집 건수 분석 중 하나라도 경고면 `warning`, 경고 없이 측정 불가가 있으면 `unknown`, 모두 정상 측정되고 임계치 미만이면 `ok`입니다. 분석의 `pending`, `error`, `no_data`와 프로세스 관측의 `unknown`은 다른 항목이 모두 정상이더라도 전체 `status=unknown`으로 반영하며 분석의 `disabled`는 전체 상태에 영향을 주지 않습니다. `ok`, `warning`, `unknown` 모두 매 수집 주기에 JSON으로 기록합니다. `collection_status`는 CPU·메모리·스토리지 수집 상태만 나타내며 프로세스·DB 분석·설정 오류로 변경하지 않습니다. 예를 들어 디스크 하나가 경고이고 다른 디스크가 수집 실패이면 `status=warning`, `collection_status=partial`인 전체 결과를 저장합니다. 실행 중 발생한 수집·프로세스 관측·설정·분석 오류는 해당 주기의 JSON `errors`와 journal에 기록하며 분석 오류는 `collect_count.error`에도 표시합니다.
 
 측정할 수 없는 리소스 값은 0 대신 JSON null입니다. 리소스의 이전 결과를 현재 측정값처럼 재사용하지 않습니다. DB 분석은 위에서 설명한 캐시와 `queried_at`으로 조회 시점을 구분하며, 날짜별 행이 없는 경우에만 건수 0과 존재 여부를 함께 사용합니다. 빈 파일시스템 목록은 모든 디스크 정상으로 취급하지 않습니다.
 
@@ -293,7 +351,7 @@ proc, sysfs, tmpfs, overlay, 네트워크 파일시스템과 FUSE는 수집 대�
 
 ## 실행과 저장 동작
 
-시작 시 CPU 기준값을 확보하고 기본 60초 후 첫 수집과 임계치 판정을 수행하여 전체 결과를 저장합니다. 이후 매 수집 주기에 수집, CPU 기준값 갱신, 임계치 판정과 JSON 저장을 수행합니다. 경고에서 정상으로 복구된 주기와 측정할 수 없는 항목이 있는 주기도 같은 JSON 형식으로 기록합니다. Linux CLOCK_MONOTONIC 타이머를 사용하므로 OS 시간대나 UTC/NTP 시간 변경이 주기를 바꾸지 않습니다. 작업 중 지나간 주기는 건너뛰고 다음 주기를 기다립니다. 실제 CPU 관측 구간은 cpu.window_seconds에 기록됩니다.
+시작 시 CPU 기준값을 확보하고 기본 60초 후 첫 수집과 임계치 판정을 수행하여 전체 결과를 저장합니다. 이후 매 수집 주기에 리소스·Java 프로세스 수집, CPU 기준값 갱신, 임계치 판정과 JSON 저장을 수행합니다. 경고에서 정상으로 복구된 주기와 측정할 수 없는 항목이 있는 주기도 같은 JSON 형식으로 기록합니다. Linux CLOCK_MONOTONIC 타이머를 사용하므로 OS 시간대나 UTC/NTP 시간 변경이 주기를 바꾸지 않습니다. 작업 중 지나간 주기는 건너뛰고 다음 주기를 기다립니다. 실제 CPU 관측 구간은 cpu.window_seconds에 기록됩니다.
 
 저장할 때마다 `tzset()`으로 시스템 시간대 정보를 갱신하고 JSON 시각과 파일명에 같은 시간대를 적용합니다. 기본 systemd 서비스처럼 `TZ` 환경 변수를 별도로 지정하지 않은 경우 `/etc/localtime`을 따르며, OS 시간대 변경은 데몬 재시작 없이 다음 저장부터 반영됩니다. 별도로 `TZ`를 지정해 실행하면 해당 프로세스의 시간대 설정이 우선합니다. 시간대 변경은 시각의 표시만 바꾸며 실제 수집 시점과 임계치 적용 시점은 유지합니다.
 
@@ -329,7 +387,7 @@ RPM은 빌드할 OL8 또는 OL9 시스템에서 다음처럼 생성합니다. So
 ```bash
 sudo dnf install -y rpm-build gcc-toolset-15-gcc-c++ cmake make python3 pkgconf-pkg-config mariadb-connector-c-devel
 mkdir -p "$HOME/rpmbuild/SOURCES" "$HOME/rpmbuild/SPECS"
-cp artifacts/resource-monitor-1.4.0.tar.gz "$HOME/rpmbuild/SOURCES/"
+cp artifacts/resource-monitor-1.5.0.tar.gz "$HOME/rpmbuild/SOURCES/"
 curl --fail --location https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz --output "$HOME/rpmbuild/SOURCES/json.tar.xz"
 cp packaging/rpm/resource-monitor.spec "$HOME/rpmbuild/SPECS/"
 rpmbuild -ba "$HOME/rpmbuild/SPECS/resource-monitor.spec"
