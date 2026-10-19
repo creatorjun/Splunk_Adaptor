@@ -3,6 +3,7 @@
 
 #include "application/ports/IMySqlConfiguration.hpp"
 #include "application/ports/ICollectCountReader.hpp"
+#include "application/ports/ILogSilenceReader.hpp"
 #include "infrastructure/database/IMySqlSession.hpp"
 
 #include <chrono>
@@ -10,7 +11,8 @@
 
 namespace monitor {
 
-class MySqlConfiguration final : public IMySqlConfiguration, public ICollectCountReader {
+class MySqlConfiguration final : public IMySqlConfiguration, public ICollectCountReader,
+    public ILogSilenceReader {
 public:
     MySqlConfiguration(IMySqlCredentialsReader& credentials, IMySqlConnectionFactory& factory,
         std::chrono::milliseconds retry_interval = std::chrono::seconds{5},
@@ -22,6 +24,8 @@ public:
     std::expected<bool, Error> prepare(const MySqlSettings& settings) override;
     bool commit() noexcept override;
     CollectCountReading read_daily_counts(const DailyCountWindow& window,
+        std::chrono::seconds refresh_interval) override;
+    LogSilenceReading read_last_received(bool enabled,
         std::chrono::seconds refresh_interval) override;
 
 private:

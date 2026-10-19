@@ -58,6 +58,11 @@ std::string document_with_process_monitor(const std::string& processes, bool is_
         + std::string{is_analyzer ? "true" : "false"} + ",\"process_monitor\":" + processes + "}";
 }
 
+std::string document_with_log_silence(const std::string& silence, bool is_analyzer = false) {
+    return R"({"schema_version":1,"thresholds":{"cpu_usage_percent":80,"memory_usage_percent":85.5,"storage_usage_percent":90},"mysql":{"database":"monitoring","tls_mode":"disabled"},"is_analyzer":)"
+        + std::string{is_analyzer ? "true" : "false"} + ",\"log_silence\":" + silence + "}";
+}
+
 void check_failure(monitor::JsonSettingsReader& reader, const std::filesystem::path& path) {
     const auto settings = reader.read_settings();
     CHECK(!settings);
@@ -97,6 +102,8 @@ int main() {
             "CDMEngine", "pmsClient", "ProcessMonitor"};
         CHECK(settings->process_monitor.analyzer == default_analyzer);
         CHECK(settings->process_monitor.collector == default_collector);
+        CHECK(settings->log_silence.default_timeout_seconds == 300);
+        CHECK(settings->log_silence.overrides.empty());
         auto policy = reader.read();
         CHECK(policy);
         CHECK(settings->thresholds == *policy);
@@ -201,6 +208,78 @@ int main() {
             CHECK(result.error().message.find("redaction-marker") == std::string::npos);
         }
         write_file(path, document_with_process_monitor(R"({"analyzer":[],"analyzer":["DuplicateKey"]})"));
+        check_failure(reader, path);
+
+        for (const auto& silence : {"{}", R"({"overrides":[]})"}) {
+            write_file(path, document_with_log_silence(silence));
+            settings = reader.read_settings();
+            CHECK(settings);
+            CHECK(settings->log_silence == monitor::LogSilenceSettings{});
+        }
+        const std::vector<std::string> valid_addresses{
+            "192.0.2.1", "2001:db8::1", "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "::1"};
+        for (const auto timeout : {60U, 300U, 604800U}) {
+            nlohmann::json overrides = nlohmann::json::array();
+            for (const auto& address : valid_addresses) {
+                overrides.push_back({{"eqp_ip", address}, {"timeout_seconds", timeout}});
+            }
+            write_file(path, document_with_log_silence(nlohmann::json{
+                {"default_timeout_seconds", timeout}, {"overrides", overrides}}.dump(), true));
+            settings = reader.read_settings();
+            CHECK(settings);
+            CHECK(settings->log_silence.default_timeout_seconds == timeout);
+            CHECK(settings->log_silence.overrides.size() == valid_addresses.size());
+            for (std::size_t index = 0; index < valid_addresses.size(); ++index) {
+                CHECK(settings->log_silence.overrides[index].eqp_ip == valid_addresses[index]);
+                CHECK(settings->log_silence.overrides[index].timeout_seconds == timeout);
+            }
+        }
+        nlohmann::json maximum_overrides = nlohmann::json::array();
+        for (int index = 0; index < 256; ++index) {
+            maximum_overrides.push_back({{"eqp_ip", "192.0.2." + std::to_string(index)},
+                {"timeout_seconds", 300}});
+        }
+        write_file(path, document_with_log_silence(nlohmann::json{{"overrides", maximum_overrides}}.dump()));
+        settings = reader.read_settings();
+        CHECK(settings);
+        CHECK(settings->log_silence.overrides.size() == 256);
+        maximum_overrides.push_back({{"eqp_ip", "198.51.100.1"}, {"timeout_seconds", 300}});
+        std::vector<std::string> invalid_silence{
+            "null", "true", "1", "[]", "\"redaction-marker\"",
+            R"({"redaction-marker":300})", R"({"devices":[]})",
+            R"({"overrides":null})", R"({"overrides":true})", R"({"overrides":{}})",
+            R"({"overrides":[null]})", R"({"overrides":[true]})", R"({"overrides":[{}]})",
+            R"({"overrides":[{"eqp_ip":"192.0.2.1"}]})",
+            R"({"overrides":[{"timeout_seconds":300}]})",
+            R"({"overrides":[{"eqp_ip":"192.0.2.1","timeout_seconds":300,"typo":0}]})",
+            R"({"overrides":[{"eqp_ip":"192.0.2.1","timeout_seconds":300},{"eqp_ip":"192.0.2.1","timeout_seconds":60}]})",
+            nlohmann::json{{"overrides", maximum_overrides}}.dump()
+        };
+        for (const auto& timeout : {"null", "true", "\"300\"", "[]", "{}", "-1", "0", "59", "60.0",
+            "604801", "18446744073709551615", "-9223372036854775808"}) {
+            invalid_silence.push_back("{\"default_timeout_seconds\":" + std::string{timeout} + "}");
+            invalid_silence.push_back("{\"overrides\":[{\"eqp_ip\":\"192.0.2.1\",\"timeout_seconds\":" +
+                std::string{timeout} + "}]}");
+        }
+        for (const auto& address : {"null", "true", "300", "[]", "{}", "\"\"", "\"redaction-marker\"",
+            "\"192.0.2.256\"", "\"192.0.2\"", "\" 192.0.2.1\"", "\"192.0.2.1 \"", "\"192.0.2.1:22\"",
+            "\"[2001:db8::1]\"", "\"fe80::1%eth0\"", "\"192.0.2.1\\u0000redaction-marker\"",
+            "\"ffff:ffff:ffff:ffff:ffff:ffff:ffff:fffff\""}) {
+            invalid_silence.push_back("{\"overrides\":[{\"eqp_ip\":" + std::string{address} +
+                ",\"timeout_seconds\":300}]}");
+        }
+        for (const auto is_analyzer : {false, true}) {
+            for (const auto& silence : invalid_silence) {
+                write_file(path, document_with_log_silence(silence, is_analyzer));
+                const auto result = reader.read_settings();
+                CHECK(!result);
+                CHECK(result.error().code == "invalid_log_silence");
+                CHECK(result.error().message.find("redaction-marker") == std::string::npos);
+            }
+        }
+        write_file(path, document_with_log_silence(R"({"default_timeout_seconds":300,"default_timeout_seconds":60})"));
+        check_failure(reader, path);
+        write_file(path, document_with_log_silence(R"({"overrides":[{"eqp_ip":"192.0.2.1","eqp_ip":"192.0.2.2","timeout_seconds":300}]})"));
         check_failure(reader, path);
 
         write_file(path, document_with_analyzer("{}"));

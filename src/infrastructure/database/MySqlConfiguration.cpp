@@ -58,6 +58,11 @@ Error query_error() {
         "Database collection count query failed"};
 }
 
+Error silence_query_error() {
+    return {"log_silence", "CloudESM.SUM_COLLECT_INFO", "query_failure",
+        "Database last log receipt query failed"};
+}
+
 }
 
 class MySqlConfiguration::State {
@@ -165,8 +170,13 @@ public:
         query_result = {};
         query_completed_at.reset();
         query_at = Clock::time_point{};
+        ++silence_revision;
+        silence_result = {};
+        silence_completed_at.reset();
+        silence_at = Clock::time_point{};
         if (!active_identity->settings.enabled) {
             desired_window.reset();
+            silence_enabled = false;
         }
         failure.reset();
         health_at = Clock::now() + health_interval;
@@ -224,6 +234,66 @@ public:
         return query_result;
     }
 
+    LogSilenceReading read_last_received(bool enabled, std::chrono::seconds refresh_interval) {
+        std::lock_guard lock(mutex);
+        if (!enabled) {
+            if (silence_enabled) {
+                silence_enabled = false;
+                ++silence_revision;
+                silence_result = {};
+                silence_completed_at.reset();
+                silence_at = Clock::time_point{};
+                wake.notify_one();
+            }
+            return {};
+        }
+        if (refresh_interval.count() <= 0) {
+            LogSilenceReading result;
+            result.status = LogSilenceReadStatus::error;
+            result.error = Error{"log_silence", "refresh_interval", "invalid_interval",
+                "Last log receipt refresh interval must be positive"};
+            return result;
+        }
+        if ((!active_identity || !active_identity->settings.enabled)
+            && (!desired || !desired->settings.enabled)) {
+            return {};
+        }
+        if (!silence_enabled) {
+            silence_enabled = true;
+            ++silence_revision;
+            silence_result = {};
+            silence_completed_at.reset();
+            silence_at = Clock::time_point{};
+        }
+        if (silence_interval != refresh_interval) {
+            silence_interval = refresh_interval;
+            if (silence_completed_at) {
+                silence_at = *silence_completed_at + (silence_result.status == LogSilenceReadStatus::error
+                    ? std::max(std::chrono::duration_cast<Clock::duration>(silence_interval),
+                        std::chrono::duration_cast<Clock::duration>(retry_interval))
+                    : std::chrono::duration_cast<Clock::duration>(silence_interval));
+            }
+        }
+        wake.notify_one();
+        if (!active || !active_healthy) {
+            LogSilenceReading result;
+            if (active && !active_healthy) {
+                result.status = LogSilenceReadStatus::error;
+                result.error = Error{"log_silence", "connection", "connection_unavailable",
+                    "Database last log receipt connection is unavailable"};
+            }
+            return result;
+        }
+        const auto maximum_age = std::max(silence_interval * 2, std::chrono::seconds{10});
+        if (silence_result.status == LogSilenceReadStatus::ready && silence_completed_at
+            && Clock::now() - *silence_completed_at > maximum_age) {
+            LogSilenceReading result;
+            result.queried_at = silence_result.queried_at;
+            return result;
+        }
+        return silence_result;
+    }
+
     void run() {
         std::unique_lock lock(mutex);
         while (!stopping) {
@@ -271,6 +341,8 @@ public:
                         active_healthy = false;
                         query_result = {};
                         query_completed_at.reset();
+                        silence_result = {};
+                        silence_completed_at.reset();
                         if (active_identity && desired && *active_identity == *desired) {
                             failure = result.error();
                             retry_at = Clock::now();
@@ -315,8 +387,42 @@ public:
                 lock.lock();
                 continue;
             }
+            if (active && active_healthy && silence_enabled && Clock::now() >= silence_at) {
+                auto session = active;
+                const auto revision = active_revision;
+                const auto selected_silence_revision = silence_revision;
+                lock.unlock();
+                auto result = query_last_received(*session);
+                const auto queried_at = std::chrono::system_clock::now();
+                lock.lock();
+                if (!stopping && revision == active_revision
+                    && selected_silence_revision == silence_revision && silence_enabled) {
+                    silence_result = {};
+                    silence_result.queried_at = queried_at;
+                    silence_completed_at = Clock::now();
+                    if (result) {
+                        silence_result.status = LogSilenceReadStatus::ready;
+                        silence_result.batch = std::move(*result);
+                        silence_at = *silence_completed_at + silence_interval;
+                    } else {
+                        silence_result.status = LogSilenceReadStatus::error;
+                        silence_result.error = std::move(result.error());
+                        silence_at = *silence_completed_at + std::max(
+                            std::chrono::duration_cast<Clock::duration>(silence_interval),
+                            std::chrono::duration_cast<Clock::duration>(retry_interval));
+                        health_at = Clock::now();
+                    }
+                }
+                lock.unlock();
+                session.reset();
+                lock.lock();
+                continue;
+            }
             if (active && active_healthy) {
-                wake.wait_until(lock, desired_window ? std::min(health_at, query_at) : health_at);
+                auto deadline = health_at;
+                if (desired_window) deadline = std::min(deadline, query_at);
+                if (silence_enabled) deadline = std::min(deadline, silence_at);
+                wake.wait_until(lock, deadline);
             } else {
                 wake.wait(lock);
             }
@@ -369,6 +475,14 @@ public:
         }
     }
 
+    static std::expected<LogReceiptBatch, Error> query_last_received(IMySqlSession& session) {
+        try {
+            return session.read_last_received();
+        } catch (...) {
+            return std::unexpected(silence_query_error());
+        }
+    }
+
     IMySqlCredentialsReader& credentials;
     IMySqlConnectionFactory& factory;
     std::chrono::milliseconds retry_interval;
@@ -400,6 +514,12 @@ public:
     CollectCountReading query_result;
     std::optional<Clock::time_point> query_completed_at;
     Clock::time_point query_at{};
+    bool silence_enabled{};
+    std::chrono::seconds silence_interval{60};
+    std::uint64_t silence_revision{};
+    LogSilenceReading silence_result;
+    std::optional<Clock::time_point> silence_completed_at;
+    Clock::time_point silence_at{};
 };
 
 MySqlConfiguration::MySqlConfiguration(IMySqlCredentialsReader& credentials,
@@ -420,6 +540,11 @@ bool MySqlConfiguration::commit() noexcept {
 CollectCountReading MySqlConfiguration::read_daily_counts(const DailyCountWindow& window,
     std::chrono::seconds refresh_interval) {
     return state_->read_daily_counts(window, refresh_interval);
+}
+
+LogSilenceReading MySqlConfiguration::read_last_received(bool enabled,
+    std::chrono::seconds refresh_interval) {
+    return state_->read_last_received(enabled, refresh_interval);
 }
 
 }

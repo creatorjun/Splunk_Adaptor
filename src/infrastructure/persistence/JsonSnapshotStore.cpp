@@ -139,6 +139,12 @@ nlohmann::json nullable(const std::optional<T>& value) {
     return value ? nlohmann::json(*value) : nlohmann::json(nullptr);
 }
 
+nlohmann::json nullable_time(const std::optional<std::chrono::system_clock::time_point>& value) {
+    if (!value) return nullptr;
+    const auto formatted = format_time(*value, true, {});
+    return formatted ? nlohmann::json(formatted->timestamp) : nlohmann::json(nullptr);
+}
+
 nlohmann::json serialize(const ResourceSnapshot& snapshot, const std::string& timestamp,
     const std::string& applied_at) {
     auto processes = nlohmann::json::object();
@@ -161,6 +167,20 @@ nlohmann::json serialize(const ResourceSnapshot& snapshot, const std::string& ti
     if (snapshot.collect_count.error) {
         const auto& error = *snapshot.collect_count.error;
         analysis_error = {{"component", error.component}, {"target", error.target},
+            {"code", error.code}, {"message", error.message}};
+    }
+    auto silent_equipment = nlohmann::json::array();
+    for (const auto& equipment : snapshot.log_silence.equipment) {
+        silent_equipment.push_back({{"eqp_ip", equipment.eqp_ip},
+            {"last_received_at", nullable_time(equipment.last_received_at)},
+            {"timeout_seconds", equipment.timeout_seconds},
+            {"silent_for_seconds", nullable(equipment.silent_for_seconds)},
+            {"status", to_string(equipment.status)}, {"reason", equipment.reason}});
+    }
+    nlohmann::json silence_error = nullptr;
+    if (snapshot.log_silence.error) {
+        const auto& error = *snapshot.log_silence.error;
+        silence_error = {{"component", error.component}, {"target", error.target},
             {"code", error.code}, {"message", error.message}};
     }
     auto filesystems = nlohmann::json::array();
@@ -225,6 +245,17 @@ nlohmann::json serialize(const ResourceSnapshot& snapshot, const std::string& ti
             {"equipment_count", snapshot.collect_count.equipment_count},
             {"alerts", std::move(alerts)},
             {"error", std::move(analysis_error)}
+        }},
+        {"log_silence", {
+            {"source", "CloudESM.SUM_COLLECT_INFO"},
+            {"status", to_string(snapshot.log_silence.status)},
+            {"default_timeout_seconds", snapshot.log_silence.default_timeout_seconds},
+            {"checked_at", nullable_time(snapshot.log_silence.checked_at)},
+            {"queried_at", nullable_time(snapshot.log_silence.queried_at)},
+            {"last_received_precision_seconds", 60},
+            {"equipment_count", snapshot.log_silence.equipment.size()},
+            {"equipment", std::move(silent_equipment)},
+            {"error", std::move(silence_error)}
         }},
         {"errors", std::move(errors)}
     };

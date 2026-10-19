@@ -5,6 +5,7 @@
 #include "domain/ThresholdPolicy.hpp"
 #include "domain/CollectCountAnalysis.hpp"
 #include "domain/JavaProcessSnapshot.hpp"
+#include "domain/LogSilenceAnalysis.hpp"
 
 namespace monitor {
 
@@ -52,6 +53,7 @@ struct ResourceSnapshot {
     std::vector<Error> errors;
     CollectCountAnalysis collect_count;
     JavaProcessSnapshot java_processes;
+    LogSilenceAnalysis log_silence;
 };
 
 }

@@ -200,6 +200,87 @@ void check_process_snapshots() {
     check_no_temporary_files(directory.path);
 }
 
+void check_log_silence_snapshots() {
+    ScopedTimezone scoped_zone("KST-9");
+    TemporaryDirectory directory;
+    monitor::JsonSnapshotStore store(directory.path);
+    auto snapshot = make_snapshot();
+    snapshot.log_silence.status = monitor::LogSilenceStatus::warning;
+    snapshot.log_silence.default_timeout_seconds = 600;
+    snapshot.log_silence.checked_at = snapshot.timestamp;
+    snapshot.log_silence.queried_at = snapshot.timestamp - std::chrono::milliseconds{123};
+    snapshot.log_silence.equipment = {
+        {"192.0.2.1", 300, snapshot.timestamp - std::chrono::seconds{360}, 360,
+            monitor::MetricStatus::warning, "timeout"},
+        {"192.0.2.2", 600, snapshot.timestamp - std::chrono::seconds{60}, 60,
+            monitor::MetricStatus::ok, "receiving"},
+        {"2001:db8::1", 600, std::nullopt, std::nullopt,
+            monitor::MetricStatus::warning, "no_history"}};
+    CHECK(store.save(snapshot));
+    const auto json = read_json(directory.path / "20261014T213400+0900.json");
+    const auto& silence = json["log_silence"];
+    CHECK(silence["source"] == "CloudESM.SUM_COLLECT_INFO");
+    CHECK(silence["status"] == "warning");
+    CHECK(silence["default_timeout_seconds"] == 600);
+    CHECK(silence["checked_at"] == "2026-10-14T21:34:00.000+09:00");
+    CHECK(silence["queried_at"] == "2026-10-14T21:33:59.877+09:00");
+    CHECK(silence["last_received_precision_seconds"] == 60);
+    CHECK(silence["equipment_count"] == 3);
+    CHECK(silence["equipment"].size() == 3);
+    CHECK(silence["error"].is_null());
+    const auto& first = silence["equipment"][0];
+    CHECK(first["eqp_ip"] == "192.0.2.1");
+    CHECK(first["timeout_seconds"] == 300);
+    CHECK(first["silent_for_seconds"].is_number_unsigned());
+    CHECK(first["silent_for_seconds"] == 360);
+    CHECK(first["last_received_at"] == "2026-10-14T21:28:00.000+09:00");
+    CHECK(first["status"] == "warning");
+    CHECK(first["reason"] == "timeout");
+    CHECK(silence["equipment"][1]["status"] == "ok");
+    CHECK(silence["equipment"][2]["last_received_at"].is_null());
+    CHECK(silence["equipment"][2]["silent_for_seconds"].is_null());
+
+    scoped_zone.set("NST3:30");
+    CHECK(store.save(snapshot));
+    const auto shifted = read_json(directory.path / "20261014T090400-0330.json");
+    CHECK(shifted["log_silence"]["checked_at"] == "2026-10-14T09:04:00.000-03:30");
+    CHECK(shifted["log_silence"]["queried_at"] == "2026-10-14T09:03:59.877-03:30");
+    CHECK(shifted["log_silence"]["equipment"][0]["last_received_at"] == "2026-10-14T08:58:00.000-03:30");
+    CHECK(shifted["log_silence"]["equipment"][0]["silent_for_seconds"] == 360);
+
+    snapshot.timestamp += std::chrono::seconds{1};
+    snapshot.log_silence = {};
+    snapshot.log_silence.status = monitor::LogSilenceStatus::error;
+    snapshot.log_silence.error = monitor::Error{"log_silence", "CloudESM.SUM_COLLECT_INFO",
+        "query_failed", "Database unavailable"};
+    CHECK(store.save(snapshot));
+    const auto failed = read_json(directory.path / "20261014T090401-0330.json");
+    CHECK(failed["log_silence"]["status"] == "error");
+    CHECK(failed["log_silence"]["equipment_count"] == 0);
+    CHECK(failed["log_silence"]["equipment"].is_array());
+    CHECK(failed["log_silence"]["equipment"].empty());
+    CHECK(failed["log_silence"]["checked_at"].is_null());
+    CHECK(failed["log_silence"]["queried_at"].is_null());
+    CHECK(failed["log_silence"]["error"]["component"] == "log_silence");
+    CHECK(failed["log_silence"]["error"]["target"] == "CloudESM.SUM_COLLECT_INFO");
+    CHECK(failed["log_silence"]["error"]["code"] == "query_failed");
+    CHECK(failed["log_silence"]["error"]["message"] == "Database unavailable");
+    CHECK(failed["cpu"]["usage_percent"] == *snapshot.cpu.usage_percent);
+    CHECK(failed["collection_status"] == "partial");
+
+    snapshot.log_silence.error.reset();
+    for (const auto state : {monitor::LogSilenceStatus::disabled, monitor::LogSilenceStatus::pending,
+        monitor::LogSilenceStatus::no_data, monitor::LogSilenceStatus::ok}) {
+        snapshot.log_silence.status = state;
+        CHECK(store.save(snapshot));
+    }
+    CHECK(read_json(directory.path / "20261014T090401-0330_1.json")["log_silence"]["status"] == "disabled");
+    CHECK(read_json(directory.path / "20261014T090401-0330_2.json")["log_silence"]["status"] == "pending");
+    CHECK(read_json(directory.path / "20261014T090401-0330_3.json")["log_silence"]["status"] == "no_data");
+    CHECK(read_json(directory.path / "20261014T090401-0330_4.json")["log_silence"]["status"] == "ok");
+    check_no_temporary_files(directory.path);
+}
+
 void check_collect_count_snapshots() {
     ScopedTimezone scoped_zone("KST-9");
     TemporaryDirectory directory;
@@ -514,5 +595,6 @@ int main() {
         check_timezone_snapshots();
         check_collect_count_snapshots();
         check_process_snapshots();
+        check_log_silence_snapshots();
     });
 }

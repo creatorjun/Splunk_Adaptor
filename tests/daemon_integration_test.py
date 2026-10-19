@@ -77,6 +77,8 @@ def wait_snapshot(output, seen, predicate, process, seconds=7, expected_apps=COL
             seen.add(path.name)
             assert payload['schema_version'] == 1
             assert payload['status'] in ('ok', 'warning', 'unknown')
+            assert payload['log_silence']['status'] == 'disabled'
+            assert payload['log_silence']['equipment'] == []
             assert payload['process_profile'] == expected_profile
             expected_names = [set(expected_apps)]
             if previous_apps is not None:

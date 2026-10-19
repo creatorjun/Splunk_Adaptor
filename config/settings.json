@@ -40,6 +40,10 @@
     "memory_usage_percent": 85.0,
     "storage_usage_percent": 90.0
   },
+  "log_silence": {
+    "default_timeout_seconds": 300,
+    "overrides": []
+  },
   "mysql": {
     "host": "127.0.0.1",
     "port": 3306,

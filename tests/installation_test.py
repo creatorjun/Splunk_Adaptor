@@ -31,6 +31,7 @@ def main():
         assert original['collection'] == {'interval_seconds': 60, 'output_directory': '/Monitor'}
         assert original['thresholds']['cpu_usage_percent'] == 80
         assert original['is_analyzer'] is False
+        assert original['log_silence'] == {'default_timeout_seconds': 300, 'overrides': []}
         default_profiles = {
             'analyzer': [
                 'SearchEngine', 'Normalizer', 'CollectorForAgent', 'CDMEngine', 'ShovelServer',
@@ -62,6 +63,7 @@ def main():
         assert len(list(fresh.rglob('settings.json'))) == 2
         original['thresholds']['cpu_usage_percent'] = 42
         original['is_analyzer'] = True
+        original['log_silence'] = {'default_timeout_seconds': 600, 'overrides': []}
         original['process_monitor'] = {'analyzer': ['CustomAnalyzer'], 'collector': []}
         original['collection'] = {'interval_seconds': 17, 'output_directory': '/custom-monitor'}
         existing_settings = (json.dumps(original, indent=4) + '\n').encode('utf-8')
@@ -78,6 +80,7 @@ def main():
         assert (fresh / 'usr/share/doc/resource-monitor/THIRD_PARTY_NOTICES.txt').is_file()
         assert json.loads(shared.read_text())['thresholds']['cpu_usage_percent'] == 80
         assert json.loads(shared.read_text())['is_analyzer'] is False
+        assert json.loads(shared.read_text())['log_silence'] == {'default_timeout_seconds': 300, 'overrides': []}
         assert json.loads(shared.read_text())['process_monitor'] == default_profiles
         assert 'enabled' not in json.loads(shared.read_text())['mysql']
         assert not list(fresh.rglob('thresholds.json'))

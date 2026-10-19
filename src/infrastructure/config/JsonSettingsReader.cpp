@@ -4,6 +4,7 @@
 #include <nlohmann/json.hpp>
 
 #include <array>
+#include <arpa/inet.h>
 #include <cerrno>
 #include <cmath>
 #include <cstdint>
@@ -71,6 +72,35 @@ bool read_process_apps(const nlohmann::json& value, std::vector<std::string>& de
     return true;
 }
 
+bool valid_log_silence_timeout(const nlohmann::json& timeout) {
+    return timeout.is_number_integer() &&
+        (timeout.is_number_unsigned()
+            ? timeout.get<std::uint64_t>() >= 60 && timeout.get<std::uint64_t>() <= 604800
+            : timeout.get<std::int64_t>() >= 60 && timeout.get<std::int64_t>() <= 604800);
+}
+
+bool read_log_silence_overrides(const nlohmann::json& value, std::vector<LogSilencePolicy>& destination) {
+    if (!value.is_array() || value.size() > 256) return false;
+    std::set<std::string> unique;
+    std::vector<LogSilencePolicy> overrides;
+    overrides.reserve(value.size());
+    for (const auto& item : value) {
+        if (!item.is_object() || item.size() != 2 || !item.contains("eqp_ip") ||
+            !item.contains("timeout_seconds") || !item["eqp_ip"].is_string()) return false;
+        const auto& address = item["eqp_ip"].get_ref<const std::string&>();
+        in6_addr parsed{};
+        if (address.empty() || address.size() > 39 || has_control_characters(address) ||
+            (::inet_pton(AF_INET, address.c_str(), &parsed) != 1 &&
+                ::inet_pton(AF_INET6, address.c_str(), &parsed) != 1) ||
+            !unique.insert(address).second) return false;
+        const auto& timeout = item["timeout_seconds"];
+        if (!valid_log_silence_timeout(timeout)) return false;
+        overrides.push_back({address, timeout.get<std::uint32_t>()});
+    }
+    destination = std::move(overrides);
+    return true;
+}
+
 }
 
 JsonSettingsReader::JsonSettingsReader(std::filesystem::path path)
@@ -132,10 +162,10 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::read_settings() {
         const auto json = nlohmann::json::parse(document, callback);
         if (!json.is_object() || !json.contains("schema_version") ||
             !json.contains("thresholds")) {
-            return std::unexpected(config_error(path_, "invalid_schema", "Expected schema_version, thresholds, and optional is_analyzer, analyzer, process_monitor, collection and mysql"));
+            return std::unexpected(config_error(path_, "invalid_schema", "Expected schema_version, thresholds, and optional is_analyzer, analyzer, process_monitor, log_silence, collection and mysql"));
         }
         for (const auto& [key, value] : json.items()) {
-            if (key != "schema_version" && key != "thresholds" && key != "collection" && key != "mysql" && key != "is_analyzer" && key != "analyzer" && key != "process_monitor") {
+            if (key != "schema_version" && key != "thresholds" && key != "collection" && key != "mysql" && key != "is_analyzer" && key != "analyzer" && key != "process_monitor" && key != "log_silence") {
                 return std::unexpected(config_error(path_, "invalid_schema", "Unknown configuration key"));
             }
         }
@@ -212,6 +242,19 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::read_settings() {
                     ? settings.process_monitor.analyzer : settings.process_monitor.collector;
                 if (!read_process_apps(value, destination)) {
                     return std::unexpected(config_error(path_, "invalid_process_monitor", "Process lists must contain at most 256 unique names, each 1..128 UTF-8 bytes without control characters or leading or trailing ASCII whitespace"));
+                }
+            }
+        }
+        if (json.contains("log_silence")) {
+            const auto& log_silence = json["log_silence"];
+            if (!log_silence.is_object()) {
+                return std::unexpected(config_error(path_, "invalid_log_silence", "log_silence must be an object"));
+            }
+            for (const auto& [key, value] : log_silence.items()) {
+                if (key == "default_timeout_seconds" && valid_log_silence_timeout(value)) {
+                    settings.log_silence.default_timeout_seconds = value.get<std::uint32_t>();
+                } else if (key != "overrides" || !read_log_silence_overrides(value, settings.log_silence.overrides)) {
+                    return std::unexpected(config_error(path_, "invalid_log_silence", "Log silence timeouts must be integers between 60 and 604800; overrides must contain at most 256 unique IP addresses and timeouts"));
                 }
             }
         }

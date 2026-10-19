@@ -48,9 +48,14 @@ struct Control {
     bool query_blocked{};
     bool fail_query{};
     bool throw_query{};
+    bool silence_blocked{};
+    bool fail_silence{};
+    bool throw_silence{};
+    std::chrono::system_clock::time_point last_receipt{std::chrono::seconds{1792380600}};
     std::uint64_t current_count{110};
     std::vector<Attempt> attempts;
     std::vector<QueryAttempt> queries;
+    std::vector<std::size_t> silence_queries;
     std::set<std::size_t> live;
     std::set<std::size_t> closed;
     std::set<std::size_t> fail_probe;
@@ -91,6 +96,18 @@ struct Session final : IMySqlSession {
             return std::unexpected(Error{"collect_count", "table", "query_failed", "Query failed"});
         }
         return std::vector<DailyCountPair>{{"192.0.2.1", current_count, 100, true, true}};
+    }
+
+    std::expected<LogReceiptBatch, Error> read_last_received() override {
+        std::unique_lock lock(state.mutex);
+        state.silence_queries.push_back(id);
+        const auto received = state.last_receipt;
+        state.wake.wait_for(lock, 15s, [&] { return !state.silence_blocked; });
+        if (state.throw_silence) throw std::runtime_error("sensitive last receipt exception");
+        if (state.fail_silence) {
+            return std::unexpected(Error{"log_silence", "table", "query_failed", "Query failed"});
+        }
+        return LogReceiptBatch{received + 300s, {{"192.0.2.1", received}}};
     }
 
     Control& state;
@@ -136,6 +153,14 @@ struct Factory final : IMySqlConnectionFactory {
         {
             std::lock_guard lock(state.mutex);
             state.query_blocked = false;
+        }
+        state.wake.notify_all();
+    }
+
+    void release_silence() {
+        {
+            std::lock_guard lock(state.mutex);
+            state.silence_blocked = false;
         }
         state.wake.notify_all();
     }
@@ -532,6 +557,138 @@ void query_interval_reload_tests() {
     CHECK(factory.inspect([](const Control& state) { return state.attempts.size() == 1; }));
 }
 
+void silence_refresh_and_cancel_tests() {
+    Reader reader;
+    Factory factory;
+    MySqlConfiguration configuration(reader, factory, 20ms, 20s);
+    auto settings = enabled_settings();
+    CHECK(configuration.read_last_received(true, 1s).status == LogSilenceReadStatus::pending);
+    CHECK(factory.inspect([](const Control& state) { return state.silence_queries.empty(); }));
+    wait_ready(configuration, settings);
+    CHECK(configuration.commit());
+    wait_for([&] { return configuration.read_last_received(true, 1s).status == LogSilenceReadStatus::ready; });
+    const auto initial = configuration.read_last_received(true, 86400s);
+    CHECK(initial.batch && initial.queried_at);
+    CHECK(initial.batch->records.size() == 1);
+    std::this_thread::sleep_for(1100ms);
+    CHECK(factory.inspect([](const Control& state) { return state.silence_queries.size() == 1; }));
+    factory.inspect([](Control& state) { state.last_receipt += 60s; });
+    configuration.read_last_received(true, 1s);
+    wait_for([&] {
+        const auto current = configuration.read_last_received(true, 1s);
+        return current.batch && current.batch->observed_at == initial.batch->observed_at + 60s;
+    });
+    CHECK(factory.inspect([](const Control& state) { return state.attempts.size() == 1; }));
+    CHECK(configuration.read_last_received(true, 0s).status == LogSilenceReadStatus::error);
+    CHECK(configuration.read_last_received(false, 0s).status == LogSilenceReadStatus::pending);
+    factory.inspect([](Control& state) { state.silence_blocked = true; });
+    configuration.read_last_received(true, 1s);
+    wait_for([&] { return factory.inspect([](const Control& state) { return state.silence_queries.size() == 3; }); });
+    const auto started = std::chrono::steady_clock::now();
+    CHECK(!configuration.read_last_received(false, 1s).batch);
+    CHECK(std::chrono::steady_clock::now() - started < 100ms);
+    factory.release_silence();
+    std::this_thread::sleep_for(1100ms);
+    CHECK(factory.inspect([](const Control& state) { return state.silence_queries.size() == 3; }));
+    CHECK(!configuration.read_last_received(false, 1s).batch);
+    factory.inspect([](Control& state) { state.last_receipt += 60s; });
+    wait_for([&] {
+        const auto current = configuration.read_last_received(true, 1s);
+        return current.batch && current.batch->observed_at == initial.batch->observed_at + 120s;
+    });
+    settings.enabled = false;
+    CHECK(configuration.prepare(settings).value());
+    CHECK(configuration.commit());
+    CHECK(!configuration.read_last_received(true, 1s).batch);
+    std::this_thread::sleep_for(1100ms);
+    CHECK(factory.inspect([](const Control& state) { return state.silence_queries.size() == 4; }));
+}
+
+void silence_rotation_tests() {
+    Reader reader;
+    Factory factory;
+    MySqlConfiguration configuration(reader, factory, 20ms, 20s);
+    auto settings = enabled_settings();
+    wait_ready(configuration, settings);
+    CHECK(configuration.commit());
+    settings.host = "new-last-receipt-host";
+    wait_ready(configuration, settings);
+    factory.inspect([](Control& state) { state.silence_blocked = true; });
+    configuration.read_last_received(true, 1s);
+    wait_for([&] { return factory.inspect([](const Control& state) { return state.silence_queries.size() == 1; }); });
+    CHECK(configuration.commit());
+    CHECK(configuration.read_last_received(true, 1s).status == LogSilenceReadStatus::pending);
+    const auto expected = factory.inspect([](Control& state) { state.last_receipt += 60s; return state.last_receipt; });
+    factory.release_silence();
+    wait_for([&] {
+        const auto current = configuration.read_last_received(true, 1s);
+        return current.batch && current.batch->records.front().last_received_at == expected;
+    });
+    CHECK(factory.inspect([](const Control& state) { return state.silence_queries == std::vector<std::size_t>{1, 2}; }));
+}
+
+void silence_error_isolation_tests() {
+    Reader reader;
+    Factory factory;
+    MySqlConfiguration configuration(reader, factory, 1100ms, 20s);
+    const auto settings = enabled_settings();
+    wait_ready(configuration, settings);
+    CHECK(configuration.commit());
+    const DailyCountWindow window{20261018, 20261017};
+    wait_for([&] { return configuration.read_daily_counts(window, 60s).status == CollectCountReadStatus::ready; });
+    factory.inspect([](Control& state) { state.throw_silence = true; });
+    wait_for([&] { return configuration.read_last_received(true, 1s).status == LogSilenceReadStatus::error; });
+    const auto failed = configuration.read_last_received(true, 1s);
+    CHECK(!failed.batch && failed.error && failed.queried_at);
+    CHECK(failed.error->message.find("sensitive") == std::string::npos);
+    CHECK(configuration.read_daily_counts(window, 60s).status == CollectCountReadStatus::ready);
+    std::this_thread::sleep_for(100ms);
+    CHECK(factory.inspect([](const Control& state) { return state.silence_queries.size() == 1; }));
+    factory.inspect([](Control& state) { state.throw_silence = false; });
+    wait_for([&] { return configuration.read_last_received(true, 1s).status == LogSilenceReadStatus::ready; });
+    CHECK(!configuration.read_last_received(true, 1s).error);
+    factory.inspect([](Control& state) { state.fail_query = true; });
+    wait_for([&] { return configuration.read_daily_counts(window, 1s).status == CollectCountReadStatus::error; });
+    CHECK(configuration.read_last_received(true, 1s).status == LogSilenceReadStatus::ready);
+    CHECK(factory.inspect([](const Control& state) { return state.attempts.size() == 1; }));
+}
+
+void silence_stale_cache_tests() {
+    Reader reader;
+    Factory factory;
+    MySqlConfiguration configuration(reader, factory, 20ms, 20s);
+    const auto settings = enabled_settings();
+    wait_ready(configuration, settings);
+    CHECK(configuration.commit());
+    wait_for([&] { return configuration.read_last_received(true, 1s).status == LogSilenceReadStatus::ready; });
+    factory.inspect([](Control& state) { state.silence_blocked = true; });
+    wait_for([&] { return factory.inspect([](const Control& state) { return state.silence_queries.size() == 2; }); });
+    std::this_thread::sleep_for(10s);
+    const auto started = std::chrono::steady_clock::now();
+    const auto stale = configuration.read_last_received(true, 1s);
+    CHECK(std::chrono::steady_clock::now() - started < 100ms);
+    CHECK(stale.status == LogSilenceReadStatus::pending && !stale.batch && stale.queried_at);
+    factory.release_silence();
+    wait_for([&] { return configuration.read_last_received(true, 1s).status == LogSilenceReadStatus::ready; });
+}
+
+void silence_health_invalidation_tests() {
+    Reader reader;
+    Factory factory;
+    MySqlConfiguration configuration(reader, factory, 20ms, 40ms);
+    const auto settings = enabled_settings();
+    wait_ready(configuration, settings);
+    CHECK(configuration.commit());
+    wait_for([&] { return configuration.read_last_received(true, 60s).status == LogSilenceReadStatus::ready; });
+    factory.inspect([](Control& state) { state.fail_probe.insert(1); });
+    wait_for([&] { return configuration.read_last_received(true, 60s).status == LogSilenceReadStatus::error; });
+    CHECK(!configuration.read_last_received(true, 60s).batch);
+    wait_ready(configuration, settings);
+    CHECK(configuration.commit());
+    wait_for([&] { return configuration.read_last_received(true, 60s).status == LogSilenceReadStatus::ready; });
+    CHECK(factory.inspect([](const Control& state) { return state.silence_queries == std::vector<std::size_t>{1, 2}; }));
+}
+
 }
 
 int main() {
@@ -550,5 +707,10 @@ int main() {
         query_error_and_recovery_tests();
         query_stale_cache_tests();
         query_interval_reload_tests();
+        silence_refresh_and_cancel_tests();
+        silence_rotation_tests();
+        silence_error_isolation_tests();
+        silence_stale_cache_tests();
+        silence_health_invalidation_tests();
     });
 }

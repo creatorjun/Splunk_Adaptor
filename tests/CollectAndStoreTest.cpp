@@ -108,6 +108,21 @@ struct ProcessMonitor final : IJavaProcessMonitor {
     }
 };
 
+struct SilenceMonitor final : ILogSilenceMonitor {
+    LogSilenceAnalysis next;
+    std::vector<std::chrono::system_clock::time_point> observed;
+    std::vector<std::chrono::system_clock::time_point> settings_updates;
+
+    LogSilenceAnalysis collect(std::chrono::system_clock::time_point timestamp) override {
+        observed.push_back(timestamp);
+        return next;
+    }
+
+    void settings_changed(std::chrono::system_clock::time_point timestamp) override {
+        settings_updates.push_back(timestamp);
+    }
+};
+
 bool has_error(const ResourceSnapshot& snapshot, const std::string& code) {
     return std::ranges::any_of(snapshot.errors, [&](const Error& error) {
         return error.code == code;
@@ -146,6 +161,92 @@ void initialization_tests() {
     CHECK(store.attempts.front().status == MetricStatus::ok);
     CHECK(store.attempts.front().timestamp == sample(1).timestamp);
     CHECK(result->collect_count.status == CollectCountStatus::disabled);
+    CHECK(result->log_silence.status == LogSilenceStatus::disabled);
+}
+
+void log_silence_tests() {
+    Reader reader;
+    Store store;
+    Config config;
+    CountMonitor counts;
+    ProcessMonitor processes;
+    processes.next.status = MetricStatus::ok;
+    SilenceMonitor silence;
+    CollectAndStore use_case(reader, store, config, &counts, &processes, &silence);
+    CHECK(!use_case.run());
+    CHECK(silence.observed.empty());
+    use_case.settings_changed(sample(0).timestamp);
+    CHECK(silence.settings_updates.empty());
+    CHECK(use_case.initialize());
+    CHECK(silence.observed == std::vector{sample(0).timestamp});
+    CHECK(counts.observed == silence.observed);
+    CHECK(store.attempts.empty());
+    const auto initial_reads = reader.reads;
+    use_case.settings_changed(sample(1).timestamp);
+    CHECK(silence.settings_updates == std::vector{sample(1).timestamp});
+    CHECK(counts.settings_updates == silence.settings_updates);
+    CHECK(reader.reads == initial_reads);
+    CHECK(store.attempts.empty());
+
+    silence.next.status = LogSilenceStatus::warning;
+    silence.next.default_timeout_seconds = 300;
+    silence.next.checked_at = sample(1).timestamp;
+    silence.next.queried_at = sample(1).timestamp - std::chrono::seconds{1};
+    silence.next.equipment = {{"192.0.2.1", 300,
+        sample(1).timestamp - std::chrono::seconds{360}, 360, MetricStatus::warning, "timeout"}};
+    reader.next = sample(1);
+    auto result = use_case.run();
+    CHECK(result);
+    CHECK(result->status == MetricStatus::warning);
+    CHECK(result->collection_status == CollectionStatus::ok);
+    CHECK(result->cpu.status == MetricStatus::ok);
+    CHECK(result->log_silence.status == LogSilenceStatus::warning);
+    CHECK(result->log_silence.checked_at == silence.next.checked_at);
+    CHECK(result->log_silence.queried_at == silence.next.queried_at);
+    CHECK(result->log_silence.equipment.front().silent_for_seconds == 360);
+    CHECK(store.attempts.back().log_silence.equipment.front().eqp_ip == "192.0.2.1");
+
+    silence.next.status = LogSilenceStatus::error;
+    silence.next.equipment.clear();
+    silence.next.error = Error{"log_silence", "CloudESM.SUM_COLLECT_INFO", "query_failed", "Database unavailable"};
+    reader.next = sample(2);
+    result = use_case.run();
+    CHECK(result);
+    CHECK(result->status == MetricStatus::unknown);
+    CHECK(result->collection_status == CollectionStatus::ok);
+    CHECK(result->memory.usage_percent == 60.0);
+    CHECK(has_error(*result, "query_failed"));
+    CHECK(has_error(store.attempts.back(), "query_failed"));
+    CHECK(store.attempts.back().log_silence.error->component == "log_silence");
+
+    reader.next = sample(3);
+    processes.next.status = MetricStatus::warning;
+    processes.next.apps = {{"UnavailableApp", false}};
+    result = use_case.run();
+    CHECK(result);
+    CHECK(result->status == MetricStatus::warning);
+    CHECK(result->collection_status == CollectionStatus::ok);
+    CHECK(result->log_silence.status == LogSilenceStatus::error);
+
+    processes.next.status = MetricStatus::ok;
+    processes.next.apps.clear();
+    silence.next = {};
+    std::uint64_t minute = 4;
+    for (const auto state : {LogSilenceStatus::pending, LogSilenceStatus::no_data,
+        LogSilenceStatus::ok, LogSilenceStatus::disabled}) {
+        silence.next.status = state;
+        reader.next = sample(minute++);
+        result = use_case.run();
+        CHECK(result);
+        CHECK(result->collection_status == CollectionStatus::ok);
+        CHECK(result->status == (state == LogSilenceStatus::ok || state == LogSilenceStatus::disabled
+            ? MetricStatus::ok : MetricStatus::unknown));
+        CHECK(result->log_silence.status == state);
+        CHECK(result->errors.empty());
+    }
+    CHECK(store.attempts.size() == 7);
+    CHECK(silence.observed.size() == 8);
+    CHECK(silence.observed.back() == sample(7).timestamp);
 }
 
 void count_analysis_tests() {
@@ -725,6 +826,7 @@ int main() {
         initialization_tests();
         count_analysis_tests();
         process_monitor_tests();
+        log_silence_tests();
         reload_tests();
         partial_failure_tests();
         write_failure_baseline_test();

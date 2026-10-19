@@ -4,6 +4,7 @@
 #include "application/MySqlSettings.hpp"
 #include "application/AnalyzerSettings.hpp"
 #include "application/ProcessMonitorSettings.hpp"
+#include "application/LogSilenceSettings.hpp"
 #include "domain/ThresholdPolicy.hpp"
 
 #include <chrono>
@@ -19,6 +20,7 @@ struct MonitorSettings {
     bool is_analyzer{false};
     AnalyzerSettings analyzer{};
     ProcessMonitorSettings process_monitor{};
+    LogSilenceSettings log_silence{};
 
     bool operator==(const MonitorSettings&) const = default;
 };

@@ -1,7 +1,7 @@
 <!-- README.md -->
 # Resource Monitor
 
-Oracle Linux 8/9용 C++23 시스템 모니터링 데몬입니다. 기본 60초마다 CPU, 메모리, 마운트된 로컬 디스크 파일시스템을 수집하고 매 수집 주기의 전체 결과를 OS 시간대와 UTC 오프셋을 포함한 파일명으로 저장합니다. 예를 들어 OS가 Asia/Seoul이면 `/Monitor/20261019T123400+0900.json`에 저장합니다. `is_analyzer`에 맞는 Java `-DAPP` 프로세스의 실행 여부도 같은 JSON에 기록하며, 1.6.0부터 역할별 대상 목록을 설정 파일에서 재시작 없이 변경할 수 있습니다. 분석 장비에서는 `CloudESM.SUM_COLLECT_INFO_1DAY`를 조회하여 장비 IP별 수집 건수의 전일 대비 변동을 함께 기록합니다. `/etc/resource-monitor/settings.json`에서 수집 주기, 저장 경로, 장비 역할, DAPP 목록, 임계치, 분석 기준과 MySQL 연결을 관리합니다. DB 사용자명과 비밀번호는 `/etc/resource-monitor/secrets/mysql.json`으로 분리합니다. 임계치는 경고 판정에 적용하며 모든 수집 주기의 파일을 남깁니다.
+Oracle Linux 8/9용 C++23 시스템 모니터링 데몬입니다. 기본 60초마다 CPU, 메모리, 마운트된 로컬 디스크 파일시스템을 수집하고 매 수집 주기의 전체 결과를 OS 시간대와 UTC 오프셋을 포함한 파일명으로 저장합니다. 예를 들어 OS가 Asia/Seoul이면 `/Monitor/20261019T123400+0900.json`에 저장합니다. `is_analyzer`에 맞는 Java `-DAPP` 프로세스의 실행 여부도 같은 JSON에 기록하며, 1.6.0부터 역할별 대상 목록을 설정 파일에서 재시작 없이 변경할 수 있습니다. 분석 장비에서는 `CloudESM.SUM_COLLECT_INFO_1DAY`의 일별 수집 건수 변동과 `CloudESM.SUM_COLLECT_INFO`의 장비별 로그 무수신 상태를 함께 기록합니다. 1.7.0부터 무수신 감시 대상 IP는 매 DB 조회에서 자동으로 발견합니다. `/etc/resource-monitor/settings.json`에서 수집 주기, 저장 경로, 장비 역할, DAPP 목록, 임계치, 분석 기준과 MySQL 연결을 관리합니다. DB 사용자명과 비밀번호는 `/etc/resource-monitor/secrets/mysql.json`으로 분리합니다. 임계치는 경고 판정에 적용하며 모든 수집 주기의 파일을 남깁니다.
 
 ## 구성
 
@@ -11,7 +11,7 @@ Oracle Linux 8/9용 C++23 시스템 모니터링 데몬입니다. 기본 60초�
 | `src/application` | 수집·설정 전체 적용·실패 시 기존 설정 유지·프로세스 대상 선택·저장 유스케이스와 포트 |
 | `src/infrastructure/linux` | procfs의 리소스·Java 프로세스, mountinfo, 파일시스템 용량 수집 |
 | `src/infrastructure/config` | 사용자 설정·MySQL 계정 JSON 파싱·검증과 설정 포트 구현 |
-| `src/infrastructure/database` | MySQL 연결 준비·교체·연결 확인과 비동기 일별 수집 건수 조회 |
+| `src/infrastructure/database` | MySQL 연결 준비·교체·연결 확인과 비동기 일별 수집 건수·마지막 로그 수신 시각 조회 |
 | `src/infrastructure/persistence` | 저장 경로 검증·잠금·전환, JSON 직렬화와 원자적 파일 저장 |
 | `src/runtime` | 단조 시계 수집·설정 확인 타이머, 종료 신호 |
 | `src/main.cpp` | 구성 객체 생성과 의존성 주입 |
@@ -92,6 +92,10 @@ SELinux가 Enforcing인 실제 서버에서 파일 쓰기와 디렉터리 접근
     "collect_count_change_percent": 10.0,
     "comparison_day": "yesterday"
   },
+  "log_silence": {
+    "default_timeout_seconds": 300,
+    "overrides": []
+  },
   "process_monitor": {
     "analyzer": [
       "SearchEngine", "Normalizer", "CollectorForAgent", "CDMEngine",
@@ -133,6 +137,8 @@ SELinux가 Enforcing인 실제 서버에서 파일 쓰기와 디렉터리 접근
 | `analyzer.comparison_day` | `yesterday` 또는 `today`, 기본 `yesterday` | 다음 설정 확인 후 새 날짜 쌍 조회 요청 |
 | `process_monitor.analyzer` | `is_analyzer=true`일 때 감시할 DAPP 이름 배열, 기본값은 아래 분석 장비 목록 | 다음 설정 적용 후 수집부터, DB 재연결 없음 |
 | `process_monitor.collector` | `is_analyzer=false`일 때 감시할 DAPP 이름 배열, 기본값은 아래 수집 장비 목록 | 다음 설정 적용 후 수집부터 |
+| `log_silence.default_timeout_seconds` | 60~604800 정수, 기본 300초 | 다음 수집부터 모든 DB 장비의 기본 무수신 제한 변경, DB 재연결 없음 |
+| `log_silence.overrides` | 최대 256개 장비별 `{eqp_ip, timeout_seconds}` 예외 설정, 기본 `[]` | 다음 수집부터 해당 장비의 제한만 변경; 감시 대상은 항상 DB에서 자동 발견 |
 | `collection.interval_seconds` | 1~86400의 정수, 기본 60초 | 다음 설정 확인 후 새 주기 시작 |
 | `collection.output_directory` | 제어문자가 없는 절대 경로, 기본 `/Monitor` | 다음 설정 확인 후 저장부터 |
 | `thresholds.cpu_usage_percent` | 0~100의 숫자 | 다음 설정 확인 후 수집부터 |
@@ -315,6 +321,54 @@ LIMIT 10001;
 
 `settings.json`의 `is_analyzer` 또는 `process_monitor` 목록을 수정하면 1초마다 수행하는 설정 확인을 거쳐 재시작 없이 다음 수집부터 적용합니다. 목록에 추가한 이름은 다음 결과에 나타나고 삭제한 이름은 결과에서 사라집니다. 목록만 변경하면 DB를 재연결하지 않습니다. 중복 이름이나 문자열이 아닌 항목 등으로 적용에 실패하면 기존 설정 전체와 대상 목록을 유지하고 `config_status=using_last_valid`를 기록합니다. 올바른 파일로 수정하면 자동으로 복구합니다. 프로세스 관측은 DB 쿼리 결과에 의존하지 않으며 DB 분석 중단이나 조회 실패 중에도 계속합니다. 수집 주기와 저장 경로는 기존 `collection` 설정을 함께 사용합니다.
 
+## 장비별 로그 무수신 모니터링
+
+실제 대상 테이블은 `CloudESM.SUM_COLLECT_INFO`입니다. `SUM_COLLCECT_INFO`는 테이블명 오기입니다. 확인한 주요 컬럼은 `eqp_ip varchar(39)`, `recv_time bigint`, `reg_time bigint`, `count int`이며, `recv_time`은 `YYYYMMDDHHmm` 형식의 분 단위 로그 수집 시각입니다. `reg_time`은 수집 현황 등록 시각이므로 마지막 로그 수신 판정에 사용하지 않습니다.
+
+`is_analyzer=true`일 때 수집 주기에 맞춰 백그라운드 DB worker가 전체 테이블을 `eqp_ip`별로 집계합니다. 각 장비의 `count > 0`인 행 중 가장 큰 `recv_time`을 마지막 수신 분으로 사용합니다. 장비 IP는 SQL 조회 결과에서 가져오며 소스 코드나 설정 파일의 목록으로 제한하지 않습니다. 새 IP는 다음 조회부터 자동으로 나타나고 테이블에서 모든 행이 제거된 IP는 다음 조회부터 결과에서 사라집니다. NULL·빈 `eqp_ip`는 장비 식별이 불가능하므로 제외합니다. 최대 10,000개 장비를 지원하며 한도를 넘기면 결과를 자르는 대신 오류를 기록합니다.
+
+```json
+"log_silence": {
+  "default_timeout_seconds": 300,
+  "overrides": []
+}
+```
+
+위 설정은 DB에서 발견한 모든 장비에 5분을 적용합니다. 기본값이나 예외 목록을 생략해도 같은 기본값을 사용합니다. 장비마다 다른 시간이 필요한 경우에만 `overrides`에 해당 `eqp_ip`와 `timeout_seconds`를 넣습니다. 예외 설정은 조회 범위를 제한하거나 DB에 없는 장비를 생성하지 않습니다. 빈 예외 목록은 모든 장비에 기본 시간을 적용한다는 뜻이며 감시 비활성화가 아닙니다. 설정은 1초마다 다시 읽고 다음 수집부터 적용하며 DB를 재연결하지 않습니다. 시간은 정수 초 단위 60~604800이고, 잘못된 자료형·중복 IP·유효하지 않은 IP·알 수 없는 키는 기존 설정 전체를 유지합니다.
+
+DB에는 초 단위 수신 시각이 없으므로 해당 분의 끝을 기준으로 무수신 시간을 보수적으로 계산합니다. `silent_for_seconds = max(0, checked_at - last_received_at - 60초)`이며 이 값이 제한 시간 이상이면 경고합니다. 예를 들어 마지막 수신 분이 14:00, 제한이 300초라면 14:06부터 시간 초과 판정이 가능합니다. 실제 JSON 반영 시점에는 수집 주기와 DB 조회 시간이 추가될 수 있습니다.
+
+같은 JSON 파일의 `log_silence`에 모든 발견 장비의 상태를 기록합니다. 다음은 설명용 경고 예시이며 예시 IP를 감시 대상으로 등록하지 않습니다.
+
+```json
+"log_silence": {
+  "source": "CloudESM.SUM_COLLECT_INFO",
+  "status": "warning",
+  "default_timeout_seconds": 300,
+  "last_received_precision_seconds": 60,
+  "checked_at": "2026-10-19T14:07:00.000+09:00",
+  "queried_at": "2026-10-19T14:07:00.020+09:00",
+  "equipment_count": 1,
+  "equipment": [
+    {
+      "eqp_ip": "192.0.2.10",
+      "last_received_at": "2026-10-19T14:00:00.000+09:00",
+      "timeout_seconds": 300,
+      "silent_for_seconds": 360,
+      "status": "warning",
+      "reason": "timeout_exceeded"
+    }
+  ],
+  "error": null
+}
+```
+
+`checked_at`은 조회 당시 DB 시각이고 `queried_at`은 데몬이 조회를 완료한 시각입니다. 저장 시각으로 오래된 조회 결과를 계속 늘려 오경보를 만들지 않도록 판정은 `checked_at`을 기준으로 합니다. DB 수신 시각은 DB 세션의 시간대에서 epoch로 변환하고 JSON은 기존처럼 OS 시간대와 UTC 오프셋으로 출력합니다. 허용 수명보다 오래된 캐시는 `pending`으로 처리합니다.
+
+장비별 `reason`은 정상 `receiving`, 시간 초과 `timeout_exceeded`, 양수 수집 기록 없음 `no_received_data`, 미래 수신 시각 `future_received_time`입니다. 양수 수집 기록이 없으면 마지막 시각과 무수신 시간은 `null`이며 경고로 기록합니다. 미래 수신 시각은 정상으로 간주하지 않고 `unknown`으로 표시합니다. 빈 테이블은 `no_data`, DB 조회 실패는 `error`, 조회 준비 중에는 `pending`, 수집 서버(`is_analyzer=false`)에서는 `disabled`입니다.
+
+무수신 경고는 최상위 `status=warning`에 반영합니다. `pending`, `no_data`, `error`는 다른 경고가 없으면 최상위 `unknown`에 반영하며 리소스 전용 `collection_status`에는 영향을 주지 않습니다. DB 오류 중에도 CPU·메모리·디스크·DAPP 수집과 JSON 저장은 계속합니다. 이 기능은 로그 수신을 관측하며 장비 프로세스를 중지·시작하거나 DB 원본 데이터를 변경하지 않습니다.
+
 ## JSON 계약
 
 | 필드 | 값과 의미 |
@@ -403,7 +457,7 @@ RPM은 빌드할 OL8 또는 OL9 시스템에서 다음처럼 생성합니다. So
 ```bash
 sudo dnf install -y rpm-build gcc-toolset-15-gcc-c++ cmake make python3 pkgconf-pkg-config mariadb-connector-c-devel
 mkdir -p "$HOME/rpmbuild/SOURCES" "$HOME/rpmbuild/SPECS"
-cp artifacts/resource-monitor-1.6.0.tar.gz "$HOME/rpmbuild/SOURCES/"
+cp artifacts/resource-monitor-1.7.0.tar.gz "$HOME/rpmbuild/SOURCES/"
 curl --fail --location https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz --output "$HOME/rpmbuild/SOURCES/json.tar.xz"
 cp packaging/rpm/resource-monitor.spec "$HOME/rpmbuild/SPECS/"
 rpmbuild -ba "$HOME/rpmbuild/SPECS/resource-monitor.spec"

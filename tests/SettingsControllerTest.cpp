@@ -488,6 +488,65 @@ void analyzer_settings_reload_tests() {
     CHECK(database.connection_changes == connections);
 }
 
+void log_silence_settings_reload_tests() {
+    Reader reader;
+    reader.next->is_analyzer = true;
+    reader.next->mysql.database = "CloudESM";
+    Output output;
+    Database database;
+    SettingsController controller(reader, output, {}, &database);
+    CHECK(controller.initialize());
+    const auto original_mysql = database.active;
+    const auto connections = database.connection_changes;
+    CHECK(controller.current().log_silence == LogSilenceSettings{});
+
+    reader.next->log_silence.default_timeout_seconds = 600;
+    reader.next->log_silence.overrides = {{"192.0.2.1", 120}, {"2001:db8::1", 3600}};
+    auto changed = controller.reload();
+    CHECK(changed && *changed);
+    CHECK(controller.current().log_silence == reader.next->log_silence);
+    CHECK(database.active == original_mysql);
+    CHECK(database.connection_changes == connections);
+    CHECK(output.attempts.size() == 1);
+    changed = controller.reload();
+    CHECK(changed && !*changed);
+
+    const auto accepted = controller.current();
+    reader.next = std::unexpected(Error{"settings_config", "settings.json", "invalid_log_silence",
+        "Invalid log silence settings"});
+    CHECK(!controller.reload());
+    CHECK(controller.current() == accepted);
+    CHECK(controller.reload_error()->code == "invalid_log_silence");
+    CHECK(database.connection_changes == connections);
+    reader.next = accepted;
+    changed = controller.reload();
+    CHECK(changed && !*changed);
+    CHECK(!controller.reload_error());
+
+    reader.next->log_silence.overrides.clear();
+    changed = controller.reload();
+    CHECK(changed && *changed);
+    CHECK(controller.current().log_silence.overrides.empty());
+    CHECK(controller.current().log_silence.default_timeout_seconds == 600);
+    CHECK(controller.current().mysql.enabled);
+    CHECK(database.active == original_mysql);
+    CHECK(database.connection_changes == connections);
+
+    reader.next->is_analyzer = false;
+    changed = controller.reload();
+    CHECK(changed && *changed);
+    CHECK(!database.active.enabled);
+    const auto disabled_connections = database.connection_changes;
+    reader.next->log_silence.default_timeout_seconds = 300;
+    reader.next->log_silence.overrides = {{"192.0.2.2", 60}};
+    changed = controller.reload();
+    CHECK(changed && *changed);
+    CHECK(controller.current().log_silence == reader.next->log_silence);
+    CHECK(!database.active.enabled);
+    CHECK(database.connection_changes == disabled_connections);
+    CHECK(output.attempts.size() == 1);
+}
+
 void process_monitor_settings_reload_tests() {
     Reader reader;
     reader.next->is_analyzer = true;
@@ -570,5 +629,6 @@ int main() {
         analyzer_gate_tests();
         analyzer_settings_reload_tests();
         process_monitor_settings_reload_tests();
+        log_silence_settings_reload_tests();
     });
 }
