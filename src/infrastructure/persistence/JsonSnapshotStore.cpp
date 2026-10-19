@@ -103,19 +103,35 @@ std::expected<void, Error> validate_writable_directory(int directory, const std:
     return {};
 }
 
-std::expected<std::string, Error> format_time(std::chrono::system_clock::time_point timestamp,
-    const char* format, const std::filesystem::path& path) {
+struct FormattedTime {
+    std::string timestamp;
+    std::string basename;
+};
+
+std::expected<FormattedTime, Error> format_time(std::chrono::system_clock::time_point timestamp,
+    bool include_milliseconds, const std::filesystem::path& path) {
     const auto seconds = std::chrono::floor<std::chrono::seconds>(timestamp);
     const auto time = std::chrono::system_clock::to_time_t(seconds);
-    std::tm utc{};
-    if (::gmtime_r(&time, &utc) == nullptr || utc.tm_year < -1900 || utc.tm_year > 8099) {
-        return std::unexpected(store_error(path, "invalid_timestamp", "Timestamp is outside the supported UTC range"));
+    std::tm local{};
+    if (::localtime_r(&time, &local) == nullptr || local.tm_year < -1900 || local.tm_year > 8099) {
+        return std::unexpected(store_error(path, "invalid_timestamp", "Timestamp is outside the supported local time range"));
     }
-    std::array<char, 32> buffer{};
-    if (std::strftime(buffer.data(), buffer.size(), format, &utc) == 0) {
-        return std::unexpected(store_error(path, "invalid_timestamp", "Unable to format UTC timestamp"));
+    std::array<char, 32> date{};
+    std::array<char, 32> basename{};
+    std::array<char, 8> offset{};
+    if (std::strftime(date.data(), date.size(), "%Y-%m-%dT%H:%M:%S", &local) == 0 ||
+        std::strftime(basename.data(), basename.size(), "%Y%m%dT%H%M%S", &local) == 0 ||
+        std::strftime(offset.data(), offset.size(), "%z", &local) != 5) {
+        return std::unexpected(store_error(path, "invalid_timestamp", "Unable to format local timestamp and UTC offset"));
     }
-    return std::string(buffer.data());
+    FormattedTime result{date.data(), basename.data()};
+    if (include_milliseconds) {
+        const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(timestamp - seconds).count();
+        result.timestamp += "." + std::to_string(1000 + milliseconds).substr(1);
+    }
+    result.timestamp += std::string(offset.data(), 3) + ":" + std::string(offset.data() + 3, 2);
+    result.basename += offset.data();
+    return result;
 }
 
 template <typename T>
@@ -261,18 +277,14 @@ std::expected<void, Error> JsonSnapshotStore::save(const ResourceSnapshot& snaps
         const auto configured = configure_output_locked(directory_);
         if (!configured) return configured;
     }
-    const auto timestamp = format_time(snapshot.timestamp, "%Y-%m-%dT%H:%M:%SZ", directory_);
+    ::tzset();
+    const auto timestamp = format_time(snapshot.timestamp, false, directory_);
     if (!timestamp) return std::unexpected(timestamp.error());
-    auto applied_at = format_time(snapshot.thresholds_applied_at, "%Y-%m-%dT%H:%M:%S", directory_);
+    const auto applied_at = format_time(snapshot.thresholds_applied_at, true, directory_);
     if (!applied_at) return std::unexpected(applied_at.error());
-    const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(
-        snapshot.thresholds_applied_at - std::chrono::floor<std::chrono::seconds>(snapshot.thresholds_applied_at)).count();
-    *applied_at += "." + std::to_string(1000 + milliseconds).substr(1) + "Z";
-    const auto basename = format_time(snapshot.timestamp, "%Y%m%dT%H%M%SZ", directory_);
-    if (!basename) return std::unexpected(basename.error());
     std::string document;
     try {
-        document = serialize(snapshot, *timestamp, *applied_at).dump(2, ' ', false,
+        document = serialize(snapshot, timestamp->timestamp, applied_at->timestamp).dump(2, ' ', false,
             nlohmann::json::error_handler_t::replace) + "\n";
     } catch (const nlohmann::json::exception& error) {
         return std::unexpected(store_error(directory_, "serialization_error", error.what()));
@@ -287,7 +299,7 @@ std::expected<void, Error> JsonSnapshotStore::save(const ResourceSnapshot& snaps
     if (file.close() < 0) return std::unexpected(io_error(directory_, "close temporary file", errno));
 
     for (unsigned collision = 0; collision < 10000; ++collision) {
-        const auto final_name = *basename + (collision == 0 ? "" : "_" + std::to_string(collision)) + ".json";
+        const auto final_name = timestamp->basename + (collision == 0 ? "" : "_" + std::to_string(collision)) + ".json";
         bool linked = false;
         if (commit_file(directory_fd_, temporary_name.c_str(), final_name.c_str(), linked) < 0) {
             if (errno == EEXIST) continue;

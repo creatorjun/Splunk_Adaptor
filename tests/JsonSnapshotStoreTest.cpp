@@ -8,8 +8,10 @@
 #include <cerrno>
 #include <csignal>
 #include <cstdlib>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <sys/stat.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
@@ -18,6 +20,31 @@
 #include <vector>
 
 namespace {
+
+class ScopedTimezone {
+public:
+    explicit ScopedTimezone(const char* zone_spec) {
+        if (const auto* previous = std::getenv("TZ")) previous_ = previous;
+        set(zone_spec);
+        ::tzset();
+    }
+    ~ScopedTimezone() {
+        if (previous_) {
+            ::setenv("TZ", previous_->c_str(), 1);
+        } else {
+            ::unsetenv("TZ");
+        }
+        ::tzset();
+    }
+    ScopedTimezone(const ScopedTimezone&) = delete;
+    ScopedTimezone& operator=(const ScopedTimezone&) = delete;
+    void set(const char* zone_spec) {
+        if (::setenv("TZ", zone_spec, 1) != 0) throw std::runtime_error("setenv failed");
+    }
+
+private:
+    std::optional<std::string> previous_;
+};
 
 class TemporaryDirectory {
 public:
@@ -93,20 +120,64 @@ monitor::ResourceSnapshot make_snapshot() {
     return snapshot;
 }
 
+void check_timezone_snapshots() {
+    ScopedTimezone scoped_zone("UTC0");
+    TemporaryDirectory directory;
+    monitor::JsonSnapshotStore store(directory.path);
+    auto snapshot = make_snapshot();
+    snapshot.timestamp += std::chrono::hours(11);
+    snapshot.thresholds_applied_at = snapshot.timestamp - std::chrono::milliseconds(123);
+    CHECK(store.save(snapshot));
+    CHECK(read_json(directory.path / "20261014T233400+0000.json")["timestamp"] ==
+        "2026-10-14T23:34:00+00:00");
+
+    scoped_zone.set("KST-9");
+    CHECK(store.save(snapshot));
+    const auto seoul = read_json(directory.path / "20261015T083400+0900.json");
+    CHECK(seoul["timestamp"] == "2026-10-15T08:34:00+09:00");
+    CHECK(seoul["thresholds_applied_at"] == "2026-10-15T08:33:59.877+09:00");
+    CHECK(store.save(snapshot));
+    CHECK(read_json(directory.path / "20261015T083400+0900_1.json") == seoul);
+
+    scoped_zone.set("NST3:30");
+    CHECK(store.save(snapshot));
+    const auto negative_half_hour = read_json(directory.path / "20261014T200400-0330.json");
+    CHECK(negative_half_hour["timestamp"] == "2026-10-14T20:04:00-03:30");
+    CHECK(negative_half_hour["thresholds_applied_at"] == "2026-10-14T20:03:59.877-03:30");
+
+    scoped_zone.set("EST5EDT,M3.2.0/2,M11.1.0/2");
+    snapshot.timestamp = std::chrono::sys_days(std::chrono::year(2026) / 11 / 1) +
+        std::chrono::hours(5) + std::chrono::minutes(30);
+    snapshot.thresholds_applied_at = snapshot.timestamp - std::chrono::milliseconds(123);
+    CHECK(store.save(snapshot));
+    const auto daylight = read_json(directory.path / "20261101T013000-0400.json");
+    CHECK(daylight["timestamp"] == "2026-11-01T01:30:00-04:00");
+    CHECK(daylight["thresholds_applied_at"] == "2026-11-01T01:29:59.877-04:00");
+    snapshot.timestamp += std::chrono::hours(1);
+    CHECK(store.save(snapshot));
+    const auto standard = read_json(directory.path / "20261101T013000-0500.json");
+    CHECK(standard["timestamp"] == "2026-11-01T01:30:00-05:00");
+    CHECK(standard["thresholds_applied_at"] == "2026-11-01T01:29:59.877-04:00");
+    CHECK(!std::filesystem::exists(directory.path / "20261101T013000-0400_1.json"));
+    CHECK(!std::filesystem::exists(directory.path / "20261101T013000-0500_1.json"));
+    check_no_temporary_files(directory.path);
+}
+
 }
 
 int main() {
     return test::run([] {
+        ScopedTimezone scoped_zone("UTC0");
         TemporaryDirectory directory;
         monitor::JsonSnapshotStore store(directory.path);
         CHECK(std::filesystem::is_empty(directory.path));
         auto snapshot = make_snapshot();
         CHECK(store.save(snapshot));
-        const auto path = directory.path / "20261014T123400Z.json";
+        const auto path = directory.path / "20261014T123400+0000.json";
         const auto json = read_json(path);
         CHECK(json["schema_version"] == 1);
-        CHECK(json["timestamp"] == "2026-10-14T12:34:00Z");
-        CHECK(json["thresholds_applied_at"] == "2026-10-14T12:33:59.877Z");
+        CHECK(json["timestamp"] == "2026-10-14T12:34:00+00:00");
+        CHECK(json["thresholds_applied_at"] == "2026-10-14T12:33:59.877+00:00");
         CHECK(json["hostname"] == "oracle-host");
         CHECK(json["status"] == "warning");
         CHECK(json["collection_status"] == "partial");
@@ -130,7 +201,7 @@ int main() {
         snapshot.hostname = "second-host";
         CHECK(store.save(snapshot));
         CHECK(read_json(path)["hostname"] == "oracle-host");
-        CHECK(read_json(directory.path / "20261014T123400Z_1.json")["hostname"] == "second-host");
+        CHECK(read_json(directory.path / "20261014T123400+0000_1.json")["hostname"] == "second-host");
 
         std::atomic<unsigned> successful{};
         std::vector<std::jthread> writers;
@@ -153,7 +224,7 @@ int main() {
         snapshot.cpu.usage_percent.reset();
         snapshot.cpu.status = monitor::MetricStatus::unknown;
         CHECK(store.save(snapshot));
-        const auto invalid_utf8 = read_json(directory.path / "20261014T123401Z.json");
+        const auto invalid_utf8 = read_json(directory.path / "20261014T123401+0000.json");
         CHECK(invalid_utf8["filesystems"][0]["mount_points"][0] == "/invalid-\xef\xbf\xbd");
         CHECK(invalid_utf8["cpu"]["usage_percent"].is_null());
 
@@ -202,13 +273,13 @@ int main() {
         CHECK(switching.configure_output((first_directory.path / ".").string()));
         CHECK(count_descriptors() == initial_descriptors);
         CHECK(switching.save(moving_snapshot));
-        CHECK(std::filesystem::is_regular_file(first_directory.path / "20261014T123400Z_1.json"));
+        CHECK(std::filesystem::is_regular_file(first_directory.path / "20261014T123400+0000_1.json"));
         CHECK(switching.configure_output(second_directory.path.string()));
         CHECK(count_descriptors() == initial_descriptors);
         moving_snapshot.timestamp += std::chrono::seconds(1);
         CHECK(switching.save(moving_snapshot));
-        CHECK(std::filesystem::is_regular_file(second_directory.path / "20261014T123401Z.json"));
-        CHECK(!std::filesystem::exists(first_directory.path / "20261014T123401Z.json"));
+        CHECK(std::filesystem::is_regular_file(second_directory.path / "20261014T123401+0000.json"));
+        CHECK(!std::filesystem::exists(first_directory.path / "20261014T123401+0000.json"));
         {
             monitor::JsonSnapshotStore released(first_directory.path);
             CHECK(released.configure_output(first_directory.path.string()));
@@ -222,14 +293,14 @@ int main() {
             }
             moving_snapshot.timestamp += std::chrono::seconds(1);
             CHECK(switching.save(moving_snapshot));
-            CHECK(std::filesystem::is_regular_file(second_directory.path / "20261014T123402Z.json"));
-            CHECK(!std::filesystem::exists(blocked_directory.path / "20261014T123402Z.json"));
+            CHECK(std::filesystem::is_regular_file(second_directory.path / "20261014T123402+0000.json"));
+            CHECK(!std::filesystem::exists(blocked_directory.path / "20261014T123402+0000.json"));
         }
         CHECK(switching.configure_output(blocked_directory.path.string()));
         moving_snapshot.timestamp += std::chrono::seconds(1);
         CHECK(switching.save(moving_snapshot));
-        CHECK(std::filesystem::is_regular_file(blocked_directory.path / "20261014T123403Z.json"));
-        CHECK(!std::filesystem::exists(second_directory.path / "20261014T123403Z.json"));
+        CHECK(std::filesystem::is_regular_file(blocked_directory.path / "20261014T123403+0000.json"));
+        CHECK(!std::filesystem::exists(second_directory.path / "20261014T123403+0000.json"));
         CHECK(count_descriptors() == initial_descriptors);
 
         TemporaryDirectory invalid_directory;
@@ -259,12 +330,12 @@ int main() {
         CHECK(count_descriptors() == initial_descriptors);
         moving_snapshot.timestamp += std::chrono::seconds(1);
         CHECK(switching.save(moving_snapshot));
-        CHECK(std::filesystem::is_regular_file(blocked_directory.path / "20261014T123404Z.json"));
-        CHECK(!std::filesystem::exists(invalid_directory.path / "20261014T123404Z.json"));
+        CHECK(std::filesystem::is_regular_file(blocked_directory.path / "20261014T123404+0000.json"));
+        CHECK(!std::filesystem::exists(invalid_directory.path / "20261014T123404+0000.json"));
         std::filesystem::remove(invalid_lock);
         CHECK(switching.configure_output(invalid_directory.path.string()));
         CHECK(switching.save(moving_snapshot));
-        CHECK(std::filesystem::is_regular_file(invalid_directory.path / "20261014T123404Z.json"));
+        CHECK(std::filesystem::is_regular_file(invalid_directory.path / "20261014T123404+0000.json"));
         CHECK(count_descriptors() == initial_descriptors);
 
         const auto rollback_child = ::fork();
@@ -294,8 +365,8 @@ int main() {
         CHECK(waited == rollback_child);
         CHECK(WIFEXITED(child_status));
         CHECK(WEXITSTATUS(child_status) == 0);
-        CHECK(std::filesystem::is_regular_file(invalid_directory.path / "20261014T123405Z.json"));
-        CHECK(!std::filesystem::exists(failed_directory / "20261014T123405Z.json"));
+        CHECK(std::filesystem::is_regular_file(invalid_directory.path / "20261014T123405+0000.json"));
+        CHECK(!std::filesystem::exists(failed_directory / "20261014T123405+0000.json"));
         check_no_temporary_files(failed_directory);
 
         TemporaryDirectory rename_parent;
@@ -308,18 +379,19 @@ int main() {
             std::filesystem::rename(named_directory, renamed_directory);
             std::filesystem::create_directory(named_directory);
             CHECK(pinned.save(moving_snapshot));
-            CHECK(std::filesystem::is_regular_file(renamed_directory / "20261014T123404Z.json"));
+            CHECK(std::filesystem::is_regular_file(renamed_directory / "20261014T123404+0000.json"));
             CHECK(std::filesystem::is_empty(named_directory));
             CHECK(pinned.configure_output(renamed_directory.string()));
             CHECK(pinned.configure_output(named_directory.string()));
             CHECK(pinned.save(moving_snapshot));
-            CHECK(std::filesystem::is_regular_file(named_directory / "20261014T123404Z.json"));
-            CHECK(!std::filesystem::exists(renamed_directory / "20261014T123404Z_1.json"));
+            CHECK(std::filesystem::is_regular_file(named_directory / "20261014T123404+0000.json"));
+            CHECK(!std::filesystem::exists(renamed_directory / "20261014T123404+0000_1.json"));
         }
         CHECK(count_descriptors() == initial_descriptors);
         check_no_temporary_files(first_directory.path);
         check_no_temporary_files(second_directory.path);
         check_no_temporary_files(blocked_directory.path);
         check_no_temporary_files(invalid_directory.path);
+        check_timezone_snapshots();
     });
 }

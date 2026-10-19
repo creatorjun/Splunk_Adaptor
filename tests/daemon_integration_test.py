@@ -1,9 +1,11 @@
 # tests/daemon_integration_test.py
 import contextlib
+import datetime
 import fcntl
 import json
 import os
 import pathlib
+import re
 import signal
 import subprocess
 import sys
@@ -31,6 +33,26 @@ def collection(interval, output):
     return {'interval_seconds': interval, 'output_directory': str(output)}
 
 
+def assert_local_timestamp(value, milliseconds=False):
+    fraction = r'\.\d{3}' if milliseconds else ''
+    assert re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}' + fraction + r'[+-]\d{2}:\d{2}', value), value
+    normalized = value[:-3] + value[-2:]
+    pattern = '%Y-%m-%dT%H:%M:%S' + ('.%f' if milliseconds else '') + '%z'
+    parsed = datetime.datetime.strptime(normalized, pattern)
+    local = time.localtime(parsed.timestamp())
+    offset = time.strftime('%z', local)
+    assert value[:19] == time.strftime('%Y-%m-%dT%H:%M:%S', local), value
+    assert value[-6:] == offset[:3] + ':' + offset[3:], value
+    return local
+
+
+def assert_snapshot_timezone(path, payload):
+    local = assert_local_timestamp(payload['timestamp'])
+    assert_local_timestamp(payload['thresholds_applied_at'], milliseconds=True)
+    basename = time.strftime('%Y%m%dT%H%M%S%z', local)
+    assert re.fullmatch(re.escape(basename) + r'(?:_[1-9]\d*)?\.json', path.name), path.name
+
+
 def wait_snapshot(output, seen, predicate, process, seconds=7):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
@@ -44,7 +66,7 @@ def wait_snapshot(output, seen, predicate, process, seconds=7):
             assert payload['status'] in ('ok', 'warning', 'unknown')
             assert payload['cpu']['window_seconds'] > 0
             assert 0 <= payload['memory']['usage_percent'] <= 100
-            assert payload['timestamp'].endswith('Z')
+            assert_snapshot_timezone(path, payload)
             if predicate(payload):
                 return payload
         time.sleep(0.03)
@@ -249,7 +271,9 @@ def override_and_once_tests(executable, root, config):
         assert process.wait(timeout=4) == 0, once_log.read_text(encoding='utf-8')
     once_files = list(once_output.glob('*.json'))
     assert len(once_files) == 1
-    assert json.loads(once_files[0].read_text(encoding='utf-8'))['status'] == 'warning'
+    once_payload = json.loads(once_files[0].read_text(encoding='utf-8'))
+    assert once_payload['status'] == 'warning'
+    assert_snapshot_timezone(once_files[0], once_payload)
     events = list(cycle_events(once_log.read_text(encoding='utf-8')))
     assert len(events) == 1
     assert_cycle_action(events[0])
@@ -260,12 +284,15 @@ def override_and_once_tests(executable, root, config):
     assert 'interval_seconds=1' in overridden.stdout
     assert 'output=' + str(once_output) in overridden.stdout
     assert len(list(once_output.glob('*.json'))) == 2
+    for path in once_output.glob('*.json'):
+        assert_snapshot_timezone(path, json.loads(path.read_text(encoding='utf-8')))
     events = list(cycle_events(overridden.stdout))
     assert len(events) == 1
     assert_cycle_action(events[0])
 
 
 def main():
+    time.tzset()
     executable = str(pathlib.Path(sys.argv[1]).resolve())
     with tempfile.TemporaryDirectory(prefix='resource-monitor-integration-') as temporary:
         root = pathlib.Path(temporary)
@@ -275,7 +302,7 @@ def main():
         validate_settings(executable, config, output)
         hot_reload_test(executable, root, config, output)
         override_and_once_tests(executable, root, config)
-    print('Settings validation, atomic live interval/output/threshold reload, retry, aliases, CLI overrides, legacy config, once saves and SIGTERM passed')
+    print('Settings validation, OS timezone timestamps and filenames, atomic live interval/output/threshold reload, retry, aliases, CLI overrides, legacy config, once saves and SIGTERM passed')
 
 
 if __name__ == '__main__':
