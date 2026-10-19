@@ -190,14 +190,13 @@ int main() {
             check_failure(reader, path);
         }
 
-        write_file(path, document_with_mysql("{}"));
+        write_file(path, document_with_mysql("{}", "false"));
         settings = reader.read_settings();
         CHECK(settings);
         CHECK(settings->mysql == monitor::MySqlSettings{});
-        write_file(path, document_with_mysql(R"({"enabled":true,"host":"db.internal","port":3307,"database":"monitoring","credentials_file":"/etc/resource-monitor/secrets/custom.json","connect_timeout_seconds":1,"read_timeout_seconds":5,"write_timeout_seconds":10,"tls_mode":"verify_identity","tls_ca_file":"/etc/pki/db-ca.pem"})"));
+        write_file(path, document_with_mysql(R"({"host":"db.internal","port":3307,"database":"monitoring","credentials_file":"/etc/resource-monitor/secrets/custom.json","connect_timeout_seconds":1,"read_timeout_seconds":5,"write_timeout_seconds":10,"tls_mode":"verify_identity","tls_ca_file":"/etc/pki/db-ca.pem"})"));
         settings = reader.read_settings();
         CHECK(settings);
-        CHECK(settings->mysql.enabled);
         CHECK(settings->is_analyzer);
         CHECK(settings->mysql.host == "db.internal");
         CHECK(settings->mysql.port == 3307);
@@ -210,15 +209,14 @@ int main() {
         CHECK(settings->mysql.tls_ca_file == "/etc/pki/db-ca.pem");
         for (const auto& analyzer : {std::string{}, std::string{"false"}}) {
             for (const auto& mysql : {
-                std::string{R"({"enabled":true})"},
-                std::string{R"({"enabled":true,"database":"","tls_ca_file":""})"},
-                std::string{R"({"enabled":true,"database":"monitoring","tls_mode":"verify_identity"})"}
+                std::string{"{}"},
+                std::string{R"({"database":"","tls_ca_file":""})"},
+                std::string{R"({"database":"monitoring","tls_mode":"verify_identity"})"}
             }) {
                 write_file(path, document_with_mysql(mysql, analyzer));
                 settings = reader.read_settings();
                 CHECK(settings);
                 CHECK(!settings->is_analyzer);
-                CHECK(settings->mysql.enabled);
             }
         }
         for (const auto& analyzer : {"null", "1", "0", "1.0", "\"true\"", "\"false\"", "[]", "{}"}) {
@@ -227,31 +225,37 @@ int main() {
         }
         write_file(path, document_with_mysql("{}", "false,\"is_analyzer\":true"));
         check_failure(reader, path);
-        for (const auto& mysql : {
-            std::string{R"({"enabled":"true"})"},
-            std::string{R"({"enabled":true,"port":0})"},
-            std::string{R"({"enabled":true,"database":null})"},
-            std::string{R"({"enabled":true,"credentials_file":"relative.json"})"},
-            std::string{R"({"enabled":true,"tls_mode":"preferred"})"},
-            std::string{R"({"enabled":true,"tls_ca_file":null})"}
-        }) {
-            write_file(path, document_with_mysql(mysql, "false"));
-            check_failure(reader, path);
+        for (const auto& analyzer : {std::string{}, std::string{"false"}, std::string{"true"}}) {
+            for (const auto& enabled : {"false", "true", "null", "1", "\"true\""}) {
+                write_file(path, document_with_mysql(
+                    R"({"database":"monitoring","tls_mode":"disabled","enabled":)"
+                    + std::string{enabled} + "}", analyzer));
+                check_failure(reader, path);
+            }
         }
         for (const auto& mysql : {
-            std::string{R"({"port":1,"tls_mode":"disabled"})"},
-            std::string{R"({"port":65535,"tls_mode":"verify_identity"})"},
-            std::string{R"({"enabled":false,"database":""})"},
-            std::string{R"({"enabled":true,"database":"monitoring","tls_mode":"disabled"})"},
-            std::string{R"({"enabled":true,"database":"monitoring","tls_ca_file":"/etc/pki/db-ca.pem"})"}
+            std::string{R"({"port":1,"database":"monitoring","tls_mode":"disabled"})"},
+            std::string{R"({"port":65535,"database":"monitoring","tls_mode":"verify_identity","tls_ca_file":"/etc/pki/db-ca.pem"})"},
+            std::string{R"({"database":"monitoring","tls_mode":"disabled"})"},
+            std::string{R"({"database":"monitoring","tls_ca_file":"/etc/pki/db-ca.pem"})"}
         }) {
             write_file(path, document_with_mysql(mysql));
             CHECK(reader.read_settings());
         }
+        write_file(path, R"({"schema_version":1,"is_analyzer":true,"thresholds":{"cpu_usage_percent":80,"memory_usage_percent":85,"storage_usage_percent":90}})");
+        check_failure(reader, path);
+        for (const auto& mysql : {
+            std::string{"{}"},
+            std::string{R"({"database":"","tls_mode":"disabled"})"},
+            std::string{R"({"database":"monitoring"})"},
+            std::string{R"({"database":"monitoring","tls_mode":"verify_identity","tls_ca_file":""})"}
+        }) {
+            write_file(path, document_with_mysql(mysql));
+            check_failure(reader, path);
+        }
         const std::vector<std::string> invalid_mysql{
             "null", "true", "1", "\"db\"", "[]",
-            R"({"enabled":1})", R"({"enabled":"true"})", R"({"enabled":true})",
-            R"({"enabled":true,"database":""})", R"({"host":""})", R"({"host":1})",
+            R"({"host":""})", R"({"host":1})",
             R"({"host":"db\u0000host"})", R"({"host":"db\nhost"})",
             R"({"database":null})", R"({"database":"db\u007f"})",
             R"({"port":0})", R"({"port":-1})", R"({"port":65536})", R"({"port":3306.0})",
@@ -263,17 +267,17 @@ int main() {
             R"({"credentials_file":""})", R"({"credentials_file":"relative.json"})",
             R"({"credentials_file":"/tmp/a\u0000.json"})", R"({"credentials_file":[]})",
             R"({"tls_mode":"preferred"})", R"({"tls_mode":"required"})",
-            R"({"enabled":true,"database":"monitoring"})",
-            R"({"enabled":true,"database":"monitoring","tls_mode":"verify_identity","tls_ca_file":""})",
             R"({"tls_mode":true})", R"({"tls_ca_file":"relative.pem"})",
             R"({"tls_ca_file":"/tmp/ca\n.pem"})", R"({"tls_ca_file":null})",
             R"({"username":"redaction-marker"})", R"({"password":"redaction-marker"})",
             R"({"redaction-marker":"value"})", R"({"host":"db","host":"db2"})"
         };
         for (const auto& mysql : invalid_mysql) {
-            write_file(path, document_with_mysql(mysql));
-            check_failure(reader, path);
-            CHECK(reader.read_settings().error().message.find("redaction-marker") == std::string::npos);
+            for (const auto& analyzer : {"false", "true"}) {
+                write_file(path, document_with_mysql(mysql, analyzer));
+                check_failure(reader, path);
+                CHECK(reader.read_settings().error().message.find("redaction-marker") == std::string::npos);
+            }
         }
         for (const auto& content : {
             document_with_mysql(R"({"password":"redaction-marker" INVALID})"),

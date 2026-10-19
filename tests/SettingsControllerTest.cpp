@@ -321,7 +321,7 @@ void database_reload_tests() {
     changed = controller.reload();
     CHECK(changed && *changed);
     CHECK(controller.current() == *reader.next);
-    reader.next->mysql.enabled = false;
+    reader.next->is_analyzer = false;
     changed = controller.reload();
     CHECK(changed && *changed);
     CHECK(!database.active.enabled);
@@ -374,9 +374,9 @@ void analyzer_gate_tests() {
             SettingsController controller(reader, output, {}, &database);
             CHECK(controller.initialize());
             CHECK(controller.current().is_analyzer == analyzer);
-            CHECK(controller.current().mysql.enabled == (analyzer && enabled));
-            CHECK(database.candidate.enabled == (analyzer && enabled));
-            CHECK(database.active.enabled == (analyzer && enabled));
+            CHECK(controller.current().mysql.enabled == analyzer);
+            CHECK(database.candidate.enabled == analyzer);
+            CHECK(database.active.enabled == analyzer);
             CHECK(!controller.reload_error());
             const auto unchanged = controller.reload();
             CHECK(unchanged && !*unchanged);
@@ -425,10 +425,10 @@ void analyzer_gate_tests() {
     CHECK(database.active.enabled);
     reader.next->mysql.enabled = false;
     changed = controller.reload();
-    CHECK(changed && *changed);
+    CHECK(changed && !*changed);
     CHECK(controller.current().is_analyzer);
-    CHECK(!controller.current().mysql.enabled);
-    CHECK(!database.active.enabled);
+    CHECK(controller.current().mysql.enabled);
+    CHECK(database.active.enabled);
 
     Reader without_adapter;
     without_adapter.next->mysql.enabled = true;

@@ -33,7 +33,7 @@ int main(int argc, char* argv[]) {
                 return 0;
             }
             if (argument == "--version") {
-                std::cout << "resource-monitor 1.3.2\n";
+                std::cout << "resource-monitor 1.3.3\n";
                 return 0;
             }
             if (argument == "--once") {
@@ -81,7 +81,7 @@ int main(int argc, char* argv[]) {
                 monitor::log_error(parsed.error());
                 return 78;
             }
-            if (parsed->mysql_enabled()) {
+            if (parsed->is_analyzer) {
                 const auto secret = credentials.read_credentials(parsed->mysql.credentials_file);
                 if (!secret) {
                     monitor::log_error(secret.error());

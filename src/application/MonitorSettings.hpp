@@ -16,8 +16,6 @@ struct MonitorSettings {
     MySqlSettings mysql{};
     bool is_analyzer{false};
 
-    bool mysql_enabled() const noexcept { return is_analyzer && mysql.enabled; }
-
     bool operator==(const MonitorSettings&) const = default;
 };
 

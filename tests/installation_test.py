@@ -31,7 +31,7 @@ def main():
         assert original['collection'] == {'interval_seconds': 60, 'output_directory': '/Monitor'}
         assert original['thresholds']['cpu_usage_percent'] == 80
         assert original['is_analyzer'] is False
-        assert original['mysql']['enabled'] is False
+        assert 'enabled' not in original['mysql']
         assert original['mysql']['credentials_file'] == '/etc/resource-monitor/secrets/mysql.json'
         assert original['mysql']['tls_mode'] == 'verify_identity'
         assert original['mysql']['tls_ca_file'] == '/etc/resource-monitor/secrets/mysql-ca.pem'
@@ -65,6 +65,7 @@ def main():
         assert (fresh / 'usr/share/doc/resource-monitor/THIRD_PARTY_NOTICES.txt').is_file()
         assert json.loads(shared.read_text())['thresholds']['cpu_usage_percent'] == 80
         assert json.loads(shared.read_text())['is_analyzer'] is False
+        assert 'enabled' not in json.loads(shared.read_text())['mysql']
         assert not list(fresh.rglob('thresholds.json'))
 
         legacy_stage = root / 'legacy'

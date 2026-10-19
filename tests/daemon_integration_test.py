@@ -128,18 +128,28 @@ def validate_settings(executable, config, output):
         assert result.returncode == 78, result.stderr
         assert 'component=settings_config' in result.stderr
     for is_analyzer in (None, False, True):
+        database = {
+            'database': 'monitoring',
+            'tls_mode': 'disabled',
+            'credentials_file': str(config.parent / 'missing-mysql.json'),
+        }
+        write_config(config, is_analyzer=is_analyzer, mysql=database)
+        result = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
+        requires_credentials = is_analyzer is True
+        assert result.returncode == (78 if requires_credentials else 0), result.stderr
+        if requires_credentials:
+            assert 'component=mysql_credentials' in result.stderr
         for enabled in (False, True):
-            write_config(config, is_analyzer=is_analyzer, mysql={
-                'enabled': enabled,
-                'database': 'monitoring',
-                'tls_mode': 'disabled',
-                'credentials_file': str(config.parent / 'missing-mysql.json'),
-            })
+            database['enabled'] = enabled
+            write_config(config, is_analyzer=is_analyzer, mysql=database)
             result = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
-            requires_credentials = is_analyzer is True and enabled
-            assert result.returncode == (78 if requires_credentials else 0), result.stderr
-            if requires_credentials:
-                assert 'component=mysql_credentials' in result.stderr
+            assert result.returncode == 78, result.stderr
+            assert 'component=settings_config' in result.stderr
+    for database in (None, {}, {'database': '', 'tls_mode': 'disabled'}, {'database': 'monitoring'}):
+        write_config(config, is_analyzer=True, mysql=database)
+        result = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
+        assert result.returncode == 78, result.stderr
+        assert 'component=settings_config' in result.stderr
     for is_analyzer in ('true', 'false', 1, 0, [], {}):
         write_config(config, is_analyzer=is_analyzer)
         result = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
@@ -164,7 +174,6 @@ def analyzer_reload_test(executable, root, config):
         listener.listen(2)
         listener.settimeout(0.1)
         database = {
-            'enabled': True,
             'host': '127.0.0.1',
             'port': listener.getsockname()[1],
             'database': 'monitoring',
@@ -183,13 +192,18 @@ def analyzer_reload_test(executable, root, config):
             connection.close()
             raise AssertionError('analyzer disabled but database connection attempted: ' + str(address))
 
-        write_config(config, collection=collection(1, output), is_analyzer=False, mysql=database)
+        write_config(config, collection=collection(1, output), mysql=database)
         with running_daemon([executable, '--config', str(config)], log_path) as process:
             original_pid = process.pid
             seen = set()
             wait_snapshot(output, seen, lambda value: value['config_status'] == 'ok', process)
             wait_snapshot(output, seen, lambda value: value['config_status'] == 'ok', process)
             assert_no_connection()
+            database['enabled'] = True
+            write_config(config, collection=collection(1, output), is_analyzer=True, mysql=database)
+            wait_snapshot(output, seen, lambda value: value['config_status'] == 'using_last_valid', process)
+            assert_no_connection()
+            del database['enabled']
             write_config(config, collection=collection(1, output), is_analyzer=True, mysql=database)
             deadline = time.monotonic() + 5
             connected = False
