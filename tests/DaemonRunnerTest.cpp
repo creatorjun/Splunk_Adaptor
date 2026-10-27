@@ -417,6 +417,48 @@ void retention_failure_keeps_collection_test() {
     }
 }
 
+void retention_uses_current_settings_test() {
+    class FixedSettings final : public ISettingsReader {
+    public:
+        std::expected<MonitorSettings, Error> read_settings() override { return value; }
+        MonitorSettings value;
+    };
+    class RecordingRetention final : public ISnapshotRetention {
+    public:
+        std::expected<std::size_t, Error> prune(std::chrono::system_clock::time_point value) override {
+            ++calls;
+            cutoff = value;
+            return std::size_t{0};
+        }
+        unsigned calls{};
+        std::chrono::system_clock::time_point cutoff;
+    };
+    for (const bool enabled : {false, true}) {
+        FixedSettings configuration;
+        configuration.value.collection_interval = 1s;
+        configuration.value.retention = {enabled, 2h};
+        FixtureOutput output;
+        SettingsController settings(configuration, output);
+        CHECK(settings.initialize());
+        FixtureReader reader;
+        RecordingStore store;
+        CollectAndStore use_case(reader, store, settings);
+        RecordingRetention storage;
+        SnapshotRetention retention(storage);
+        DaemonOptions options;
+        options.once = true;
+        CapturedLogs logs;
+        const auto started = std::chrono::system_clock::now();
+        CHECK(run_daemon(use_case, options, &settings, &retention) == 0);
+        CHECK(storage.calls == (enabled ? 1U : 0U));
+        if (enabled) {
+            CHECK(storage.cutoff >= started - 2h);
+            CHECK(storage.cutoff <= std::chrono::system_clock::now() - 2h);
+        }
+        CHECK(store.calls == 1);
+    }
+}
+
 }
 
 int main() {
@@ -425,5 +467,6 @@ int main() {
         once_status_tests();
         analysis_reload_before_collection_test();
         retention_failure_keeps_collection_test();
+        retention_uses_current_settings_test();
     });
 }

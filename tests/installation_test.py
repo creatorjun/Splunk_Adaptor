@@ -29,6 +29,9 @@ def main():
         shared = fresh / 'usr/share/resource-monitor/settings.json'
         original = json.loads(config.read_text())
         assert original['collection'] == {'interval_seconds': 60, 'output_directory': '/Monitor'}
+        assert original['retention'] == {'enabled': True, 'max_age_seconds': 3600}
+        index_sql = fresh / 'usr/share/resource-monitor/sql/log_silence_index.sql'
+        assert 'ON CloudESM.SUM_COLLECT_INFO (eqp_ip, recv_time, `count`)' in index_sql.read_text()
         assert original['thresholds']['cpu_usage_percent'] == 80
         assert original['is_analyzer'] is False
         assert original['log_silence'] == {'default_timeout_seconds': 300, 'overrides': []}

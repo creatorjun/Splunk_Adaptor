@@ -101,7 +101,8 @@ int run_daemon(CollectAndStore& use_case, const DaemonOptions& options,
     }
     UniqueFd retention_timer;
     const auto clean_snapshots = [&] {
-        const auto cleaned = retention->run(std::chrono::system_clock::now());
+        const auto cleaned = retention->run(std::chrono::system_clock::now(),
+            settings ? settings->current().retention : SnapshotRetentionSettings{});
         if (!cleaned) {
             log_error(cleaned.error());
         } else if (*cleaned != 0) {

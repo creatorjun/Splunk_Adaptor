@@ -20,7 +20,7 @@ COLLECTOR_APPS = {
 }
 
 
-def write_config(path, cpu=0, memory=0, storage=0, collection=None, is_analyzer=None, mysql=None, process_monitor=None):
+def write_config(path, cpu=0, memory=0, storage=0, collection=None, is_analyzer=None, mysql=None, process_monitor=None, retention=None):
     temporary = path.with_suffix('.new')
     settings = {
         'schema_version': 1,
@@ -38,12 +38,34 @@ def write_config(path, cpu=0, memory=0, storage=0, collection=None, is_analyzer=
         settings['mysql'] = mysql
     if process_monitor is not None:
         settings['process_monitor'] = process_monitor
+    if retention is not None:
+        settings['retention'] = retention
     temporary.write_text(json.dumps(settings), encoding='utf-8')
     os.replace(temporary, path)
 
 
 def collection(interval, output):
     return {'interval_seconds': interval, 'output_directory': str(output)}
+
+
+def assert_no_threshold_values(value):
+    if isinstance(value, dict):
+        assert not {'applied_thresholds', 'threshold_percent', 'default_timeout_seconds',
+                    'timeout_seconds', 'threshold'}.intersection(value), value.keys()
+        for child in value.values():
+            assert_no_threshold_values(child)
+    elif isinstance(value, list):
+        for child in value:
+            assert_no_threshold_values(child)
+
+
+def assert_resource_threshold_statuses(payload, cpu, memory, storage):
+    metrics = [(payload['cpu'], cpu), (payload['memory'], memory)]
+    metrics.extend((filesystem, storage) for filesystem in payload['filesystems'])
+    for metric, threshold in metrics:
+        usage = metric['usage_percent']
+        expected = 'unknown' if usage is None else 'warning' if usage >= threshold else 'ok'
+        assert metric['status'] == expected, (metric, threshold)
 
 
 def assert_local_timestamp(value, milliseconds=False):
@@ -60,13 +82,14 @@ def assert_local_timestamp(value, milliseconds=False):
 
 
 def assert_snapshot_timezone(path, payload):
+    assert_no_threshold_values(payload)
     local = assert_local_timestamp(payload['timestamp'])
     assert_local_timestamp(payload['thresholds_applied_at'], milliseconds=True)
     basename = time.strftime('%Y%m%dT%H%M%S%z', local)
     assert re.fullmatch(re.escape(basename) + r'(?:_[1-9]\d*)?\.json', path.name), path.name
 
 
-def wait_snapshot(output, seen, predicate, process, seconds=7, expected_apps=COLLECTOR_APPS, expected_profile='collector', previous_apps=None):
+def wait_snapshot(output, seen, predicate, process, seconds=7, expected_apps=COLLECTOR_APPS, expected_profile='collector', previous_apps=None, expected_silence_statuses=('disabled',)):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         assert process.poll() is None, 'daemon exited unexpectedly'
@@ -77,7 +100,7 @@ def wait_snapshot(output, seen, predicate, process, seconds=7, expected_apps=COL
             seen.add(path.name)
             assert payload['schema_version'] == 1
             assert payload['status'] in ('ok', 'warning', 'unknown')
-            assert payload['log_silence']['status'] == 'disabled'
+            assert payload['log_silence']['status'] in expected_silence_statuses
             assert payload['log_silence']['equipment'] == []
             assert payload['process_profile'] == expected_profile
             expected_names = [set(expected_apps)]
@@ -195,14 +218,17 @@ def validate_settings(executable, config, output):
 
 def analyzer_reload_test(executable, root, config):
     output = root / 'analyzer-snapshots'
-    output.mkdir()
+    active_output = root / 'analyzer-active-snapshots'
+    reloaded_output = root / 'analyzer-reloaded-snapshots'
+    for directory in (output, active_output, reloaded_output):
+        directory.mkdir()
     credentials = root / 'analyzer-credentials.json'
     credentials.write_text(json.dumps({'username': 'test-fixture', 'password': 'test-fixture'}), encoding='utf-8')
     credentials.chmod(0o600)
     log_path = root / 'analyzer.log'
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind(('127.0.0.1', 0))
-        listener.listen(2)
+        listener.listen(8)
         listener.settimeout(0.1)
         database = {
             'host': '127.0.0.1',
@@ -223,38 +249,76 @@ def analyzer_reload_test(executable, root, config):
             connection.close()
             raise AssertionError('analyzer disabled but database connection attempted: ' + str(address))
 
-        write_config(config, collection=collection(1, output), mysql=database)
+        def drain_connections():
+            while True:
+                try:
+                    connection, _ = listener.accept()
+                except socket.timeout:
+                    return
+                connection.close()
+
+        profiles = {'analyzer': [], 'collector': []}
+        write_config(config, 100, 100, 100, collection=collection(1, output),
+                     mysql=database, process_monitor=profiles)
         with running_daemon([executable, '--config', str(config)], log_path) as process:
             original_pid = process.pid
             seen = set()
-            wait_snapshot(output, seen, lambda value: value['config_status'] == 'ok', process)
-            wait_snapshot(output, seen, lambda value: value['config_status'] == 'ok', process)
+            wait_snapshot(output, seen, lambda value: value['config_status'] == 'ok', process, expected_apps=[])
+            wait_snapshot(output, seen, lambda value: value['config_status'] == 'ok', process, expected_apps=[])
             assert_no_connection()
             database['enabled'] = True
-            write_config(config, collection=collection(1, output), is_analyzer=True, mysql=database)
-            wait_snapshot(output, seen, lambda value: value['config_status'] == 'using_last_valid', process)
+            write_config(config, 100, 100, 100, collection=collection(1, output),
+                         is_analyzer=True, mysql=database, process_monitor=profiles)
+            wait_snapshot(output, seen, lambda value: value['config_status'] == 'using_last_valid',
+                          process, expected_apps=[])
             assert_no_connection()
             del database['enabled']
-            write_config(config, collection=collection(1, output), is_analyzer=True, mysql=database)
+            write_config(config, 100, 100, 100, collection=collection(1, active_output),
+                         is_analyzer=True, mysql=database, process_monitor=profiles)
             deadline = time.monotonic() + 5
-            connected = False
-            while time.monotonic() < deadline:
+            connections = 0
+            while time.monotonic() < deadline and connections < 2:
                 assert process.poll() is None
                 try:
                     connection, _ = listener.accept()
                 except socket.timeout:
                     continue
                 connection.close()
-                connected = True
-                break
-            assert connected, 'enabling analyzer did not start a database connection'
-            wait_snapshot(output, seen, lambda value: value['config_status'] == 'using_last_valid', process)
+                connections += 1
+            assert connections == 2, 'enabling analyzer did not start both independent database connections'
+            failed = wait_snapshot(active_output, set(),
+                lambda value: value['config_status'] == 'ok' and value['log_silence']['status'] == 'error'
+                    and value['collect_count']['status'] == 'error',
+                process, expected_apps=[], expected_profile='analyzer',
+                expected_silence_statuses=('pending', 'error'))
+            assert_resource_threshold_statuses(failed, 100, 100, 100)
+            failure_code = failed['log_silence']['error']['code']
+            assert failure_code.isdigit(), failed['log_silence']['error']
+            assert failed['log_silence']['equipment'] == []
+            assert any(error['component'] == 'mysql' for error in failed['errors'])
+            changed_at = time.monotonic()
+            write_config(config, collection=collection(2, reloaded_output), is_analyzer=True,
+                         mysql=database, process_monitor=profiles,
+                         retention={'enabled': False, 'max_age_seconds': 86400})
+            reloaded = wait_snapshot(reloaded_output, set(),
+                lambda value: value['config_status'] == 'ok' and value['log_silence']['status'] == 'error',
+                process, seconds=5, expected_apps=[], expected_profile='analyzer',
+                expected_silence_statuses=('pending', 'error'))
+            assert time.monotonic() - changed_at < 5, 'DB failure blocked valid general settings'
+            assert_resource_threshold_statuses(reloaded, 0, 0, 0)
+            assert reloaded['thresholds_applied_at'] != failed['thresholds_applied_at']
+            assert reloaded['cpu']['window_seconds'] >= 1.7
+            assert reloaded['log_silence']['error']['code'] == failure_code
             log_offset = len(log_path.read_text(encoding='utf-8'))
             database['credentials_file'] = str(root / 'missing-analyzer-credentials.json')
-            write_config(config, collection=collection(1, output), is_analyzer=False, mysql=database)
+            write_config(config, collection=collection(1, output), is_analyzer=False,
+                         mysql=database, process_monitor=profiles)
             wait_log(log_path, 'settings_reloaded', process, offset=log_offset)
-            wait_snapshot(output, seen, lambda value: value['config_status'] == 'ok', process)
-            wait_snapshot(output, seen, lambda value: value['config_status'] == 'ok', process)
+            drain_connections()
+            wait_snapshot(output, seen, lambda value: value['config_status'] == 'ok', process, expected_apps=[])
+            disabled = wait_snapshot(output, seen, lambda value: value['config_status'] == 'ok', process, expected_apps=[])
+            assert disabled['collect_count']['status'] == 'disabled'
+            assert not any(error['component'].startswith('mysql') for error in disabled['errors'])
             assert_no_connection()
             assert process.pid == original_pid and process.poll() is None
             process.send_signal(signal.SIGTERM)
@@ -288,7 +352,7 @@ def hot_reload_test(executable, root, config, output):
         assert duplicate.returncode != 0 and 'lock' in duplicate.stderr, duplicate.stderr
         config.write_text('{"schema_version": 1,', encoding='utf-8')
         fallback = wait_snapshot(output, seen, lambda value: value['config_status'] == 'using_last_valid', process)
-        assert fallback['applied_thresholds']['cpu_usage_percent'] == 0
+        assert_resource_threshold_statuses(fallback, 0, 0, 0)
         assert any(error['component'] == 'settings_config' for error in fallback['errors'])
         log_offset = len(log_path.read_text(encoding='utf-8'))
         write_config(config, collection=collection(1, output))
@@ -296,7 +360,8 @@ def hot_reload_test(executable, root, config, output):
         recovered = wait_snapshot(output, seen, lambda value: value['config_status'] == 'ok', process)
         assert recovered['thresholds_applied_at'] == first['thresholds_applied_at']
         write_config(config, 100, 100, 100, collection=collection(1, output))
-        high = wait_snapshot(output, seen, lambda value: value['config_status'] == 'ok' and value['applied_thresholds']['cpu_usage_percent'] == 100, process)
+        high = wait_snapshot(output, seen, lambda value: value['config_status'] == 'ok' and value['thresholds_applied_at'] != first['thresholds_applied_at'], process)
+        assert_resource_threshold_statuses(high, 100, 100, 100)
         assert high['thresholds_applied_at'] != first['thresholds_applied_at']
         assert 0.7 <= high['cpu']['window_seconds'] < 1.8
         write_config(config, 100, 100, 100, collection=collection(3, output))
@@ -314,11 +379,12 @@ def hot_reload_test(executable, root, config, output):
             fcntl.flock(old_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             fcntl.flock(old_lock.fileno(), fcntl.LOCK_UN)
         write_config(config, collection=collection(1, other))
-        current = wait_snapshot(other, other_seen, lambda value: value['config_status'] == 'ok' and value['applied_thresholds']['cpu_usage_percent'] == 0, process)
+        current = wait_snapshot(other, other_seen, lambda value: value['config_status'] == 'ok' and value['thresholds_applied_at'] != high['thresholds_applied_at'], process)
+        assert_resource_threshold_statuses(current, 0, 0, 0)
         assert current['status'] == 'warning'
         write_config(config, 100, 100, 100, collection=collection(2, missing))
         rejected = wait_snapshot(other, other_seen, lambda value: value['config_status'] == 'using_last_valid', process)
-        assert rejected['applied_thresholds']['cpu_usage_percent'] == 0
+        assert_resource_threshold_statuses(rejected, 0, 0, 0)
         assert rejected['thresholds_applied_at'] == current['thresholds_applied_at']
         assert 0.7 <= rejected['cpu']['window_seconds'] < 1.8, 'failed output change changed the interval'
         assert rejected['errors']
@@ -326,7 +392,8 @@ def hot_reload_test(executable, root, config, output):
         unchanged_config = config.read_bytes()
         missing.mkdir()
         missing_seen = set()
-        retried = wait_snapshot(missing, missing_seen, lambda value: value['config_status'] == 'ok' and value['applied_thresholds']['cpu_usage_percent'] == 100, process, seconds=5)
+        retried = wait_snapshot(missing, missing_seen, lambda value: value['config_status'] == 'ok', process, seconds=5)
+        assert_resource_threshold_statuses(retried, 100, 100, 100)
         assert config.read_bytes() == unchanged_config, 'retry required a configuration rewrite'
         assert retried['thresholds_applied_at'] != rejected['thresholds_applied_at']
         assert retried['cpu']['window_seconds'] >= 1.7
@@ -335,14 +402,15 @@ def hot_reload_test(executable, root, config, output):
             fcntl.flock(held_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             write_config(config, collection=collection(1, locked))
             blocked = wait_snapshot(missing, missing_seen, lambda value: value['config_status'] == 'using_last_valid', process)
-            assert blocked['applied_thresholds']['cpu_usage_percent'] == 100
+            assert_resource_threshold_statuses(blocked, 100, 100, 100)
             assert blocked['thresholds_applied_at'] == retried['thresholds_applied_at']
             assert 1.7 <= blocked['cpu']['window_seconds'] < 2.8
             assert not list(locked.glob('*.json'))
             unchanged_config = config.read_bytes()
             fcntl.flock(held_lock.fileno(), fcntl.LOCK_UN)
         locked_seen = set()
-        unlocked = wait_snapshot(locked, locked_seen, lambda value: value['config_status'] == 'ok' and value['applied_thresholds']['cpu_usage_percent'] == 0, process, seconds=4)
+        unlocked = wait_snapshot(locked, locked_seen, lambda value: value['config_status'] == 'ok', process, seconds=4)
+        assert_resource_threshold_statuses(unlocked, 0, 0, 0)
         assert config.read_bytes() == unchanged_config
         assert unlocked['status'] == 'warning'
         log_offset = len(log_path.read_text(encoding='utf-8'))
@@ -352,7 +420,8 @@ def hot_reload_test(executable, root, config, output):
         assert alias['thresholds_applied_at'] == unlocked['thresholds_applied_at']
         assert 0.7 <= alias['cpu']['window_seconds'] < 1.8
         write_config(config, collection=collection(1, output))
-        returned = wait_snapshot(output, seen, lambda value: value['config_status'] == 'ok' and value['applied_thresholds']['cpu_usage_percent'] == 0, process)
+        returned = wait_snapshot(output, seen, lambda value: value['config_status'] == 'ok' and value['thresholds_applied_at'] == unlocked['thresholds_applied_at'], process)
+        assert_resource_threshold_statuses(returned, 0, 0, 0)
         assert returned['status'] == 'warning'
         assert len(list(output.glob('*.json'))) == output_count + 1
         assert len(list(other.glob('*.json'))) == other_count
@@ -445,13 +514,15 @@ def override_and_once_tests(executable, root, config):
     with running_daemon(interval_command, root / 'interval-override.log') as process:
         wait_snapshot(interval_output, set(), lambda value: value['config_status'] == 'ok', process)
         write_config(config, 100, 100, 100, collection=collection(30, interval_other))
-        changed = wait_snapshot(interval_other, set(), lambda value: value['applied_thresholds']['cpu_usage_percent'] == 100, process, seconds=3)
+        changed = wait_snapshot(interval_other, set(), lambda value: value['config_status'] == 'ok', process, seconds=3)
+        assert_resource_threshold_statuses(changed, 100, 100, 100)
         assert 0.7 <= changed['cpu']['window_seconds'] < 1.8
     write_config(config, collection=collection(60, ignored_output))
     output_command = [executable, '--output', str(output_override), '--config', str(config)]
     with running_daemon(output_command, root / 'output-override.log') as process:
         write_config(config, 100, 100, 100, collection=collection(1, interval_other))
-        changed = wait_snapshot(output_override, set(), lambda value: value['applied_thresholds']['cpu_usage_percent'] == 100, process, seconds=4)
+        changed = wait_snapshot(output_override, set(), lambda value: value['config_status'] == 'ok', process, seconds=4)
+        assert_resource_threshold_statuses(changed, 100, 100, 100)
         assert changed['config_status'] == 'ok'
         assert not list(ignored_output.glob('*.json'))
     write_config(config, collection=collection(60, once_output))

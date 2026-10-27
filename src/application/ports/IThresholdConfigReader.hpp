@@ -5,6 +5,7 @@
 
 #include <expected>
 #include <optional>
+#include <vector>
 
 namespace monitor {
 
@@ -13,6 +14,7 @@ public:
     virtual ~IThresholdConfigReader() = default;
     virtual std::expected<ThresholdPolicy, Error> read() = 0;
     virtual std::optional<Error> reload_error() const { return {}; }
+    virtual std::vector<Error> dependency_errors() const { return {}; }
 };
 
 }

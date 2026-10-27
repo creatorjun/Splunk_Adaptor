@@ -300,7 +300,6 @@ nlohmann::json serialize(const ResourceSnapshot& snapshot, const std::string& ti
     for (const auto& equipment : snapshot.log_silence.equipment) {
         silent_equipment.push_back({{"eqp_ip", equipment.eqp_ip},
             {"last_received_at", nullable_time(equipment.last_received_at)},
-            {"timeout_seconds", equipment.timeout_seconds},
             {"silent_for_seconds", nullable(equipment.silent_for_seconds)},
             {"status", to_string(equipment.status)}, {"reason", equipment.reason}});
     }
@@ -342,11 +341,6 @@ nlohmann::json serialize(const ResourceSnapshot& snapshot, const std::string& ti
         {"collection_status", to_string(snapshot.collection_status)},
         {"config_status", to_string(snapshot.config_status)},
         {"missed_intervals", snapshot.missed_intervals},
-        {"applied_thresholds", {
-            {"cpu_usage_percent", snapshot.applied_thresholds.cpu_usage_percent},
-            {"memory_usage_percent", snapshot.applied_thresholds.memory_usage_percent},
-            {"storage_usage_percent", snapshot.applied_thresholds.storage_usage_percent}
-        }},
         {"cpu", {
             {"status", to_string(snapshot.cpu.status)},
             {"window_seconds", nullable(snapshot.cpu.window_seconds)},
@@ -367,7 +361,6 @@ nlohmann::json serialize(const ResourceSnapshot& snapshot, const std::string& ti
             {"status", to_string(snapshot.collect_count.status)},
             {"current_day", snapshot.collect_count.window.current_day == 0 ? nlohmann::json(nullptr) : nlohmann::json(snapshot.collect_count.window.current_day)},
             {"previous_day", snapshot.collect_count.window.previous_day == 0 ? nlohmann::json(nullptr) : nlohmann::json(snapshot.collect_count.window.previous_day)},
-            {"threshold_percent", snapshot.collect_count.threshold_percent},
             {"queried_at", std::move(queried_at)},
             {"equipment_count", snapshot.collect_count.equipment_count},
             {"alerts", std::move(alerts)},
@@ -376,7 +369,6 @@ nlohmann::json serialize(const ResourceSnapshot& snapshot, const std::string& ti
         {"log_silence", {
             {"source", "CloudESM.SUM_COLLECT_INFO"},
             {"status", to_string(snapshot.log_silence.status)},
-            {"default_timeout_seconds", snapshot.log_silence.default_timeout_seconds},
             {"checked_at", nullable_time(snapshot.log_silence.checked_at)},
             {"queried_at", nullable_time(snapshot.log_silence.queried_at)},
             {"last_received_precision_seconds", 60},
@@ -390,7 +382,7 @@ nlohmann::json serialize(const ResourceSnapshot& snapshot, const std::string& ti
         auto processing_alerts = nlohmann::json::array();
         for (const auto& alert : snapshot.processing_files.alerts) {
             processing_alerts.push_back({{"path", alert.path}, {"extension", alert.extension},
-                {"count", alert.count}, {"threshold", alert.threshold}});
+                {"count", alert.count}});
         }
         document["processing_files"] = {
             {"status", "warning"},

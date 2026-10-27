@@ -79,6 +79,31 @@ bool valid_log_silence_timeout(const nlohmann::json& timeout) {
             : timeout.get<std::int64_t>() >= 60 && timeout.get<std::int64_t>() <= 604800);
 }
 
+bool read_retention(const nlohmann::json& value, SnapshotRetentionSettings& destination) {
+    if (!value.is_object()) return false;
+    for (const auto& [key, setting] : value.items()) {
+        if (key == "enabled") {
+            if (!setting.is_boolean()) return false;
+            destination.enabled = setting.get<bool>();
+        } else if (key == "max_age_seconds") {
+            if (!setting.is_number_integer()) return false;
+            if (setting.is_number_unsigned()) {
+                const auto seconds = setting.get<std::uint64_t>();
+                if (seconds < static_cast<std::uint64_t>(SnapshotRetentionSettings::minimum_age.count()) ||
+                    seconds > static_cast<std::uint64_t>(SnapshotRetentionSettings::maximum_age.count())) return false;
+            } else {
+                const auto seconds = setting.get<std::int64_t>();
+                if (seconds < SnapshotRetentionSettings::minimum_age.count() ||
+                    seconds > SnapshotRetentionSettings::maximum_age.count()) return false;
+            }
+            destination.max_age = std::chrono::seconds{setting.get<std::int64_t>()};
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool read_processing_file_thresholds(const nlohmann::json& value, ProcessingFileThresholds& destination) {
     if (!value.is_object()) return false;
     for (const auto& [key, count] : value.items()) {
@@ -189,10 +214,10 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::read_settings() {
         const auto json = nlohmann::json::parse(document, callback);
         if (!json.is_object() || !json.contains("schema_version") ||
             !json.contains("thresholds")) {
-            return std::unexpected(config_error(path_, "invalid_schema", "Expected schema_version, thresholds, and optional is_analyzer, analyzer, process_monitor, processing_files, log_silence, collection and mysql"));
+            return std::unexpected(config_error(path_, "invalid_schema", "Expected schema_version, thresholds, and optional is_analyzer, analyzer, process_monitor, processing_files, log_silence, collection, retention and mysql"));
         }
         for (const auto& [key, value] : json.items()) {
-            if (key != "schema_version" && key != "thresholds" && key != "collection" && key != "mysql" && key != "is_analyzer" && key != "analyzer" && key != "process_monitor" && key != "processing_files" && key != "log_silence") {
+            if (key != "schema_version" && key != "thresholds" && key != "collection" && key != "mysql" && key != "is_analyzer" && key != "analyzer" && key != "process_monitor" && key != "processing_files" && key != "log_silence" && key != "retention") {
                 return std::unexpected(config_error(path_, "invalid_schema", "Unknown configuration key"));
             }
         }
@@ -221,6 +246,10 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::read_settings() {
             return std::unexpected(std::move(error));
         }
         MonitorSettings settings{policy};
+        if (json.contains("retention") && !read_retention(json["retention"], settings.retention)) {
+            return std::unexpected(config_error(path_, "invalid_retention",
+                "Retention must contain only enabled (boolean) and max_age_seconds (integer between 60 and 31536000)"));
+        }
         if (json.contains("is_analyzer")) {
             if (!json["is_analyzer"].is_boolean()) {
                 return std::unexpected(config_error(path_, "invalid_schema", "is_analyzer must be a boolean"));

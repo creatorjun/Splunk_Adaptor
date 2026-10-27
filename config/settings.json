@@ -35,6 +35,10 @@
     "interval_seconds": 60,
     "output_directory": "/Monitor"
   },
+  "retention": {
+    "enabled": true,
+    "max_age_seconds": 3600
+  },
   "processing_files": {
     "thresholds": {
       "collector": {

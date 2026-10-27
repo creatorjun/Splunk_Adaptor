@@ -1,5 +1,6 @@
 // tests/SnapshotRetentionTest.cpp
 #include "TestSupport.hpp"
+#include "application/SnapshotRetention.hpp"
 #include "infrastructure/persistence/JsonSnapshotStore.hpp"
 
 #include <nlohmann/json.hpp>
@@ -147,6 +148,56 @@ void check_retention_boundary() {
     CHECK(prune_count(store, cutoff + 1s) == 1);
     CHECK(std::filesystem::is_regular_file(directory.path / "20261027T120001+0000.json"));
     CHECK(std::filesystem::is_regular_file(directory.path / ".resource-monitor.lock"));
+}
+
+void check_configurable_retention_policy() {
+    class RecordingRetention final : public monitor::ISnapshotRetention {
+    public:
+        std::expected<std::size_t, monitor::Error> prune(std::chrono::system_clock::time_point value) override {
+            ++calls;
+            cutoff = value;
+            return 7;
+        }
+        unsigned calls{};
+        std::chrono::system_clock::time_point cutoff;
+    };
+    RecordingRetention storage;
+    monitor::SnapshotRetention policy(storage);
+    monitor::SnapshotRetentionSettings settings;
+    settings.enabled = false;
+    const auto disabled = policy.run(std::chrono::system_clock::time_point::min(), settings);
+    CHECK(disabled && *disabled == 0);
+    CHECK(storage.calls == 0);
+    settings.enabled = true;
+    for (const auto age : {60s, 7200s, 31536000s}) {
+        settings.max_age = age;
+        const auto result = policy.run(base_time(), settings);
+        CHECK(result && *result == 7);
+        CHECK(storage.cutoff == base_time() - age);
+    }
+    CHECK(storage.calls == 3);
+    for (const auto age : {-1s, 0s, 59s, 31536001s, std::chrono::seconds::max()}) {
+        settings.max_age = age;
+        const auto result = policy.run(base_time(), settings);
+        CHECK(!result && result.error().code == "invalid_retention");
+    }
+    CHECK(storage.calls == 3);
+    ScopedTimezone timezone("UTC0");
+    TemporaryDirectory directory;
+    monitor::JsonSnapshotStore store(directory.path);
+    CHECK(store.save(make_snapshot(base_time())));
+    CHECK(store.save(make_snapshot(base_time() + 1s)));
+    monitor::SnapshotRetention cleanup(store);
+    settings = {true, 2h};
+    const auto before_boundary = cleanup.run(base_time() + 2h - 1s, settings);
+    CHECK(before_boundary && *before_boundary == 0);
+    const auto boundary = cleanup.run(base_time() + 2h, settings);
+    CHECK(boundary && *boundary == 1);
+    CHECK(std::filesystem::exists(directory.path / "20261027T100001+0000.json"));
+    settings.enabled = false;
+    const auto retained = cleanup.run(base_time() + 24h, settings);
+    CHECK(retained && *retained == 0);
+    CHECK(std::filesystem::exists(directory.path / "20261027T100001+0000.json"));
 }
 
 void check_offsets_legacy_and_collisions() {
@@ -336,6 +387,7 @@ void check_deletion_failure_is_reported_and_recoverable() {
 int main() {
     return test::run([] {
         check_retention_boundary();
+        check_configurable_retention_policy();
         check_offsets_legacy_and_collisions();
         check_only_generated_regular_files_are_removed();
         check_repeated_scans_and_reload();

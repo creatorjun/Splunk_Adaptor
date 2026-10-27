@@ -1,6 +1,6 @@
 # CMakeLists.txt
 cmake_minimum_required(VERSION 3.20)
-project(resource-monitor VERSION 1.9.0 LANGUAGES CXX)
+project(resource-monitor VERSION 1.10.0 LANGUAGES CXX)
 
 if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
     set(CMAKE_INSTALL_PREFIX "/usr" CACHE PATH "Installation prefix" FORCE)
@@ -119,6 +119,7 @@ install(TARGETS resource-monitor RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR})
 install(FILES packaging/systemd/resource-monitor.service DESTINATION lib/systemd/system)
 install(FILES config/settings.json DESTINATION share/resource-monitor)
 install(FILES config/mysql.example.json DESTINATION share/resource-monitor)
+install(FILES packaging/sql/log_silence_index.sql DESTINATION share/resource-monitor/sql)
 install(FILES README.md DESTINATION share/doc/resource-monitor)
 install(FILES packaging/THIRD_PARTY_NOTICES.txt DESTINATION share/doc/resource-monitor)
 install(CODE "

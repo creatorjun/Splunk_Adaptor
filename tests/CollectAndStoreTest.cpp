@@ -58,11 +58,13 @@ struct Store final : ISnapshotStore {
 struct Config final : IThresholdConfigReader {
     std::expected<ThresholdPolicy, Error> next = ThresholdPolicy{80.0, 80.0, 80.0};
     std::size_t reads{};
+    std::vector<Error> dependencies;
 
     std::expected<ThresholdPolicy, Error> read() override {
         ++reads;
         return next;
     }
+    std::vector<Error> dependency_errors() const override { return dependencies; }
 };
 
 struct SettingsReader final : ISettingsReader {
@@ -141,6 +143,35 @@ struct ProcessingMonitor final : IProcessingFileMonitor {
 
     void settings_changed() override { ++updates; }
 };
+
+void database_dependency_error_test() {
+    Reader reader;
+    Store store;
+    Config config;
+    config.dependencies = {{"mysql", "log_silence.connection", "1045", "Database connection failed"}};
+    CollectAndStore use_case(reader, store, config);
+    CHECK(use_case.initialize());
+    reader.next = sample(1);
+    const auto failed = use_case.run();
+    CHECK(failed && store.attempts.size() == 1);
+    CHECK(failed->config_status == ConfigStatus::ok);
+    CHECK(failed->collection_status == CollectionStatus::ok);
+    CHECK(failed->status == MetricStatus::unknown);
+    CHECK(has_error(*failed, "1045"));
+    CHECK(failed->memory.used_bytes == 600);
+    config.next->memory_usage_percent = 50;
+    reader.next = sample(2);
+    const auto changed = use_case.run();
+    CHECK(changed && changed->memory.status == MetricStatus::warning);
+    CHECK(changed->status == MetricStatus::warning);
+    CHECK(changed->config_status == ConfigStatus::ok);
+    config.dependencies.clear();
+    config.next->memory_usage_percent = 80;
+    reader.next = sample(3);
+    const auto recovered = use_case.run();
+    CHECK(recovered && recovered->status == MetricStatus::ok);
+    CHECK(recovered->errors.empty());
+}
 
 void processing_file_tests() {
     Reader reader;
@@ -894,6 +925,7 @@ int main() {
         process_monitor_tests();
         log_silence_tests();
         processing_file_tests();
+        database_dependency_error_test();
         reload_tests();
         partial_failure_tests();
         write_failure_baseline_test();

@@ -66,6 +66,8 @@ std::expected<ResourceSnapshot, Error> CollectAndStore::run(std::uint64_t missed
         snapshot.config_status = ConfigStatus::using_last_valid;
         snapshot.errors.push_back(*reload_error);
     }
+    const auto dependency_errors = config_.dependency_errors();
+    snapshot.errors.insert(snapshot.errors.end(), dependency_errors.begin(), dependency_errors.end());
     auto sample = reader_.read();
     if (policy_changed) {
         policy_applied_at_ = sample.timestamp;
@@ -184,6 +186,9 @@ std::expected<ResourceSnapshot, Error> CollectAndStore::run(std::uint64_t missed
             snapshot.processing_files.status != ProcessingFilesStatus::disabled && snapshot.status == MetricStatus::ok) {
             snapshot.status = MetricStatus::unknown;
         }
+    }
+    if (!dependency_errors.empty() && snapshot.status == MetricStatus::ok) {
+        snapshot.status = MetricStatus::unknown;
     }
     if (auto saved = store_.save(snapshot); !saved) {
         auto error = saved.error();

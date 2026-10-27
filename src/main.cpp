@@ -42,7 +42,7 @@ int main(int argc, char* argv[]) {
                 return 0;
             }
             if (argument == "--version") {
-                std::cout << "resource-monitor 1.9.0\n";
+                std::cout << "resource-monitor 1.10.0\n";
                 return 0;
             }
             if (argument == "--once") {
@@ -110,7 +110,8 @@ int main(int argc, char* argv[]) {
         monitor::JsonSnapshotStore store{options.output_directory};
         monitor::MariaDbConnectionFactory database_factory;
         monitor::MySqlConfiguration database{credentials, database_factory};
-        monitor::SettingsController settings{config, store, overrides, &database};
+        monitor::MySqlConfiguration silence_database{credentials, database_factory};
+        monitor::SettingsController settings{config, store, overrides, &database, &silence_database};
         if (const auto initialized = settings.initialize(); !initialized) {
             monitor::log_error(initialized.error());
             return initialized.error().component == "settings_config" ? 78 : 1;
@@ -120,7 +121,7 @@ int main(int argc, char* argv[]) {
         monitor::CollectCountMonitor collect_count{database, settings, calendar};
         monitor::ProcJavaProcessReader process_reader;
         monitor::JavaProcessMonitor processes{process_reader, settings};
-        monitor::LogSilenceMonitor log_silence{database, settings};
+        monitor::LogSilenceMonitor log_silence{silence_database, settings};
         monitor::DirectoryProcessingFileScanner file_scanner;
         monitor::ProcessingFileReader file_reader{file_scanner};
         monitor::ProcessingFileMonitor processing_files{file_reader, settings};

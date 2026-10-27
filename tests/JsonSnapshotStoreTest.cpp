@@ -66,9 +66,26 @@ public:
     std::filesystem::path path;
 };
 
+void check_no_threshold_values(const nlohmann::json& value) {
+    if (value.is_object()) {
+        for (const auto& [key, child] : value.items()) {
+            CHECK(key != "applied_thresholds");
+            CHECK(key != "threshold_percent");
+            CHECK(key != "default_timeout_seconds");
+            CHECK(key != "timeout_seconds");
+            CHECK(key != "threshold");
+            check_no_threshold_values(child);
+        }
+    } else if (value.is_array()) {
+        for (const auto& child : value) check_no_threshold_values(child);
+    }
+}
+
 nlohmann::json read_json(const std::filesystem::path& path) {
     std::ifstream input(path, std::ios::binary);
-    return nlohmann::json::parse(input);
+    auto document = nlohmann::json::parse(input);
+    check_no_threshold_values(document);
+    return document;
 }
 
 std::size_t count_descriptors() {
@@ -221,7 +238,7 @@ void check_log_silence_snapshots() {
     const auto& silence = json["log_silence"];
     CHECK(silence["source"] == "CloudESM.SUM_COLLECT_INFO");
     CHECK(silence["status"] == "warning");
-    CHECK(silence["default_timeout_seconds"] == 600);
+    CHECK(!silence.contains("default_timeout_seconds"));
     CHECK(silence["checked_at"] == "2026-10-14T21:34:00.000+09:00");
     CHECK(silence["queried_at"] == "2026-10-14T21:33:59.877+09:00");
     CHECK(silence["last_received_precision_seconds"] == 60);
@@ -230,7 +247,7 @@ void check_log_silence_snapshots() {
     CHECK(silence["error"].is_null());
     const auto& first = silence["equipment"][0];
     CHECK(first["eqp_ip"] == "192.0.2.1");
-    CHECK(first["timeout_seconds"] == 300);
+    CHECK(!first.contains("timeout_seconds"));
     CHECK(first["silent_for_seconds"].is_number_unsigned());
     CHECK(first["silent_for_seconds"] == 360);
     CHECK(first["last_received_at"] == "2026-10-14T21:28:00.000+09:00");
@@ -318,16 +335,16 @@ void check_processing_files_snapshots() {
     CHECK(processing["scanned_at"] == "2026-10-14T21:33:59.877+09:00");
     CHECK(!processing.contains("directories"));
     CHECK(processing["alerts"].size() == 2);
-    CHECK(processing["alerts"][0].size() == 4);
+    CHECK(processing["alerts"][0].size() == 3);
     CHECK(processing["alerts"][0]["path"] == "/CloudESM/data/processing/collector");
     CHECK(processing["alerts"][0]["extension"] == ".tmp");
     CHECK(processing["alerts"][0]["count"] == 100);
     CHECK(processing["alerts"][0]["count"].is_number_unsigned());
-    CHECK(processing["alerts"][0]["threshold"] == 100);
+    CHECK(!processing["alerts"][0].contains("threshold"));
     CHECK(processing["alerts"][1]["path"] == "/CloudESM/data/processing/normalize");
     CHECK(processing["alerts"][1]["extension"] == ".done");
     CHECK(processing["alerts"][1]["count"] == 120);
-    CHECK(processing["alerts"][1]["threshold"] == 100);
+    CHECK(!processing["alerts"][1].contains("threshold"));
 
     snapshot.processing_files.scan_started_at.reset();
     snapshot.processing_files.scanned_at.reset();
@@ -338,7 +355,7 @@ void check_processing_files_snapshots() {
     CHECK(zero["scanned_at"].is_null());
     CHECK(zero["alerts"].size() == 1);
     CHECK(zero["alerts"][0]["count"] == 0);
-    CHECK(zero["alerts"][0]["threshold"] == 0);
+    CHECK(!zero["alerts"][0].contains("threshold"));
 
     snapshot.processing_files.alerts.clear();
     snapshot.processing_files.status = monitor::ProcessingFilesStatus::error;
@@ -371,7 +388,7 @@ void check_collect_count_snapshots() {
     CHECK(analysis["status"] == "warning");
     CHECK(analysis["current_day"] == 20261013);
     CHECK(analysis["previous_day"] == 20261012);
-    CHECK(analysis["threshold_percent"] == 10.0);
+    CHECK(!analysis.contains("threshold_percent"));
     CHECK(analysis["queried_at"] == "2026-10-14T21:33:59.877+09:00");
     CHECK(analysis["equipment_count"] == 3);
     CHECK(analysis["error"].is_null());
@@ -440,9 +457,7 @@ int main() {
         CHECK(json["collection_status"] == "partial");
         CHECK(json["config_status"] == "using_last_valid");
         CHECK(json["missed_intervals"] == 2);
-        CHECK(json["applied_thresholds"]["cpu_usage_percent"] == 80);
-        CHECK(json["applied_thresholds"]["memory_usage_percent"] == 85);
-        CHECK(json["applied_thresholds"]["storage_usage_percent"] == 90);
+        CHECK(!json.contains("applied_thresholds"));
         CHECK(json["cpu"]["window_seconds"] == 60.25);
         CHECK(json["cpu"]["iowait_percent"] == 1);
         CHECK(json["cpu"]["steal_percent"] == 2);
@@ -459,7 +474,7 @@ int main() {
         CHECK(json["collect_count"]["current_day"].is_null());
         CHECK(json["collect_count"]["previous_day"].is_null());
         CHECK(json["collect_count"]["queried_at"].is_null());
-        CHECK(json["collect_count"]["threshold_percent"] == 10.0);
+        CHECK(!json["collect_count"].contains("threshold_percent"));
         CHECK(json["collect_count"]["equipment_count"] == 0);
         CHECK(json["collect_count"]["alerts"].is_array());
         CHECK(json["collect_count"]["alerts"].empty());

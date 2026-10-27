@@ -147,6 +147,47 @@ void processing_files_settings_tests() {
     }
 }
 
+void retention_settings_tests() {
+    TemporaryDirectory directory;
+    const auto path = directory.path / "settings.json";
+    monitor::JsonSettingsReader reader(path);
+    const auto document = [](const std::string& retention) {
+        return R"({"schema_version":1,"thresholds":{"cpu_usage_percent":80,"memory_usage_percent":85,"storage_usage_percent":90},"retention":)"
+            + retention + "}";
+    };
+    for (const auto* value : {"{}", R"({"enabled":true})", R"({"max_age_seconds":3600})"}) {
+        write_file(path, document(value));
+        const auto settings = reader.read_settings();
+        CHECK(settings && settings->retention == monitor::SnapshotRetentionSettings{});
+    }
+    for (const bool enabled : {false, true}) {
+        for (const auto seconds : {60, 7200, 31536000}) {
+            write_file(path, document(nlohmann::json{
+                {"enabled", enabled}, {"max_age_seconds", seconds}}.dump()));
+            const auto settings = reader.read_settings();
+            CHECK(settings);
+            CHECK(settings->retention.enabled == enabled);
+            CHECK(settings->retention.max_age == std::chrono::seconds{seconds});
+        }
+    }
+    for (const auto* invalid : {"null", "true", "[]", "3600", "\"redaction-marker\"",
+        R"({"enabled":1})", R"({"enabled":null})", R"({"enabled":"false"})",
+        R"({"max_age_seconds":0})", R"({"max_age_seconds":-1})", R"({"max_age_seconds":59})",
+        R"({"max_age_seconds":31536001})", R"({"max_age_seconds":18446744073709551615})",
+        R"({"max_age_seconds":18446744073709551616})", R"({"max_age_seconds":-9223372036854775808})",
+        R"({"max_age_seconds":3600.0})", R"({"max_age_seconds":true})", R"({"max_age_seconds":"3600"})",
+        R"({"max_age_seconds":null})", R"({"enabled":false,"max_age_seconds":0})",
+        R"({"redaction-marker":1})"}) {
+        write_file(path, document(invalid));
+        const auto rejected = reader.read_settings();
+        CHECK(!rejected);
+        CHECK(rejected.error().code == "invalid_retention");
+        CHECK(rejected.error().message.find("redaction-marker") == std::string::npos);
+    }
+    write_file(path, document(R"({"enabled":false,"enabled":true})"));
+    check_failure(reader, path);
+}
+
 }
 
 int main() {
@@ -176,6 +217,7 @@ int main() {
         CHECK(settings->log_silence.default_timeout_seconds == 300);
         CHECK(settings->log_silence.overrides.empty());
         CHECK(settings->processing_files == monitor::ProcessingFileSettings{});
+        CHECK(settings->retention == monitor::SnapshotRetentionSettings{});
         auto policy = reader.read();
         CHECK(policy);
         CHECK(settings->thresholds == *policy);
@@ -643,5 +685,6 @@ int main() {
         monitor::JsonSettingsReader pipe_reader(pipe);
         check_failure(pipe_reader, pipe);
         processing_files_settings_tests();
+        retention_settings_tests();
     });
 }

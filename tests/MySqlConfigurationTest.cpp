@@ -31,6 +31,7 @@ struct Reader final : IMySqlCredentialsReader {
 struct Attempt {
     MySqlSettings settings;
     MySqlCredentials credentials;
+    std::chrono::steady_clock::time_point started{std::chrono::steady_clock::now()};
 };
 
 struct QueryAttempt {
@@ -51,11 +52,13 @@ struct Control {
     bool silence_blocked{};
     bool fail_silence{};
     bool throw_silence{};
+    std::string silence_error_code{"query_failed"};
     std::chrono::system_clock::time_point last_receipt{std::chrono::seconds{1792380600}};
     std::uint64_t current_count{110};
     std::vector<Attempt> attempts;
     std::vector<QueryAttempt> queries;
     std::vector<std::size_t> silence_queries;
+    std::vector<std::chrono::steady_clock::time_point> silence_query_times;
     std::set<std::size_t> live;
     std::set<std::size_t> closed;
     std::set<std::size_t> fail_probe;
@@ -101,11 +104,13 @@ struct Session final : IMySqlSession {
     std::expected<LogReceiptBatch, Error> read_last_received() override {
         std::unique_lock lock(state.mutex);
         state.silence_queries.push_back(id);
+        state.silence_query_times.push_back(std::chrono::steady_clock::now());
         const auto received = state.last_receipt;
         state.wake.wait_for(lock, 15s, [&] { return !state.silence_blocked; });
         if (state.throw_silence) throw std::runtime_error("sensitive last receipt exception");
         if (state.fail_silence) {
-            return std::unexpected(Error{"log_silence", "table", "query_failed", "Query failed"});
+            return std::unexpected(Error{"log_silence", "CloudESM.SUM_COLLECT_INFO",
+                state.silence_error_code, "Last log receipt query failed"});
         }
         return LogReceiptBatch{received + 300s, {{"192.0.2.1", received}}};
     }
@@ -689,6 +694,189 @@ void silence_health_invalidation_tests() {
     CHECK(factory.inspect([](const Control& state) { return state.silence_queries == std::vector<std::size_t>{1, 2}; }));
 }
 
+void connection_error_survives_retry_tests() {
+    Reader reader;
+    Factory factory;
+    factory.state.fail_connect = true;
+    MySqlConfiguration configuration(reader, factory, 150ms, 5s);
+    const auto settings = enabled_settings();
+    CHECK(!configuration.prepare(settings).value());
+    wait_for([&] { return !configuration.prepare(settings); });
+    const auto failed = configuration.read_last_received(true, 1s);
+    CHECK(failed.status == LogSilenceReadStatus::error);
+    CHECK(failed.error && failed.error->code == "1045" && !failed.batch);
+    CHECK(!failed.queried_at);
+    factory.inspect([](Control& state) { state.fail_connect = false; state.blocked = true; });
+    wait_for([&] {
+        const auto prepared = configuration.prepare(settings);
+        CHECK(!prepared && prepared.error().code == "1045");
+        return factory.inspect([](const Control& state) { return state.attempts.size() == 2; });
+    });
+    CHECK(configuration.read_last_received(true, 1s).error->code == "1045");
+    const auto daily = configuration.read_daily_counts({20261018, 20261017}, 60s);
+    CHECK(daily.status == CollectCountReadStatus::error && daily.error->code == "1045");
+    factory.release();
+    wait_ready(configuration, settings);
+    CHECK(configuration.commit());
+    wait_for([&] {
+        const auto result = configuration.read_last_received(true, 1s);
+        return result.status == LogSilenceReadStatus::ready && !result.error;
+    });
+}
+
+void reconnect_backoff_tests() {
+    Reader reader;
+    Factory factory;
+    factory.state.fail_connect = true;
+    MySqlConfiguration configuration(reader, factory, 50ms, 5s);
+    auto settings = enabled_settings();
+    wait_for([&] {
+        configuration.prepare(settings);
+        return factory.inspect([](const Control& state) { return state.attempts.size() >= 4; });
+    });
+    const auto attempts = factory.inspect([](const Control& state) { return state.attempts; });
+    CHECK(attempts[1].started - attempts[0].started >= 50ms);
+    CHECK(attempts[2].started - attempts[1].started >= 100ms);
+    CHECK(attempts[3].started - attempts[2].started >= 200ms);
+    factory.inspect([](Control& state) { state.fail_connect = false; });
+    settings.host = "new-identity";
+    const auto changed = configuration.prepare(settings);
+    CHECK(changed && !*changed);
+    wait_ready(configuration, settings);
+    CHECK(configuration.commit());
+    factory.inspect([](Control& state) { state.fail_probe.insert(5); });
+    settings.host = "another-identity";
+    wait_ready(configuration, settings);
+    CHECK(configuration.commit());
+    CHECK(factory.inspect([](const Control& state) { return state.attempts.size() == 6; }));
+}
+
+void silence_original_error_recovery_tests() {
+    Reader reader;
+    Factory factory;
+    MySqlConfiguration configuration(reader, factory, 50ms, 5s);
+    auto settings = enabled_settings();
+    wait_ready(configuration, settings);
+    CHECK(configuration.commit());
+    factory.inspect([](Control& state) {
+        state.fail_silence = true;
+        state.silence_error_code = "2013";
+        state.fail_probe.insert(1);
+    });
+    wait_for([&] { return configuration.read_last_received(true, 1s).status == LogSilenceReadStatus::error; });
+    wait_for([&] { return factory.inspect([](const Control& state) { return state.probes.at(1) >= 2; }); });
+    const auto failed = configuration.read_last_received(true, 1s);
+    CHECK(failed.error && failed.error->code == "2013" && failed.queried_at && !failed.batch);
+    factory.inspect([](Control& state) { state.blocked = true; });
+    const auto reconnecting = configuration.prepare(settings);
+    CHECK(!reconnecting && reconnecting.error().code == "2013");
+    wait_for([&] { return factory.inspect([](const Control& state) { return state.attempts.size() == 2; }); });
+    const auto retrying = configuration.read_last_received(true, 1s);
+    CHECK(retrying.error->code == "2013" && retrying.queried_at == failed.queried_at);
+    factory.inspect([](Control& state) {
+        state.fail_silence = false;
+        state.silence_blocked = true;
+    });
+    factory.release();
+    wait_ready(configuration, settings);
+    CHECK(configuration.commit());
+    wait_for([&] { return factory.inspect([](const Control& state) { return state.silence_queries.size() == 2; }); });
+    CHECK(factory.inspect([](const Control& state) {
+        return state.silence_query_times[1] - state.silence_query_times[0] >= 1s;
+    }));
+    const auto awaiting_query = configuration.read_last_received(true, 1s);
+    CHECK(awaiting_query.status == LogSilenceReadStatus::error && !awaiting_query.batch);
+    CHECK(awaiting_query.error->code == "2013" && awaiting_query.queried_at == failed.queried_at);
+    factory.release_silence();
+    wait_for([&] { return configuration.read_last_received(true, 1s).status == LogSilenceReadStatus::ready; });
+    const auto recovered = configuration.read_last_received(true, 1s);
+    CHECK(recovered.batch && !recovered.error && recovered.queried_at > failed.queried_at);
+    factory.inspect([](Control& state) {
+        state.fail_silence = true;
+        state.silence_error_code = "1142";
+    });
+    wait_for([&] { return configuration.read_last_received(true, 1s).status == LogSilenceReadStatus::error; });
+    settings.enabled = false;
+    CHECK(configuration.prepare(settings).value());
+    CHECK(configuration.commit());
+    const auto disabled = configuration.read_last_received(false, 1s);
+    CHECK(!disabled.error && !disabled.batch && !disabled.queried_at);
+}
+
+void silence_changed_identity_clears_error_tests() {
+    Reader reader;
+    Factory factory;
+    MySqlConfiguration configuration(reader, factory, 20ms, 5s);
+    auto settings = enabled_settings();
+    wait_ready(configuration, settings);
+    CHECK(configuration.commit());
+    factory.inspect([](Control& state) { state.fail_silence = true; state.silence_error_code = "1142"; });
+    wait_for([&] { return configuration.read_last_received(true, 60s).status == LogSilenceReadStatus::error; });
+    settings.database = "replacement";
+    wait_ready(configuration, settings);
+    factory.inspect([](Control& state) { state.fail_silence = false; state.silence_blocked = true; });
+    CHECK(configuration.commit());
+    wait_for([&] { return factory.inspect([](const Control& state) { return state.silence_queries.size() == 2; }); });
+    const auto pending = configuration.read_last_received(true, 60s);
+    CHECK(pending.status == LogSilenceReadStatus::pending);
+    CHECK(!pending.error && !pending.batch && !pending.queried_at);
+    factory.release_silence();
+    wait_for([&] { return configuration.read_last_received(true, 60s).status == LogSilenceReadStatus::ready; });
+}
+
+void initial_credentials_failure_tests() {
+    Reader reader;
+    reader.next = std::unexpected(Error{"mysql_credentials", "credentials", "invalid_json", "Invalid credentials"});
+    Factory factory;
+    MySqlConfiguration configuration(reader, factory, 20ms, 5s);
+    const auto settings = enabled_settings();
+    CHECK(!configuration.prepare(settings));
+    const auto failed = configuration.read_last_received(true, 60s);
+    CHECK(failed.status == LogSilenceReadStatus::error && failed.error->code == "invalid_json");
+    CHECK(!failed.batch && !failed.queried_at);
+    CHECK(factory.inspect([](const Control& state) { return state.attempts.empty(); }));
+    reader.next = MySqlCredentials{"monitor", "fixed-password"};
+    wait_ready(configuration, settings);
+    CHECK(configuration.commit());
+    wait_for([&] { return configuration.read_last_received(true, 60s).status == LogSilenceReadStatus::ready; });
+    CHECK(!configuration.read_last_received(true, 60s).error);
+}
+
+void independent_channels_isolation_tests() {
+    Reader daily_reader;
+    Reader silence_reader;
+    Factory daily_factory;
+    Factory silence_factory;
+    MySqlConfiguration daily(daily_reader, daily_factory, 20ms, 5s);
+    MySqlConfiguration silence(silence_reader, silence_factory, 20ms, 5s);
+    const auto settings = enabled_settings();
+    wait_ready(daily, settings);
+    CHECK(daily.commit());
+    wait_ready(silence, settings);
+    CHECK(silence.commit());
+    silence_factory.inspect([](Control& state) {
+        state.silence_blocked = true;
+        state.fail_silence = true;
+        state.silence_error_code = "2013";
+        state.fail_probe.insert(1);
+    });
+    silence.read_last_received(true, 1s);
+    wait_for([&] { return silence_factory.inspect([](const Control& state) { return state.silence_queries.size() == 1; }); });
+    const DailyCountWindow window{20261018, 20261017};
+    wait_for([&] { return daily.read_daily_counts(window, 1s).status == CollectCountReadStatus::ready; });
+    daily_factory.inspect([](Control& state) { state.current_count = 150; });
+    wait_for([&] {
+        const auto current = daily.read_daily_counts(window, 1s);
+        return current.status == CollectCountReadStatus::ready && current.counts.front().current_count == 150;
+    });
+    silence_factory.release_silence();
+    wait_for([&] { return silence.read_last_received(true, 1s).status == LogSilenceReadStatus::error; });
+    CHECK(!silence.read_last_received(true, 1s).batch);
+    CHECK(daily.read_daily_counts(window, 1s).status == CollectCountReadStatus::ready);
+    CHECK(daily.prepare(settings).value());
+    CHECK(daily_factory.inspect([](const Control& state) { return state.attempts.size() == 1; }));
+}
+
 }
 
 int main() {
@@ -712,5 +900,11 @@ int main() {
         silence_error_isolation_tests();
         silence_stale_cache_tests();
         silence_health_invalidation_tests();
+        connection_error_survives_retry_tests();
+        reconnect_backoff_tests();
+        silence_original_error_recovery_tests();
+        silence_changed_identity_clears_error_tests();
+        initial_credentials_failure_tests();
+        independent_channels_isolation_tests();
     });
 }

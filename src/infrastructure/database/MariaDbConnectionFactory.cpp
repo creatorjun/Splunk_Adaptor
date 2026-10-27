@@ -39,8 +39,14 @@ struct FreeResult {
 
 using Connection = std::unique_ptr<MYSQL, CloseConnection>;
 
-Error database_error(MYSQL* connection, const char* operation) {
-    return {"mysql", "connection", std::to_string(::mysql_errno(connection)), operation};
+Error database_error(MYSQL* connection, const char* operation,
+    const char* component = "mysql", const char* target = "connection") {
+    return {component, target, std::to_string(::mysql_errno(connection)), operation};
+}
+
+Error index_metadata_error() {
+    return {"log_silence", "CloudESM.SUM_COLLECT_INFO", "invalid_index_metadata",
+        "Last log receipt index metadata are invalid or unsupported"};
 }
 
 class MariaDbSession final : public IMySqlSession {
@@ -75,9 +81,14 @@ public:
             return std::unexpected(query.error());
         }
         if (::mysql_real_query(connection_.get(), query->data(), static_cast<unsigned long>(query->size())) != 0) {
-            return std::unexpected(database_error(connection_.get(), "Daily collection count query failed"));
+            return std::unexpected(database_error(connection_.get(), "Daily collection count query failed",
+                "collect_count", "CloudESM.SUM_COLLECT_INFO_1DAY"));
         }
         std::unique_ptr<MYSQL_RES, FreeResult> result(::mysql_use_result(connection_.get()));
+        if (!result && ::mysql_errno(connection_.get()) != 0) {
+            return std::unexpected(database_error(connection_.get(), "Daily collection count result failed",
+                "collect_count", "CloudESM.SUM_COLLECT_INFO_1DAY"));
+        }
         if (!result || ::mysql_num_fields(result.get()) != CollectCountQueryRow{}.size()) {
             return std::unexpected(Error{"collect_count", "CloudESM.SUM_COLLECT_INFO_1DAY", "invalid_query_result",
                 "Daily collection count result was invalid"});
@@ -100,17 +111,28 @@ public:
             }
         }
         if (::mysql_errno(connection_.get()) != 0) {
-            return std::unexpected(database_error(connection_.get(), "Daily collection count result read failed"));
+            return std::unexpected(database_error(connection_.get(), "Daily collection count result read failed",
+                "collect_count", "CloudESM.SUM_COLLECT_INFO_1DAY"));
         }
         return std::move(decoded).take();
     }
 
     std::expected<LogReceiptBatch, Error> read_last_received() override {
-        const auto query = make_log_silence_query();
+        if (!indexed_silence_query_) {
+            const auto discovered = discover_log_silence_index();
+            if (!discovered) return std::unexpected(discovered.error());
+            indexed_silence_query_ = *discovered;
+        }
+        const auto query = make_log_silence_query(*indexed_silence_query_);
         if (::mysql_real_query(connection_.get(), query.data(), static_cast<unsigned long>(query.size())) != 0) {
-            return std::unexpected(database_error(connection_.get(), "Last log receipt query failed"));
+            return std::unexpected(database_error(connection_.get(), "Last log receipt query failed",
+                "log_silence", "CloudESM.SUM_COLLECT_INFO"));
         }
         std::unique_ptr<MYSQL_RES, FreeResult> result(::mysql_use_result(connection_.get()));
+        if (!result && ::mysql_errno(connection_.get()) != 0) {
+            return std::unexpected(database_error(connection_.get(), "Last log receipt result failed",
+                "log_silence", "CloudESM.SUM_COLLECT_INFO"));
+        }
         if (!result || ::mysql_num_fields(result.get()) != LogSilenceQueryRow{}.size()) {
             return std::unexpected(Error{"log_silence", "CloudESM.SUM_COLLECT_INFO", "invalid_query_result",
                 "Last log receipt result was invalid"});
@@ -131,13 +153,68 @@ public:
             }
         }
         if (::mysql_errno(connection_.get()) != 0) {
-            return std::unexpected(database_error(connection_.get(), "Last log receipt result read failed"));
+            return std::unexpected(database_error(connection_.get(), "Last log receipt result read failed",
+                "log_silence", "CloudESM.SUM_COLLECT_INFO"));
         }
         return std::move(decoded).take();
     }
 
 private:
+    std::expected<bool, Error> discover_log_silence_index() {
+        constexpr char query[] = "SHOW INDEX FROM CloudESM.SUM_COLLECT_INFO";
+        if (::mysql_real_query(connection_.get(), query, sizeof(query) - 1) != 0) {
+            return std::unexpected(database_error(connection_.get(), "Last log receipt index discovery failed",
+                "log_silence", "CloudESM.SUM_COLLECT_INFO"));
+        }
+        std::unique_ptr<MYSQL_RES, FreeResult> result(::mysql_store_result(connection_.get()));
+        if (!result) {
+            if (::mysql_errno(connection_.get()) != 0) {
+                return std::unexpected(database_error(connection_.get(), "Last log receipt index result failed",
+                    "log_silence", "CloudESM.SUM_COLLECT_INFO"));
+            }
+            return std::unexpected(index_metadata_error());
+        }
+        const auto field_count = ::mysql_num_fields(result.get());
+        const auto fields = ::mysql_fetch_fields(result.get());
+        if (!fields || field_count > 256) return std::unexpected(index_metadata_error());
+        std::vector<std::string_view> names;
+        names.reserve(field_count);
+        for (unsigned int index = 0; index < field_count; ++index) {
+            if (!fields[index].name) return std::unexpected(index_metadata_error());
+            names.emplace_back(fields[index].name, fields[index].name_length);
+        }
+        const auto columns = find_log_silence_index_columns(names);
+        if (!columns) return std::unexpected(columns.error());
+        LogSilenceIndexCatalog catalog;
+        while (const auto row = ::mysql_fetch_row(result.get())) {
+            const auto lengths = ::mysql_fetch_lengths(result.get());
+            if (!lengths) return std::unexpected(index_metadata_error());
+            LogSilenceIndexRow values;
+            for (std::size_t index = 0; index < columns->required.size(); ++index) {
+                const auto selected = columns->required[index];
+                if (row[selected]) values[index] = std::string_view{row[selected], lengths[selected]};
+            }
+            if (columns->ignored) {
+                if (!row[*columns->ignored]) return std::unexpected(index_metadata_error());
+                values[5] = std::string_view{row[*columns->ignored], lengths[*columns->ignored]};
+            }
+            if (columns->visible) {
+                if (!row[*columns->visible]) return std::unexpected(index_metadata_error());
+                values[6] = std::string_view{row[*columns->visible], lengths[*columns->visible]};
+            }
+            if (const auto appended = catalog.append(values); !appended) {
+                return std::unexpected(appended.error());
+            }
+        }
+        if (::mysql_errno(connection_.get()) != 0) {
+            return std::unexpected(database_error(connection_.get(), "Last log receipt index result read failed",
+                "log_silence", "CloudESM.SUM_COLLECT_INFO"));
+        }
+        return catalog.supports_latest_lookup();
+    }
+
     Connection connection_;
+    std::optional<bool> indexed_silence_query_;
 };
 
 }

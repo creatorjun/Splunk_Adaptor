@@ -73,6 +73,7 @@ public:
         if (retry.count() <= 0 || health.count() <= 0) {
             throw std::invalid_argument("Database retry and health intervals must be positive");
         }
+        retry_delay = std::min(retry_interval, maximum_retry_interval);
         InheritedSignalMask mask;
         worker = std::thread([this] { run(); });
     }
@@ -106,6 +107,8 @@ public:
                 desired.reset();
                 request.reset();
                 ++generation;
+                failure = value.error();
+                retry_delay = std::min(retry_interval, maximum_retry_interval);
                 return std::unexpected(value.error());
             }
             identity.credentials = std::move(*value);
@@ -119,6 +122,7 @@ public:
             request.reset();
             failure.reset();
             retry_at = Clock::time_point{};
+            retry_delay = std::min(retry_interval, maximum_retry_interval);
         }
         const bool active_matches = active_identity && *active_identity == *desired && active_healthy;
         if (!active_matches && ready && ready_generation == generation && Clock::now() >= ready_expires_at) {
@@ -136,9 +140,9 @@ public:
         }
         if (!request && working_generation != generation) {
             request = Request{generation, *desired};
-            failure.reset();
             wake.notify_one();
         }
+        if (failure) return std::unexpected(*failure);
         return false;
     }
 
@@ -155,6 +159,7 @@ public:
         if (prepared_identity->settings.enabled && (!ready || ready_generation != generation)) {
             return false;
         }
+        const bool same_identity = active_identity && *active_identity == *prepared_identity;
         if (active) {
             retired.push_back(std::move(active));
         }
@@ -167,18 +172,23 @@ public:
         active_healthy = true;
         ++active_revision;
         ++query_revision;
-        query_result = {};
-        query_completed_at.reset();
-        query_at = Clock::time_point{};
+        if (!same_identity || !query_result.error || !active_identity->settings.enabled) {
+            query_result = {};
+            query_completed_at.reset();
+            query_at = Clock::time_point{};
+        }
         ++silence_revision;
-        silence_result = {};
-        silence_completed_at.reset();
-        silence_at = Clock::time_point{};
+        if (!same_identity || !silence_result.error || !active_identity->settings.enabled) {
+            silence_result = {};
+            silence_completed_at.reset();
+            silence_at = Clock::time_point{};
+        }
         if (!active_identity->settings.enabled) {
             desired_window.reset();
             silence_enabled = false;
         }
         failure.reset();
+        retry_delay = std::min(retry_interval, maximum_retry_interval);
         health_at = Clock::now() + health_interval;
         wake.notify_one();
         return true;
@@ -195,7 +205,7 @@ public:
         }
         std::lock_guard lock(mutex);
         if ((!active_identity || !active_identity->settings.enabled)
-            && (!desired || !desired->settings.enabled)) {
+            && (!desired || !desired->settings.enabled) && !failure) {
             return {};
         }
         if (!desired_window || *desired_window != window) {
@@ -217,10 +227,14 @@ public:
         wake.notify_one();
         if (!active || !active_healthy) {
             CollectCountReading result;
-            if (active && !active_healthy) {
+            result.queried_at = query_result.queried_at;
+            if (query_result.error || failure || (active && !active_healthy)) {
                 result.status = CollectCountReadStatus::error;
-                result.error = Error{"collect_count", "connection", "connection_unavailable",
-                    "Database collection count connection is unavailable"};
+                result.error = query_result.error ? query_result.error : failure;
+                if (!result.error) {
+                    result.error = Error{"collect_count", "connection", "connection_unavailable",
+                        "Database collection count connection is unavailable"};
+                }
             }
             return result;
         }
@@ -255,7 +269,7 @@ public:
             return result;
         }
         if ((!active_identity || !active_identity->settings.enabled)
-            && (!desired || !desired->settings.enabled)) {
+            && (!desired || !desired->settings.enabled) && !failure) {
             return {};
         }
         if (!silence_enabled) {
@@ -277,10 +291,14 @@ public:
         wake.notify_one();
         if (!active || !active_healthy) {
             LogSilenceReading result;
-            if (active && !active_healthy) {
+            result.queried_at = silence_result.queried_at;
+            if (silence_result.error || failure || (active && !active_healthy)) {
                 result.status = LogSilenceReadStatus::error;
-                result.error = Error{"log_silence", "connection", "connection_unavailable",
-                    "Database last log receipt connection is unavailable"};
+                result.error = silence_result.error ? silence_result.error : failure;
+                if (!result.error) {
+                    result.error = Error{"log_silence", "connection", "connection_unavailable",
+                        "Database last log receipt connection is unavailable"};
+                }
             }
             return result;
         }
@@ -318,10 +336,11 @@ public:
                         ready = std::move(*connected);
                         ready_generation = task.generation;
                         ready_expires_at = Clock::now() + health_interval;
-                        failure.reset();
+                        retry_delay = std::min(retry_interval, maximum_retry_interval);
                     } else {
-                        failure = connected.error();
-                        retry_at = Clock::now() + retry_interval;
+                        if (!failure) failure = connected.error();
+                        retry_at = Clock::now() + retry_delay;
+                        retry_delay = std::min(retry_delay * 2, maximum_retry_interval);
                     }
                 }
                 lock.unlock();
@@ -338,13 +357,23 @@ public:
                 if (revision == active_revision) {
                     health_at = Clock::now() + health_interval;
                     if (!result) {
+                        const auto original_failure = silence_result.error ? *silence_result.error
+                            : (query_result.error ? *query_result.error : result.error());
                         active_healthy = false;
-                        query_result = {};
-                        query_completed_at.reset();
-                        silence_result = {};
-                        silence_completed_at.reset();
+                        query_result.status = CollectCountReadStatus::error;
+                        query_result.counts.clear();
+                        if (!query_result.error) {
+                            query_result.error = result.error();
+                            query_at = Clock::time_point{};
+                        }
+                        silence_result.status = LogSilenceReadStatus::error;
+                        silence_result.batch.reset();
+                        if (!silence_result.error) {
+                            silence_result.error = result.error();
+                            silence_at = Clock::time_point{};
+                        }
                         if (active_identity && desired && *active_identity == *desired) {
-                            failure = result.error();
+                            if (!failure) failure = original_failure;
                             retry_at = Clock::now();
                         }
                     }
@@ -366,16 +395,20 @@ public:
                 if (!stopping && revision == active_revision
                     && selected_query_revision == query_revision && desired_window
                     && *desired_window == window) {
-                    query_result = {};
-                    query_result.queried_at = queried_at;
                     query_completed_at = Clock::now();
                     if (result) {
+                        query_result = {};
+                        query_result.queried_at = queried_at;
                         query_result.status = CollectCountReadStatus::ready;
                         query_result.counts = std::move(*result);
                         query_at = *query_completed_at + query_interval;
                     } else {
                         query_result.status = CollectCountReadStatus::error;
-                        query_result.error = std::move(result.error());
+                        query_result.counts.clear();
+                        if (!query_result.error) {
+                            query_result.error = std::move(result.error());
+                            query_result.queried_at = queried_at;
+                        }
                         query_at = *query_completed_at + std::max(
                             std::chrono::duration_cast<Clock::duration>(query_interval),
                             std::chrono::duration_cast<Clock::duration>(retry_interval));
@@ -397,16 +430,20 @@ public:
                 lock.lock();
                 if (!stopping && revision == active_revision
                     && selected_silence_revision == silence_revision && silence_enabled) {
-                    silence_result = {};
-                    silence_result.queried_at = queried_at;
                     silence_completed_at = Clock::now();
                     if (result) {
+                        silence_result = {};
+                        silence_result.queried_at = queried_at;
                         silence_result.status = LogSilenceReadStatus::ready;
                         silence_result.batch = std::move(*result);
                         silence_at = *silence_completed_at + silence_interval;
                     } else {
                         silence_result.status = LogSilenceReadStatus::error;
-                        silence_result.error = std::move(result.error());
+                        silence_result.batch.reset();
+                        if (!silence_result.error) {
+                            silence_result.error = std::move(result.error());
+                            silence_result.queried_at = queried_at;
+                        }
                         silence_at = *silence_completed_at + std::max(
                             std::chrono::duration_cast<Clock::duration>(silence_interval),
                             std::chrono::duration_cast<Clock::duration>(retry_interval));
@@ -487,6 +524,8 @@ public:
     IMySqlConnectionFactory& factory;
     std::chrono::milliseconds retry_interval;
     std::chrono::milliseconds health_interval;
+    static constexpr std::chrono::milliseconds maximum_retry_interval{60000};
+    std::chrono::milliseconds retry_delay{};
     std::mutex mutex;
     std::condition_variable wake;
     bool stopping{};

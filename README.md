@@ -1,17 +1,17 @@
 <!-- README.md -->
 # Resource Monitor
 
-Oracle Linux 8/9용 C++23 시스템 모니터링 데몬입니다. 기본 60초마다 CPU, 메모리, 마운트된 로컬 디스크 파일시스템을 수집하고 매 수집 주기의 전체 결과를 OS 시간대와 UTC 오프셋을 포함한 파일명으로 저장합니다. 예를 들어 OS가 Asia/Seoul이면 `/Monitor/20261019T123400+0900.json`에 저장합니다. `is_analyzer`에 맞는 Java `-DAPP` 프로세스의 실행 여부도 같은 JSON에 기록하며, 1.6.0부터 역할별 대상 목록을 설정 파일에서 재시작 없이 변경할 수 있습니다. 분석 장비에서는 `CloudESM.SUM_COLLECT_INFO_1DAY`의 일별 수집 건수 변동과 `CloudESM.SUM_COLLECT_INFO`의 장비별 로그 무수신 상태를 함께 기록합니다. 1.7.0부터 무수신 감시 대상 IP는 매 DB 조회에서 자동으로 발견합니다. 1.8.0부터 수집 장비의 처리 폴더를 60초마다 검사하여 `.tmp`·`.done` 파일 개수가 설정한 임계치 이상인 항목만 결과에 추가합니다. `/etc/resource-monitor/settings.json`에서 수집 주기, 저장 경로, 장비 역할, DAPP 목록, 임계치, 분석 기준과 MySQL 연결을 관리합니다. DB 사용자명과 비밀번호는 `/etc/resource-monitor/secrets/mysql.json`으로 분리합니다. 리소스 임계치는 경고 판정에 적용하며 모든 수집 주기의 파일을 남깁니다. 1.9.0부터 현재 저장 경로의 모니터링 JSON 중 수집 시각이 1시간 이상 지난 파일을 자동 삭제합니다.
+Oracle Linux 8/9용 C++23 시스템 모니터링 데몬입니다. 기본 60초마다 CPU, 메모리, 마운트된 로컬 디스크 파일시스템을 수집하고 매 수집 주기의 전체 결과를 OS 시간대와 UTC 오프셋을 포함한 파일명으로 저장합니다. 예를 들어 OS가 Asia/Seoul이면 `/Monitor/20261019T123400+0900.json`에 저장합니다. `is_analyzer`에 맞는 Java `-DAPP` 프로세스의 실행 여부도 같은 JSON에 기록하며, 1.6.0부터 역할별 대상 목록을 설정 파일에서 재시작 없이 변경할 수 있습니다. 분석 장비에서는 `CloudESM.SUM_COLLECT_INFO_1DAY`의 일별 수집 건수 변동과 `CloudESM.SUM_COLLECT_INFO`의 장비별 로그 무수신 상태를 함께 기록합니다. 1.7.0부터 무수신 감시 대상 IP는 매 DB 조회에서 자동으로 발견합니다. 1.8.0부터 수집 장비의 처리 폴더를 60초마다 검사하여 `.tmp`·`.done` 파일 개수가 설정한 임계치 이상인 항목만 결과에 추가합니다. `/etc/resource-monitor/settings.json`에서 수집 주기, 저장 경로, 장비 역할, DAPP 목록, 임계치, 분석 기준과 MySQL 연결을 관리합니다. DB 사용자명과 비밀번호는 `/etc/resource-monitor/secrets/mysql.json`으로 분리합니다. 리소스 임계치는 경고 판정에 적용하며 모든 수집 주기의 파일을 남깁니다. 1.10.0은 모니터링 JSON 자동 삭제 여부와 보존 시간을 설정으로 변경하고, 일별 건수와 무수신 조회의 DB 연결·작업 스레드를 분리합니다. 결과 JSON에는 임계값 자체를 기록하지 않으며 임계값은 `settings.json`에서 관리합니다.
 
 ## 구성
 
 | 위치 | 책임 |
 | --- | --- |
 | `src/domain` | 측정 모델, 계산식, 임계치 규칙, 상태 집계 |
-| `src/application` | 수집·설정 전체 적용·실패 시 기존 설정 유지·프로세스 대상 선택·저장 유스케이스와 포트 |
+| `src/application` | 수집·일반 설정 적용·유효 설정 유지·DB 연결 전환 조정·프로세스 대상 선택·저장·보존 유스케이스와 포트 |
 | `src/infrastructure/linux` | procfs의 리소스·Java 프로세스, mountinfo, 파일시스템 용량 수집과 비동기 처리 파일 검사 |
 | `src/infrastructure/config` | 사용자 설정·MySQL 계정 JSON 파싱·검증과 설정 포트 구현 |
-| `src/infrastructure/database` | MySQL 연결 준비·교체·연결 확인과 비동기 일별 수집 건수·마지막 로그 수신 시각 조회 |
+| `src/infrastructure/database` | 일별 건수와 무수신 조회 각각의 MySQL 연결 준비·교체·연결 확인·재시도와 비동기 조회 |
 | `src/infrastructure/persistence` | 저장 경로 검증·잠금·전환, JSON 직렬화와 원자적 파일 저장 |
 | `src/runtime` | 단조 시계 수집·설정 확인 타이머, 종료 신호 |
 | `src/main.cpp` | 구성 객체 생성과 의존성 주입 |
@@ -117,6 +117,10 @@ SELinux가 Enforcing인 실제 서버에서 파일 쓰기와 디렉터리 접근
     "interval_seconds": 60,
     "output_directory": "/Monitor"
   },
+  "retention": {
+    "enabled": true,
+    "max_age_seconds": 3600
+  },
   "thresholds": {
     "cpu_usage_percent": 80.0,
     "memory_usage_percent": 85.0,
@@ -151,11 +155,13 @@ SELinux가 Enforcing인 실제 서버에서 파일 쓰기와 디렉터리 접근
 | `processing_files.thresholds.normalize.done_count` | 0~1,000,000,000,000 정수, 기본 100개 | 다음 수집부터 normalize 하위 `.done` 합계에 적용 |
 | `collection.interval_seconds` | 1~86400의 정수, 기본 60초 | 다음 설정 확인 후 새 주기 시작 |
 | `collection.output_directory` | 제어문자가 없는 절대 경로, 기본 `/Monitor` | 다음 설정 확인 후 저장부터 |
+| `retention.enabled` | JSON 불리언, 기본 `true` | 다음 설정 확인 후 정리부터; `false`이면 오래된 JSON도 삭제하지 않음 |
+| `retention.max_age_seconds` | 60~31536000의 정수, 기본 3600초 | 다음 60초 정리 시 새 보존 시간 적용 |
 | `thresholds.cpu_usage_percent` | 0~100의 숫자 | 다음 설정 확인 후 수집부터 |
 | `thresholds.memory_usage_percent` | 0~100의 숫자 | 다음 설정 확인 후 수집부터 |
 | `thresholds.storage_usage_percent` | 0~100의 숫자 | 다음 설정 확인 후 수집부터 |
 
-세 리소스 임계치는 필수이며 유한한 숫자여야 합니다. 리소스 임계치의 0은 항상 경고를 발생시킵니다. `collection`, `analyzer`, `process_monitor`, `log_silence`, `processing_files` 또는 그 하위 설정을 생략하면 해당 기본값을 사용하므로 이전 설정 JSON도 읽을 수 있습니다. 설정 키의 정확한 이름은 `is_analyzer`이며 `is_anlayzer`는 허용하지 않습니다. 잘못된 자료형, null, 필수 키 누락, 중복 키, 알 수 없는 키, 지원하지 않는 스키마 버전은 거부합니다. 설정은 최대 64KiB의 일반 파일이어야 하며 심볼릭 링크와 FIFO는 허용하지 않습니다. 새로운 동작 설정은 이름·자료형·검증 규칙을 정의해 추가합니다.
+세 리소스 임계치는 필수이며 유한한 숫자여야 합니다. 리소스 임계치의 0은 항상 경고를 발생시킵니다. `collection`, `retention`, `analyzer`, `process_monitor`, `log_silence`, `processing_files` 또는 그 하위 설정을 생략하면 해당 기본값을 사용하므로 이전 설정 JSON도 읽을 수 있습니다. `retention`을 생략하면 이전 1.9.0과 같은 자동 삭제 활성화·1시간 보존을 사용합니다. 설정 키의 정확한 이름은 `is_analyzer`이며 `is_anlayzer`는 허용하지 않습니다. 잘못된 자료형, null, 필수 키 누락, 중복 키, 알 수 없는 키, 지원하지 않는 스키마 버전은 거부합니다. 설정은 최대 64KiB의 일반 파일이어야 하며 심볼릭 링크와 FIFO는 허용하지 않습니다. 새로운 동작 설정은 이름·자료형·검증 규칙을 정의해 추가합니다.
 
 데몬은 수집 주기와 별도로 1초마다 설정 파일 전체를 확인하므로 재시작 없이 모든 항목을 자동 반영합니다. `is_analyzer`가 `true`인 경우에만 계정 파일을 확인하고 DB 연결을 준비합니다. 파일을 직접 수정하는 방식과 새 파일로 원자 교체하는 방식 모두 지원합니다. 진행 중인 동기 수집·파일 작업이 오래 걸리면 확인도 그 작업이 끝난 뒤 수행됩니다. 명시한 `--interval-seconds`와 `--output` 옵션은 실행 중에도 각각 JSON의 값을 덮어씁니다. 기본 systemd 서비스는 이 옵션들을 지정하지 않아 파일 설정을 사용합니다.
 
@@ -165,9 +171,9 @@ SELinux가 Enforcing인 실제 서버에서 파일 쓰기와 디렉터리 접근
 
 사용률이 임계치 이상이면 `warning`, 미만이면 `ok`, 측정 불가면 `unknown`입니다. 표시를 위해 값을 먼저 반올림하지 않습니다. 스토리지는 파일시스템 각각에 같은 임계치를 적용합니다. 임계치 아래로 내려오면 다음 측정부터 즉시 `ok`로 돌아옵니다.
 
-설정 파일 검증, 새 저장 경로 준비와 필요한 MySQL 연결 준비를 모두 성공한 경우에만 수집 주기·경로·임계치·DB 설정을 한 번에 적용합니다. 새 경로는 디렉터리 잠금을 확보하고 실제 임시파일 쓰기·동기화·정리를 확인한 뒤 전환합니다. 기존 경로의 잠금은 전환 완료 시 해제합니다. 같은 디렉터리를 가리키는 경로 별칭은 기존 잠금을 재사용합니다.
+설정 파일 검증과 새 저장 경로 준비에 성공하면 수집 주기·경로·임계치·보존 정책·장비 역할 등 일반 설정을 적용합니다. DB 연결 준비나 재연결이 실패해도 유효한 일반 설정 변경은 반영합니다. DB 연결은 각 조회 채널에서 후보 연결 검증이 끝난 뒤 따로 전환합니다. 새 저장 경로는 디렉터리 잠금을 확보하고 실제 임시파일 쓰기·동기화·정리를 확인한 뒤 전환합니다. 기존 경로의 잠금은 전환 완료 시 해제합니다. 같은 디렉터리를 가리키는 경로 별칭은 기존 잠금을 재사용합니다.
 
-문서 오류, 없는 경로, 권한 부족, 다른 데몬의 잠금 등으로 변경을 적용하지 못하면 기존 설정 전체로 수집을 계속하고 JSON에 `config_status=using_last_valid`와 오류를 기록합니다. 실패 원인은 journal에도 남깁니다. 매초 다시 시도하므로 디렉터리를 준비하거나 잠금을 해제하면 파일을 다시 수정하지 않아도 자동 반영합니다. DB 연결 실패의 재시도 간격은 5초입니다. 시작부터 설정 문서가 잘못된 경우 종료 코드 78로 실패하며 systemd는 이 코드로 반복 재시작하지 않습니다. `--check-config`는 문서 형식과 `is_analyzer`가 `true`일 때 계정 파일을 검증합니다. DB 네트워크 접속과 실제 저장 경로 준비는 실행 시 검증합니다.
+문서 오류, 없는 경로, 권한 부족, 다른 데몬의 잠금 등으로 일반 설정 변경을 적용하지 못하면 기존 유효 설정으로 수집을 계속하고 JSON에 `config_status=using_last_valid`와 오류를 기록합니다. 실패 원인은 journal에도 남깁니다. 매초 다시 시도하므로 디렉터리를 준비하거나 잠금을 해제하면 파일을 다시 수정하지 않아도 자동 반영합니다. `config_status`는 일반 설정의 유효성과 적용 상태이며 DB 접속 성공 여부를 뜻하지 않습니다. 시작부터 설정 문서가 잘못된 경우 종료 코드 78로 실패하며 systemd는 이 코드로 반복 재시작하지 않습니다. `--check-config`는 문서 형식과 `is_analyzer`가 `true`일 때 계정 파일을 검증합니다. DB 네트워크 접속과 실제 저장 경로 준비는 실행 시 검증합니다.
 
 사용자가 수정한 파일을 데몬이 덮어쓰지 않습니다. 편집 중간의 일시적 파싱 실패를 줄이려면 같은 디렉터리에 새 파일을 작성·검증한 뒤 원자적으로 교체하십시오. 별도 검증 명령은 다음과 같습니다.
 
@@ -221,15 +227,17 @@ sudo -u resource-monitor /usr/sbin/resource-monitor --check-config
 
 위 `/path/to/trusted-ca.pem`은 DB 관리자가 제공한 CA 인증서의 실제 경로로 바꾸십시오. `settings.json`에서 DB 주소·데이터베이스·TLS 설정을 맞추고 최상위 `is_analyzer`를 `true`로 변경하면 실행 중인 데몬이 연결을 준비합니다. `secrets/mysql.json`은 평문이므로 전용 서비스 계정과 root만 읽을 수 있도록 디렉터리와 파일 권한을 유지해야 합니다. 계정 파일은 root 또는 현재 실행 계정이 소유한 최대 16KiB의 일반 파일이어야 하며 권한은 0600 또는 0640만 허용합니다. 심볼릭 링크와 FIFO도 허용하지 않습니다. 사용자명은 제어문자가 없는 1~128바이트, 비밀번호는 NUL 문자가 없는 1~4096바이트 문자열입니다. 실제 파일과 `.env`는 Git 및 소스 패키지에서 제외하고, 배포본에는 예제 값이 있는 계정 템플릿만 포함합니다.
 
-DB 사용이 허용된 동안 설정과 계정 파일을 1초마다 다시 읽으므로 비밀번호만 바꾸어도 재연결합니다. 새 연결과 `SELECT 1` 확인은 별도 작업 스레드에서 수행하여 기존 리소스 수집을 계속합니다. 준비된 연결이 성공하고 설정 전체를 적용할 수 있을 때 기존 연결을 교체합니다. 그동안 주소·계정 오류, 접속 거부, TLS 오류가 발생하면 기존 연결과 설정 전체를 유지하고 5초 간격으로 다시 시도합니다. 대기 중 파일을 다시 수정하면 최신 설정에 맞는 연결만 채택합니다.
+DB 사용이 허용된 동안 설정과 계정 파일을 1초마다 다시 읽으므로 비밀번호만 바꾸어도 재연결합니다. 1.10.0은 일별 건수 조회와 무수신 조회에 각각 독립된 `MySqlConfiguration` 작업 스레드와 DB 세션을 사용합니다. 무수신 조회의 지연이나 연결 실패가 일별 건수 조회의 연결을 막지 않으며, 리소스 수집도 DB 결과를 기다리지 않습니다. 두 조회는 DB 서버 자원을 공유하므로 서버 측 부하는 별도로 확인해야 합니다.
+
+새 연결과 `SELECT 1` 확인에 성공한 채널부터 연결을 교체합니다. 후보 연결 검증 중에도 해당 채널의 기존 연결이 정상이면 계속 사용합니다. 주소·계정 오류, 접속 거부, TLS 오류가 발생해도 수집 주기·저장 경로·임계치·보존 정책 변경은 반영하며, 연결 실패는 5초부터 10·20·40초로 재시도 간격을 늘리고 최대 60초로 제한합니다. 연결 성공 또는 접속 설정 변경 시 지연을 초기화합니다. 대기 중 파일을 다시 수정하면 최신 설정에 맞는 연결만 채택합니다.
 
 `is_analyzer`를 `false`로 바꾸거나 삭제하면 다음 설정 확인에서 기존 연결을 닫고 새 DB 연결·쿼리·계정 파일 읽기를 중단합니다. 데몬을 재시작할 필요가 없습니다. 이미 작업 스레드에 전달된 연결이나 쿼리는 완료될 수 있지만 비활성화 이전 작업의 결과는 채택하지 않습니다. 다시 `is_analyzer`를 `true`로 설정하면 최신 설정과 계정 파일로 연결을 준비합니다.
 
-처음 실행할 때 DB에 연결할 수 없거나 계정 파일이 잘못되어도 리소스 수집은 시작 설정의 수집 주기·저장 경로·임계치로 계속합니다. 연결이 준비될 때까지 DB는 비활성 상태이고 `config_status=using_last_valid`와 계정 값을 제외한 오류를 기록합니다. DB 접속 성공 후에는 연결 설정 오류가 해제됩니다. DB 오류는 CPU·메모리·스토리지 각각의 사용률과 상태를 변경하지 않으며, 분석을 완료하지 못하면 전체 `status`는 아래 JSON 계약에 따라 판정합니다. 사용자명·비밀번호와 DB 서버가 반환한 원문 오류는 journal 및 결과 JSON에 기록하지 않습니다.
+처음 실행할 때 DB에 연결할 수 없거나 계정 파일이 잘못되어도 리소스 수집은 유효한 수집 주기·저장 경로·임계치로 계속합니다. 첫 연결을 준비하는 동안에는 `pending`, 실패가 확인되면 해당 분석의 `status=error`와 오류를 기록합니다. 재시도를 시작했다는 이유만으로 기존 실패를 `connection_pending`으로 덮어쓰지 않습니다. DB 라이브러리가 제공한 숫자 오류 코드는 `error.code`에 보존하며 사용자명·비밀번호와 서버 원문 오류는 기록하지 않습니다. 연결과 조회가 복구되면 정상 결과를 다시 사용합니다. DB 오류는 CPU·메모리·스토리지 각각의 사용률과 상태를 변경하지 않으며, 분석을 완료하지 못하면 전체 `status`는 아래 JSON 계약에 따라 판정합니다.
 
 DB 사용이 허용된 정상 연결은 30초마다 `SELECT 1`로 확인하며 끊어진 연결은 현재 설정으로 다시 준비합니다. 저장 경로 오류 등으로 적용을 기다리는 후보 연결도 30초가 지나면 새로 연결·검증합니다. 시간 제한은 연결 라이브러리의 네트워크 작업에 적용되며 운영체제의 DNS 조회 시간을 제한하지는 않습니다. 종료 시 진행 중인 DB 작업을 기다리고, systemd의 기존 `TimeoutStopSec=15`를 초과하면 systemd가 프로세스를 종료합니다.
 
-DB에 실행하는 SQL은 연결 확인용 `SELECT 1`과 아래 일별 수집 건수 조회뿐입니다. 테이블과 데이터를 생성·수정·삭제하지 않습니다. DB 계정에는 접속 데이터베이스에 대한 접근 권한과 `CloudESM.SUM_COLLECT_INFO_1DAY`의 `SELECT` 권한이 필요합니다. 조회 대상은 완전한 테이블명으로 고정되어 있으므로 `mysql.database`가 다른 데이터베이스여도 이 테이블을 조회합니다.
+DB에 실행하는 SQL은 연결 확인용 `SELECT 1`, 아래 일별 수집 건수 조회와 마지막 로그 수신 시각 조회입니다. 테이블과 데이터를 생성·수정·삭제하지 않습니다. DB 계정에는 접속 데이터베이스에 대한 접근 권한과 `CloudESM.SUM_COLLECT_INFO_1DAY`, `CloudESM.SUM_COLLECT_INFO`의 `SELECT` 권한이 필요합니다. 조회 대상은 완전한 테이블명으로 고정되어 있으므로 `mysql.database`가 다른 데이터베이스여도 두 테이블을 조회합니다.
 
 ## 장비별 일별 수집 건수 분석
 
@@ -273,7 +281,6 @@ LIMIT 10001;
     "status": "warning",
     "current_day": 20261018,
     "previous_day": 20261017,
-    "threshold_percent": 10.0,
     "queried_at": "2026-10-19T12:33:59.123+09:00",
     "equipment_count": 2,
     "alerts": [
@@ -335,7 +342,43 @@ LIMIT 10001;
 
 실제 대상 테이블은 `CloudESM.SUM_COLLECT_INFO`입니다. `SUM_COLLCECT_INFO`는 테이블명 오기입니다. 확인한 주요 컬럼은 `eqp_ip varchar(39)`, `recv_time bigint`, `reg_time bigint`, `count int`이며, `recv_time`은 `YYYYMMDDHHmm` 형식의 분 단위 로그 수집 시각입니다. `reg_time`은 수집 현황 등록 시각이므로 마지막 로그 수신 판정에 사용하지 않습니다.
 
-`is_analyzer=true`일 때 수집 주기에 맞춰 백그라운드 DB worker가 전체 테이블을 `eqp_ip`별로 집계합니다. 각 장비의 `count > 0`인 행 중 가장 큰 `recv_time`을 마지막 수신 분으로 사용합니다. 장비 IP는 SQL 조회 결과에서 가져오며 소스 코드나 설정 파일의 목록으로 제한하지 않습니다. 새 IP는 다음 조회부터 자동으로 나타나고 테이블에서 모든 행이 제거된 IP는 다음 조회부터 결과에서 사라집니다. NULL·빈 `eqp_ip`는 장비 식별이 불가능하므로 제외합니다. 최대 10,000개 장비를 지원하며 한도를 넘기면 결과를 자르는 대신 오류를 기록합니다.
+`is_analyzer=true`일 때 수집 주기에 맞춰 무수신 전용 DB 작업 스레드가 장비별 마지막 수신 분을 조회합니다. 각 장비의 `count > 0`인 행 중 가장 큰 `recv_time`을 사용합니다. 장비 IP는 매번 DB의 전체 `eqp_ip`에서 발견하며 소스 코드나 설정 파일의 목록으로 제한하지 않습니다. 새 IP는 다음 조회부터 자동으로 나타나고 테이블에서 모든 행이 제거된 IP는 다음 조회부터 결과에서 사라집니다. NULL·빈 `eqp_ip`는 장비 식별이 불가능하므로 제외합니다. 최대 10,000개 장비를 지원하며 한도를 넘기면 결과를 자르는 대신 오류를 기록합니다.
+
+기존 쿼리도 DB 서버에서 `GROUP BY eqp_ip`와 `MAX(CASE WHEN count > 0 THEN recv_time END)`를 계산하여 장비별 결과만 반환합니다. 1.10.0은 사용할 수 있는 인덱스를 확인하면 `DISTINCT eqp_ip`로 모든 장비를 발견하고, 장비별로 `count > 0` 조건에 맞는 최신 행을 `ORDER BY recv_time DESC LIMIT 1`로 조회합니다. 데몬에 전달되는 값은 장비 IP, 마지막 수신 분, 그 시각의 epoch와 조회 기준 DB 시각 네 열입니다. 원본 로그 행 전체를 클라이언트로 가져오거나 전체 수집 건수를 `COUNT`하지 않습니다.
+
+인덱스 확인은 각 DB 세션에서 `SHOW INDEX`로 한 번 수행합니다. 사용 조건은 선두 열이 `(eqp_ip, recv_time, count)` 순서이고, 접두 길이로 잘리지 않은 세 열을 포함하는 사용 가능한 BTREE 인덱스입니다. 무시 또는 비가시 상태인 인덱스는 선택하지 않습니다. 조건에 맞으면 다른 이름의 기존 인덱스도 사용할 수 있습니다. 없으면 기존의 DB 집계 쿼리를 사용하여 인덱스 없는 장비별 반복 검색을 피합니다. 인덱스를 추가·변경한 뒤에는 데몬을 재시작하거나 해당 DB 연결을 새로 맺어야 선택이 갱신됩니다.
+
+오랫동안 수신하지 않은 장비도 발견해야 하므로 최근 시각 조건으로 조회 범위를 잘라내지 않습니다. 양수 `count`가 없는 장비도 결과에 남으며 마지막 수신 시각은 `null`입니다. 그런 장비에 0건 기록이 많이 쌓였거나 최근 기록 대부분이 0건이면 해당 장비의 인덱스 범위를 여러 행 검사할 수 있습니다. 실제 조회의 `EXPLAIN`, 테이블 크기·인덱스와 실행 시간을 확인해 효과를 판단하십시오. 연결 실패 로그만으로 집계 시간 초과를 원인으로 확정하지 말고 보존된 오류 코드와 DB 서버 상태를 함께 확인해야 합니다.
+
+### 무수신 조회 인덱스 준비
+
+RPM은 DBA가 선택해 실행할 SQL을 `/usr/share/resource-monitor/sql/log_silence_index.sql`에 설치합니다. 소스 파일은 `packaging/sql/log_silence_index.sql`입니다. 데몬과 RPM 설치 스크립트는 이 DDL을 실행하지 않으며 데몬 계정은 두 모니터링 테이블의 `SELECT` 권한을 유지합니다.
+
+DBA는 먼저 `SHOW INDEX`에서 같은 역할의 인덱스가 이미 있는지 확인합니다. `Seq_in_index` 1·2·3이 각각 `eqp_ip`, `recv_time`, `count`이고 `Sub_part`가 모두 NULL인 BTREE 인덱스가 사용 가능한 상태라면 별도 인덱스를 중복 생성할 필요가 없습니다.
+
+```sql
+SHOW INDEX FROM CloudESM.SUM_COLLECT_INFO;
+```
+
+필요한 경우 제공 SQL은 다음 인덱스를 생성합니다.
+
+```sql
+CREATE INDEX IF NOT EXISTS ix_resource_monitor_eqp_recv_count
+ON CloudESM.SUM_COLLECT_INFO (eqp_ip, recv_time, `count`)
+ALGORITHM=INPLACE LOCK=NONE;
+```
+
+이 작업은 해당 테이블의 `INDEX` 권한이 있는 DBA 계정으로 수행합니다. `IF NOT EXISTS`는 인덱스 이름의 존재만 확인하므로 같은 이름에 다른 열 정의가 있어도 수정하지 않습니다. 실행 전후 `SHOW INDEX`로 실제 정의를 확인하십시오. 온라인 DDL 옵션을 지정해도 메타데이터 잠금 대기가 발생할 수 있으며 엔진·버전에 따라 지원 여부를 확인해야 합니다. [MariaDB CREATE INDEX 문서](https://mariadb.com/docs/server/reference/sql-statements/data-definition/create/create-index)
+
+DB 서버에서 로컬 소켓으로 관리자 접속이 가능한 경우, Linux 셸에서 다음처럼 실행합니다. 비밀번호는 프롬프트에서 입력합니다. 원격 DB를 관리하는 경우에는 관리자가 사용하는 호스트·포트·계정 옵션을 추가합니다.
+
+```bash
+mariadb -u root -p CloudESM -e 'SHOW INDEX FROM CloudESM.SUM_COLLECT_INFO;'
+mariadb -u root -p CloudESM < /usr/share/resource-monitor/sql/log_silence_index.sql
+systemctl restart resource-monitor
+```
+
+DB 서버와 데몬 서버가 다르면 SQL은 DB에 적용하고 서비스 재시작은 데몬 서버에서 수행합니다. 테이블 원본 데이터의 생성·수정·삭제는 수행하지 않습니다.
 
 ```json
 "log_silence": {
@@ -354,7 +397,6 @@ DB에는 초 단위 수신 시각이 없으므로 해당 분의 끝을 기준으
 "log_silence": {
   "source": "CloudESM.SUM_COLLECT_INFO",
   "status": "warning",
-  "default_timeout_seconds": 300,
   "last_received_precision_seconds": 60,
   "checked_at": "2026-10-19T14:07:00.000+09:00",
   "queried_at": "2026-10-19T14:07:00.020+09:00",
@@ -363,7 +405,6 @@ DB에는 초 단위 수신 시각이 없으므로 해당 분의 끝을 기준으
     {
       "eqp_ip": "192.0.2.10",
       "last_received_at": "2026-10-19T14:00:00.000+09:00",
-      "timeout_seconds": 300,
       "silent_for_seconds": 360,
       "status": "warning",
       "reason": "timeout_exceeded"
@@ -375,7 +416,7 @@ DB에는 초 단위 수신 시각이 없으므로 해당 분의 끝을 기준으
 
 `checked_at`은 조회 당시 DB 시각이고 `queried_at`은 데몬이 조회를 완료한 시각입니다. 저장 시각으로 오래된 조회 결과를 계속 늘려 오경보를 만들지 않도록 판정은 `checked_at`을 기준으로 합니다. DB 수신 시각은 DB 세션의 시간대에서 epoch로 변환하고 JSON은 기존처럼 OS 시간대와 UTC 오프셋으로 출력합니다. 허용 수명보다 오래된 캐시는 `pending`으로 처리합니다.
 
-장비별 `reason`은 정상 `receiving`, 시간 초과 `timeout_exceeded`, 양수 수집 기록 없음 `no_received_data`, 미래 수신 시각 `future_received_time`입니다. 양수 수집 기록이 없으면 마지막 시각과 무수신 시간은 `null`이며 경고로 기록합니다. 미래 수신 시각은 정상으로 간주하지 않고 `unknown`으로 표시합니다. 빈 테이블은 `no_data`, DB 조회 실패는 `error`, 조회 준비 중에는 `pending`, 수집 서버(`is_analyzer=false`)에서는 `disabled`입니다.
+장비별 `reason`은 정상 `receiving`, 시간 초과 `timeout_exceeded`, 양수 수집 기록 없음 `no_received_data`, 미래 수신 시각 `future_received_time`입니다. 양수 수집 기록이 없으면 마지막 시각과 무수신 시간은 `null`이며 경고로 기록합니다. 미래 수신 시각은 정상으로 간주하지 않고 `unknown`으로 표시합니다. 빈 테이블은 `no_data`, DB 접속·조회 실패는 `error`, 최초 조회 준비 중에는 `pending`, 수집 서버(`is_analyzer=false`)에서는 `disabled`입니다. DB 실패 시 장비 목록을 새 무수신 경고로 만들거나 과거 결과의 무수신 시간을 계속 늘리지 않습니다. `log_silence.error`와 최상위 `errors`에서 원인을 확인하며, 재시도 중에도 확인된 오류가 유지됩니다.
 
 무수신 경고는 최상위 `status=warning`에 반영합니다. `pending`, `no_data`, `error`는 다른 경고가 없으면 최상위 `unknown`에 반영하며 리소스 전용 `collection_status`에는 영향을 주지 않습니다. DB 오류 중에도 CPU·메모리·디스크·DAPP 수집과 JSON 저장은 계속합니다. 이 기능은 로그 수신을 관측하며 장비 프로세스를 중지·시작하거나 DB 원본 데이터를 변경하지 않습니다.
 
@@ -395,8 +436,7 @@ DB에는 초 단위 수신 시각이 없으므로 해당 분의 끝을 기준으
     {
       "path": "/CloudESM/data/processing/collector",
       "extension": ".tmp",
-      "count": 100,
-      "threshold": 100
+      "count": 100
     }
   ]
 }
@@ -418,8 +458,7 @@ DB에는 초 단위 수신 시각이 없으므로 해당 분의 끝을 기준으
 | `hostname` | 수집 호스트 |
 | `status` | `ok`, `warning`, `unknown` |
 | `collection_status` | `ok`, `partial`, `error` |
-| `config_status` | `ok`, `using_last_valid` |
-| `applied_thresholds` | 이 결과에 실제 적용한 세 임계치 |
+| `config_status` | 일반 설정이 유효하게 적용되면 `ok`, 문서·저장 경로 적용 실패로 기존 유효 설정을 쓰면 `using_last_valid`; DB 상태와 구분 |
 | `missed_intervals` | 이번 결과 전에 건너뛴 실행 주기 수 |
 | `cpu` | 관측 구간 초, 사용률, iowait 비율, steal 비율, 상태 |
 | `memory` | 전체·사용·가용 bytes, 사용률, 상태 |
@@ -427,16 +466,18 @@ DB에는 초 단위 수신 시각이 없으므로 해당 분의 끝을 기준으
 | `process_profile` | 현재 적용된 `is_analyzer`에 따른 `analyzer` 또는 `collector` |
 | `process_status` | 대상 모두 실행 중이면 `ok`, 미실행 대상이 있으면 `warning`, 관측 불가로 존재 여부를 확정하지 못하면 `unknown` |
 | `processes` | 선택한 모든 DAPP 이름을 키로 갖는 객체. 실행 중은 `true`, 미실행은 `false`, 확인 불가는 `null` |
-| `collect_count` | 조회 대상, `disabled`·`pending`·`ok`·`warning`·`no_data`·`error` 상태, 비교 날짜, 적용 임계치, 조회 완료 시각, 장비 수, 경고 목록과 오류 |
-| `log_silence` | DB에서 발견한 장비별 마지막 수신 시각·무수신 시간·상태·제한 시간과 조회 정보 |
+| `collect_count` | 조회 대상, `disabled`·`pending`·`ok`·`warning`·`no_data`·`error` 상태, 비교 날짜, 조회 완료 시각, 장비 수, 경고 목록과 오류 |
+| `log_silence` | DB에서 발견한 장비별 마지막 수신 시각·무수신 시간·상태와 조회 정보 |
 | `processing_files` | 수집 장비에서 파일 개수가 임계치 이상인 경우에만 존재. 검사 시각, 고정 검사 주기, 해당 경고 목록 |
 | `errors` | component, target, code, message로 구성된 오류 목록 |
+
+1.10.0부터 결과 JSON에서 `applied_thresholds`, `collect_count.threshold_percent`, `log_silence.default_timeout_seconds`, `log_silence.equipment[].timeout_seconds`, `processing_files.alerts[].threshold`를 제거했습니다. 임계값은 `settings.json`에서 변경하고 결과 파일에는 실제 측정값과 판정 결과를 기록합니다. `thresholds_applied_at`은 임계값 자체가 아닌 적용 시각 메타데이터이므로 유지합니다. 이전 JSON을 소급 수정하지 않으므로 결과를 읽는 프로그램은 버전에 따라 해당 필드가 없을 수 있음을 처리해야 합니다.
 
 전체 `status`는 리소스, Java 프로세스, 일별 수집 건수 분석, 로그 무수신, 처리 파일 개수 중 하나라도 경고면 `warning`, 경고 없이 측정 불가가 있으면 `unknown`, 모두 정상 측정되고 임계치 미만이면 `ok`입니다. 분석의 `pending`, `error`, `no_data`와 프로세스 관측의 `unknown`은 다른 항목이 모두 정상이더라도 전체 `status=unknown`으로 반영하며 분석의 `disabled`는 전체 상태에 영향을 주지 않습니다. 처리 파일 검사의 `pending`, `partial`, `error`도 다른 경고가 없으면 전체 `unknown`에 반영하며 분석 서버에서 비활성화된 검사는 전체 상태에 영향을 주지 않습니다. `ok`, `warning`, `unknown` 모두 매 수집 주기에 JSON으로 기록합니다. `collection_status`는 CPU·메모리·스토리지 수집 상태만 나타내며 프로세스·DB 분석·파일 개수·설정 오류로 변경하지 않습니다. 예를 들어 디스크 하나가 경고이고 다른 디스크가 수집 실패이면 `status=warning`, `collection_status=partial`인 전체 결과를 저장합니다. 실행 중 발생한 수집·프로세스 관측·설정·분석·처리 파일 검사 오류는 해당 주기의 JSON `errors`와 journal에 기록하며 DB 분석 오류는 `collect_count.error` 또는 `log_silence.error`에도 표시합니다.
 
 측정할 수 없는 리소스 값은 0 대신 JSON null입니다. 리소스의 이전 결과를 현재 측정값처럼 재사용하지 않습니다. DB 분석은 위에서 설명한 캐시와 `queried_at`으로 조회 시점을 구분하며, 날짜별 행이 없는 경우에만 건수 0과 존재 여부를 함께 사용합니다. 빈 파일시스템 목록은 모든 디스크 정상으로 취급하지 않습니다.
 
-파일명은 `YYYYMMDDTHHMMSS+HHMM.json` 또는 음수 오프셋의 같은 형식을 사용합니다. UTC로 설정된 OS에서도 JSON에는 `+00:00`, 파일명에는 `+0000`을 명시하며 `Z`를 붙이지 않습니다. 시간대가 일광 절약 시간을 사용하면 해당 시각의 오프셋을 기록하므로 시계가 되돌아가 같은 지역 시각이 반복되어도 파일명을 구분할 수 있습니다. 이전 버전의 `Z` 형식도 읽으며, 모니터링 JSON 형식이 확인되면 같은 1시간 보존 규칙을 적용합니다.
+파일명은 `YYYYMMDDTHHMMSS+HHMM.json` 또는 음수 오프셋의 같은 형식을 사용합니다. UTC로 설정된 OS에서도 JSON에는 `+00:00`, 파일명에는 `+0000`을 명시하며 `Z`를 붙이지 않습니다. 시간대가 일광 절약 시간을 사용하면 해당 시각의 오프셋을 기록하므로 시계가 되돌아가 같은 지역 시각이 반복되어도 파일명을 구분할 수 있습니다. 이전 버전의 `Z` 형식도 읽으며, 모니터링 JSON 형식이 확인되면 현재 `retention` 보존 설정을 적용합니다.
 
 ## 측정 기준
 
@@ -472,11 +513,24 @@ SIGTERM/SIGINT는 signalfd로 처리하며 대기 중 즉시 종료할 수 있�
 
 기본 결과 파일 권한은 0640이며 systemd의 umask 0027이 적용됩니다. `.resource-monitor.lock`은 동일 출력 디렉터리에 대한 중복 실행을 막는 잠금 파일입니다. 저장기는 잠금을 확보한 디렉터리 FD에 결과를 기록하며, 경로가 외부에서 교체되어도 다른 디렉터리를 임의로 따라가지 않습니다. 실행 중 잠금 파일을 삭제하거나 교체하지 마십시오. 이전·준비 실패 경로의 잠금 파일은 남을 수 있으며 파일 존재 자체가 잠금 보유를 뜻하지는 않습니다.
 
-### 모니터링 JSON 1시간 보존
+### 모니터링 JSON 보존 설정
 
-1.9.0은 데몬 시작 시 한 번, 이후 수집 주기와 독립된 60초 타이머로 오래된 모니터링 JSON을 정리합니다. 파일명에 기록된 **수집 시각부터 3,600초 이상** 지난 파일이 대상이며, 정확히 1시간인 파일도 삭제합니다. 파일시스템의 수정 시각이나 ctime으로 생성 시각을 추정하지 않습니다. JSON 본문의 `timestamp`와 파일명의 시각이 일치하는지도 확인합니다. 시간대 오프셋을 UTC 시각으로 환산하므로 OS 시간대를 변경해도 같은 기준으로 판단합니다.
+`settings.json`의 `retention`에서 자동 삭제 여부와 보존 시간을 지정합니다. `enabled`는 JSON 불리언이고 `max_age_seconds`는 60~31536000 범위의 정수 초입니다. 기본값은 `{"enabled": true, "max_age_seconds": 3600}`이며, 항목을 생략하면 이전 1.9.0과 같은 1시간 보존을 사용합니다. 자동 삭제를 끄려면 `enabled`를 `false`로 지정합니다. 비활성 상태에서는 정리용 파일 탐색과 삭제를 수행하지 않습니다.
 
-삭제 범위는 현재 적용된 `collection.output_directory`(기본 `/Monitor`)의 직계 파일입니다. 역할이 분석 또는 수집인지와 관계없이 같은 규칙을 적용합니다. 출력 경로를 변경하면 다음 정리부터 새 경로만 검사하며 이전 경로의 남은 파일을 계속 삭제하지 않습니다. 보존 시간과 정리 간격은 현재 각각 1시간과 60초로 고정되어 있습니다. 수집 주기를 60초보다 길게 바꾸어도 정리 타이머는 유지됩니다. 실행 중 작업이나 대량 과거 파일 검사에 시간이 걸리면 실제 정리 완료가 늦어질 수 있습니다.
+다음은 하루 동안 보관하는 설정 예시입니다.
+
+```json
+"retention": {
+  "enabled": true,
+  "max_age_seconds": 86400
+}
+```
+
+활성 상태에서는 데몬 시작 시 한 번, 이후 수집 주기와 독립된 60초 타이머로 오래된 모니터링 JSON을 정리합니다. 파일명에 기록된 **수집 시각부터 `max_age_seconds` 이상** 지난 파일이 대상이며, 정확히 경계인 파일도 삭제합니다. 파일시스템의 수정 시각이나 ctime으로 생성 시각을 추정하지 않습니다. JSON 본문의 `timestamp`와 파일명의 시각이 일치하는지도 확인합니다. 시간대 오프셋을 UTC 시각으로 환산하므로 OS 시간대를 변경해도 같은 기준으로 판단합니다.
+
+보존 설정은 다른 설정처럼 1초마다 다시 읽으며 데몬 재시작 없이 다음 정리 시점부터 반영합니다. 자동 삭제를 끄거나 보존 시간을 늘리면 이후 검사에 새 값을 사용합니다. 다시 켜거나 보존 시간을 줄이면 다음 60초 정리에서 이미 존재하는 오래된 파일도 새 기준으로 삭제합니다. 잘못된 값은 마지막 유효 설정을 유지하고 `config_status=using_last_valid`를 기록합니다. DB가 재연결 중이거나 조회에 실패해도 유효한 보존 설정 변경은 반영됩니다.
+
+삭제 범위는 현재 적용된 `collection.output_directory`(기본 `/Monitor`)의 직계 파일입니다. 역할이 분석 또는 수집인지와 관계없이 같은 규칙을 적용합니다. 출력 경로를 변경하면 다음 정리부터 새 경로만 검사하며 이전 경로의 남은 파일을 계속 삭제하지 않습니다. 정리 간격은 60초로 고정되어 있으며 수집 주기를 더 길게 바꾸어도 유지됩니다. 실행 중 작업이나 대량 과거 파일 검사에 시간이 걸리면 실제 정리 완료가 늦어질 수 있습니다.
 
 `YYYYMMDDTHHMMSS+HHMM.json`, 음수 오프셋, 기존 `Z` 형식과 `_1`~`_9999` 충돌 접미사를 인식합니다. 유효한 날짜와 모니터링 JSON 필수 구조를 확인한 16MiB 이하의 일반 파일만 삭제합니다. 다른 JSON, 내용이 손상되거나 시각이 일치하지 않는 파일, 미래 시각 파일, 하위 폴더, 심볼릭 링크, 하드링크, 잠금 파일과 `.tmp`는 보존합니다. `/CloudESM/data/processing/collector`와 `normalize`의 `.tmp`·`.done`은 삭제하지 않습니다.
 
@@ -486,7 +540,7 @@ SIGTERM/SIGINT는 signalfd로 처리하며 대기 중 즉시 종료할 수 있�
 journalctl -u resource-monitor --since '-10 minutes' --no-pager
 ```
 
-기본 60초 수집에서는 하루 약 1,440개 파일을 생성하되 통상 최근 1시간 분량만 남습니다. 업그레이드 후 첫 실행부터 이미 존재하는 정상 모니터링 JSON에도 이 규칙이 적용됩니다. 더 오래 보관할 자료는 현재 출력 경로 밖에 별도로 보관하십시오.
+기본 60초 수집에서는 하루 약 1,440개 파일을 생성하며 기본 보존 설정에서는 통상 최근 1시간 분량을 유지합니다. 보존 시간을 늘리거나 자동 삭제를 끄면 그만큼 파일이 누적됩니다. 업그레이드 후 첫 실행부터 이미 존재하는 정상 모니터링 JSON에도 현재 보존 설정이 적용되므로, 보관 요구에 맞는 값을 시작 전에 지정하십시오.
 
 ## 수동 진단
 
@@ -512,7 +566,7 @@ RPM은 빌드할 OL8 또는 OL9 시스템에서 다음처럼 생성합니다. So
 ```bash
 sudo dnf install -y rpm-build gcc-toolset-15-gcc-c++ cmake make python3 pkgconf-pkg-config mariadb-connector-c-devel
 mkdir -p "$HOME/rpmbuild/SOURCES" "$HOME/rpmbuild/SPECS"
-cp artifacts/resource-monitor-1.9.0.tar.gz "$HOME/rpmbuild/SOURCES/"
+cp artifacts/resource-monitor-1.10.0.tar.gz "$HOME/rpmbuild/SOURCES/"
 curl --fail --location https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz --output "$HOME/rpmbuild/SOURCES/json.tar.xz"
 cp packaging/rpm/resource-monitor.spec "$HOME/rpmbuild/SPECS/"
 rpmbuild -ba "$HOME/rpmbuild/SPECS/resource-monitor.spec"

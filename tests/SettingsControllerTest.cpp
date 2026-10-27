@@ -288,35 +288,43 @@ void database_reload_tests() {
     Database database;
     SettingsController controller(reader, output, {}, &database);
     CHECK(controller.initialize());
-    const auto previous = controller.current();
     reader.next->is_analyzer = true;
     reader.next->mysql.enabled = true;
     reader.next->mysql.database = "monitoring";
     reader.next->collection_interval = std::chrono::seconds{2};
     reader.next->output_directory = "/new";
     database.prepared = false;
-    CHECK(!controller.reload());
-    CHECK(controller.current() == previous);
-    CHECK(output.active == "/Monitor");
+    auto changed = controller.reload();
+    CHECK(changed && *changed);
+    CHECK(controller.current() == *reader.next);
+    CHECK(output.active == "/new");
     CHECK(database.commits == 1);
-    CHECK(controller.reload_error()->code == "connection_pending");
+    CHECK(!controller.reload_error());
+    CHECK(controller.dependency_errors().at(0).code == "connection_pending");
     database.prepared = std::unexpected(Error{"mysql", "connection", "connect_failed", "Connection failed"});
-    CHECK(!controller.reload());
-    CHECK(controller.current() == previous);
+    reader.next->thresholds.cpu_usage_percent = 42;
+    reader.next->retention = {false, std::chrono::seconds{7200}};
+    changed = controller.reload();
+    CHECK(changed && *changed);
+    CHECK(controller.current() == *reader.next);
+    CHECK(controller.dependency_errors().at(0).code == "connect_failed");
     CHECK(database.commits == 1);
+    const auto previous = controller.current();
     database.prepared = true;
-    output.failure = Error{"snapshot_store", "/new", "io_error", "Access denied"};
+    reader.next->output_directory = "/newer";
+    output.failure = Error{"snapshot_store", "/newer", "io_error", "Access denied"};
     CHECK(!controller.reload());
     CHECK(controller.current() == previous);
     CHECK(!database.active.enabled);
     CHECK(database.commits == 1);
     output.failure.reset();
-    auto changed = controller.reload();
+    changed = controller.reload();
     CHECK(changed && *changed);
     CHECK(controller.current() == *reader.next);
     CHECK(database.active == reader.next->mysql);
-    CHECK(output.active == "/new");
+    CHECK(output.active == "/newer");
     CHECK(!controller.reload_error());
+    CHECK(controller.dependency_errors().empty());
     changed = controller.reload();
     CHECK(changed && !*changed);
     database.credential_changed = true;
@@ -344,10 +352,12 @@ void database_startup_tests() {
         }
         SettingsController controller(reader, output, {}, &database);
         CHECK(controller.initialize());
-        CHECK(!controller.current().mysql.enabled);
+        CHECK(controller.current().mysql.enabled);
+        CHECK(!database.active.enabled);
         CHECK(controller.current().thresholds == reader.next->thresholds);
         CHECK(output.active == "/Monitor");
-        CHECK(controller.reload_error());
+        CHECK(!controller.reload_error());
+        CHECK(!controller.dependency_errors().empty());
         CHECK(database.commits == 0);
         database.prepared = true;
         const auto changed = controller.reload();
@@ -355,6 +365,7 @@ void database_startup_tests() {
         CHECK(controller.current().mysql.enabled);
         CHECK(database.active.enabled);
         CHECK(!controller.reload_error());
+        CHECK(controller.dependency_errors().empty());
     }
     Reader reader;
     reader.next->is_analyzer = true;
@@ -399,10 +410,13 @@ void analyzer_gate_tests() {
 
     reader.next->is_analyzer = true;
     database.prepared = false;
-    CHECK(!controller.reload());
-    CHECK(!controller.current().is_analyzer);
-    CHECK(!controller.current().mysql.enabled);
-    CHECK(controller.reload_error()->code == "connection_pending");
+    const auto activated = controller.reload();
+    CHECK(activated && *activated);
+    CHECK(controller.current().is_analyzer);
+    CHECK(controller.current().mysql.enabled);
+    CHECK(!database.active.enabled);
+    CHECK(!controller.reload_error());
+    CHECK(controller.dependency_errors().at(0).code == "connection_pending");
     database.prepared = true;
     auto changed = controller.reload();
     CHECK(changed && *changed);
@@ -440,6 +454,49 @@ void analyzer_gate_tests() {
     CHECK(!independent.current().mysql.enabled);
     CHECK(!independent.reload_error());
     CHECK(independent_output.active == "/Monitor");
+}
+
+void independent_database_reload_tests() {
+    Reader reader;
+    reader.next->is_analyzer = true;
+    reader.next->mysql.database = "CloudESM";
+    Output output;
+    Database daily;
+    Database silence;
+    silence.prepared = std::unexpected(Error{"mysql", "connection", "1045", "Database connection failed"});
+    SettingsController controller(reader, output, {}, &daily, &silence);
+    CHECK(controller.initialize());
+    CHECK(daily.active.enabled);
+    CHECK(silence.commits == 0);
+    CHECK(controller.dependency_errors().size() == 1);
+    CHECK(controller.dependency_errors().at(0).target == "log_silence.connection");
+    CHECK(!controller.reload_error());
+    reader.next->collection_interval = std::chrono::seconds{9};
+    reader.next->output_directory = "/independent";
+    reader.next->retention.enabled = false;
+    auto changed = controller.reload();
+    CHECK(changed && *changed);
+    CHECK(controller.current().collection_interval == std::chrono::seconds{9});
+    CHECK(!controller.current().retention.enabled);
+    CHECK(output.active == "/independent");
+    CHECK(daily.connection_changes == 1);
+    CHECK(silence.commits == 0);
+    silence.prepared = true;
+    changed = controller.reload();
+    CHECK(changed && *changed);
+    CHECK(silence.active.enabled);
+    CHECK(controller.dependency_errors().empty());
+    daily.prepared = false;
+    changed = controller.reload();
+    CHECK(changed && !*changed);
+    CHECK(controller.dependency_errors().at(0).target == "collect_count.connection");
+    CHECK(silence.active.enabled);
+    daily.prepared = true;
+    reader.next->is_analyzer = false;
+    changed = controller.reload();
+    CHECK(changed && *changed);
+    CHECK(!daily.active.enabled && !silence.active.enabled);
+    CHECK(controller.dependency_errors().empty());
 }
 
 void analyzer_settings_reload_tests() {
@@ -670,6 +727,7 @@ int main() {
         override_tests();
         database_reload_tests();
         database_startup_tests();
+        independent_database_reload_tests();
         analyzer_gate_tests();
         analyzer_settings_reload_tests();
         process_monitor_settings_reload_tests();
