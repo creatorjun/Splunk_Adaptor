@@ -3,6 +3,8 @@
 
 Oracle Linux 8/9용 C++23 시스템 모니터링 데몬입니다. 기본 60초마다 CPU, 메모리, 마운트된 로컬 디스크 파일시스템을 수집하고 매 수집 주기의 전체 결과를 OS 시간대와 UTC 오프셋을 포함한 파일명으로 저장합니다. 예를 들어 OS가 Asia/Seoul이면 `/Monitor/20261019T123400+0900.json`에 저장합니다. `is_analyzer`에 맞는 Java `-DAPP` 프로세스의 실행 여부도 같은 JSON에 기록하며, 1.6.0부터 역할별 대상 목록을 설정 파일에서 재시작 없이 변경할 수 있습니다. 분석 장비에서는 `CloudESM.SUM_COLLECT_INFO_1DAY`의 일별 수집 건수 변동과 `CloudESM.SUM_COLLECT_INFO`의 장비별 로그 무수신 상태를 함께 기록합니다. 1.7.0부터 무수신 감시 대상 IP는 매 DB 조회에서 자동으로 발견합니다. 1.8.0부터 수집 장비의 처리 폴더를 60초마다 검사하여 `.tmp`·`.done` 파일 개수가 설정한 임계치 이상인 항목만 결과에 추가합니다. `/etc/resource-monitor/settings.json`에서 수집 주기, 저장 경로, 장비 역할, DAPP 목록, 임계치, 분석 기준과 MySQL 연결을 관리합니다. DB 사용자명과 비밀번호는 `/etc/resource-monitor/secrets/mysql.json`으로 분리합니다. 리소스 임계치는 경고 판정에 적용하며 모든 수집 주기의 파일을 남깁니다. 1.10.0은 모니터링 JSON 자동 삭제 여부와 보존 시간을 설정으로 변경하고, 일별 건수와 무수신 조회의 DB 연결·작업 스레드를 분리합니다. 결과 JSON에는 임계값 자체를 기록하지 않으며 임계값은 `settings.json`에서 관리합니다.
 
+1.8.0 설치 키트로 설치한 장비의 패키지 제거·재설치는 [상세 이전 가이드](#upgrade-from-1-8)를 따르십시오.
+
 ## 구성
 
 | 위치 | 책임 |
@@ -582,3 +584,375 @@ docker build -f packaging/Dockerfile.build --build-arg ORACLE_VERSION=9 -t resou
 ```
 
 실제 운영 승인에는 대상 서버의 OL 마이너 버전, RHCK/UEK, 마운트 구성, SELinux Enforcing 환경에서 설치·기동·60초 수집·상태별 JSON 저장·재시작을 확인하는 절차가 필요합니다. 테스트는 CPU 경계, 임계치 재로드, 매 주기 저장, 예약 공간, 부분 실패, 원자 저장 실패, 마운트 파싱, FD 정리, 종료 신호 외에 일별 건수 증감 경계, 기준값 0, 날짜별 누락, 잘못된 DB 값, 결과 개수 제한, OS 날짜 계산, 분석 설정 재로드, 비동기 조회와 DB 비활성화를 검증합니다.
+
+<a id="upgrade-from-1-8"></a>
+
+## 1.8.0 제거 후 1.10.0 재설치 상세 가이드
+
+이 절차는 `resource-monitor-1.8.0-install-kit-20261023.zip`으로 RPM 설치한 Oracle Linux 8/9 x86_64 장비에 적용합니다. 이 문서에서 최신 버전은 **2026-10-27 기준 1.10.0**입니다. 기존 패키지를 제거한 다음 새 RPM을 설치하고, 장비의 기존 설정과 DB 계정을 복원합니다. 작업 중에는 모니터링이 중단됩니다. CloudESM 서비스나 MariaDB 서버를 중지할 필요는 없습니다.
+
+제거·설치 대상은 `resource-monitor` 패키지뿐입니다. DB 사용자·비밀번호, DB 테이블, `/CloudESM` 처리 파일을 삭제하지 않습니다. 기존 ZIP의 역할별 예제를 다시 복사하지 않고 **해당 장비에서 사용하던 설정**을 기준으로 이전합니다. 이 절차는 운영자가 수행하는 안내이며, 문서 추가 작업에서 운영 장비를 다시 설치하거나 재부팅한 것은 아닙니다.
+
+### 1. 준비 파일과 실행 환경
+
+서버의 `/root`에 아래 두 ZIP을 준비합니다. 원래 1.8.0 ZIP은 문제 발생 시 복구할 RPM을 확보하기 위한 것입니다. 가이드가 추가된 ZIP을 사용하거나 다른 경로에 업로드했다면 아래 변수의 파일명을 실제 이름으로 바꿉니다.
+
+- 기존: `resource-monitor-1.8.0-install-kit-20261023.zip`
+- 최신: `resource-monitor-1.10.0-update-20261027.zip`
+
+이하 `bash` 코드는 **DB의 `MariaDB>` 프롬프트가 아닌 서버의 root Bash 셸**에서 실행합니다. 같은 셸에서 순서대로 진행합니다. 중요 명령의 `|| exit 1`은 실패 시 현재 셸을 종료해 후속 제거·시작을 막습니다. 종료됐다면 오류 원인을 해결한 뒤 재접속하고 기록한 작업·백업 경로로 변수를 복구하십시오. 단계별 확인이 끝나기 전에는 다음 단계로 넘어가지 않습니다. 절차의 JSON 편집·검사에만 Python 3가 필요하며 데몬 실행 자체에는 필요하지 않습니다. 폐쇄망은 `unzip`, Python 3와 해당 OS용 RPM 의존성을 사내 저장소 또는 별도 RPM으로 먼저 준비합니다.
+
+```bash
+test "$(id -u)" -eq 0 || exit 1
+id -u
+cat /etc/oracle-release
+uname -m
+rpm -q resource-monitor
+/usr/sbin/resource-monitor --version
+systemctl cat resource-monitor
+if [ -e /etc/resource-monitor/.settings.json.migrate ] || [ -L /etc/resource-monitor/.settings.json.migrate ]; then
+    printf "이전 설정 이전 파일을 보존하고 확인한 후 진행하십시오: /etc/resource-monitor/.settings.json.migrate\n" >&2
+    exit 1
+fi
+runuser -u resource-monitor -- /usr/sbin/resource-monitor --check-config || exit 1
+dnf install -y unzip python3 || exit 1
+```
+
+UID는 `0`, 아키텍처는 `x86_64`, 기존 버전은 `1.8.0`인지 확인합니다. `rpm -q`가 실패하거나 실행 경로가 `/usr/sbin/resource-monitor`가 아닌 소스 설치 장비에는 이 제거 절차를 그대로 사용하지 않습니다. `systemctl cat`에서 별도 `ExecStart`, `--config`, `--output`, `--interval-seconds` 또는 drop-in이 있는지도 확인합니다. 아래는 기본 설정 경로 `/etc/resource-monitor/settings.json` 기준이며, 사용자 정의 실행 옵션이 있으면 실제 경로와 우선 적용값을 확인해 맞춰야 합니다.
+
+```bash
+rm_old_zip=/root/resource-monitor-1.8.0-install-kit-20261023.zip
+rm_new_zip=/root/resource-monitor-1.10.0-update-20261027.zip
+test -f "$rm_old_zip" && test -f "$rm_new_zip" || exit 1
+rm_work=$(mktemp -d /root/resource-monitor-upgrade-20261027.XXXXXX) || exit 1
+unzip -q "$rm_old_zip" -d "$rm_work" || exit 1
+unzip -q "$rm_new_zip" -d "$rm_work" || exit 1
+rm_old_dir="$rm_work/resource-monitor-1.8.0"
+rm_new_dir="$rm_work/resource-monitor-1.10.0-update-20261027"
+(cd "$rm_old_dir" && sha256sum -c SHA256SUMS.txt) || exit 1
+(cd "$rm_new_dir" && sha256sum -c SHA256SUMS.txt) || exit 1
+. /etc/os-release
+case "$ID:${VERSION_ID%%.*}:$(uname -m)" in
+    ol:8:x86_64) rm_el=8 ;;
+    ol:9:x86_64) rm_el=9 ;;
+    *) printf '지원 대상 Oracle Linux 8/9 x86_64가 아닙니다.\n' >&2; exit 1 ;;
+esac
+rm_old_rpm="$rm_old_dir/packages/resource-monitor-1.8.0-1.el${rm_el}.x86_64.rpm"
+rm_new_rpm="$rm_new_dir/packages/resource-monitor-1.10.0-1.el${rm_el}.x86_64.rpm"
+rpm -qp "$rm_old_rpm" "$rm_new_rpm" || exit 1
+rpm -K "$rm_old_rpm" "$rm_new_rpm" || exit 1
+rpm -Uvh --test "$rm_new_rpm" || exit 1
+```
+
+모든 파일의 SHA-256 및 RPM digest 검사와 설치 사전검사가 성공해야 합니다. `rpm -K`의 digest 검증은 배포자 서명 검증과 구분됩니다. 의존성 부족이 나오면 제거 전에 해결합니다. EL8 장비에는 EL8 RPM, EL9 장비에는 EL9 RPM을 사용하고 `--nodeps`, `--force`는 사용하지 않습니다. 셸을 다시 열면 `rm_work`, `rm_old_rpm`, `rm_new_rpm` 등의 변수를 같은 경로로 다시 지정해야 합니다.
+
+### 2. 중지 전 상태와 실제 경로 기록
+
+백업은 결과 저장 경로 밖의 `/var/backups/resource-monitor`에 root 전용으로 생성합니다. 다음 코드는 비밀번호를 출력하지 않고 설정의 파일 경로만 읽습니다.
+
+```bash
+umask 077
+rm_backup="/var/backups/resource-monitor/$(date +%Y%m%dT%H%M%S)-1.8.0-to-1.10.0"
+mkdir -p -- "$rm_backup" || exit 1
+chmod 0700 "$rm_backup" || exit 1
+rm_backup=$(readlink -f -- "$rm_backup") || exit 1
+rpm -q resource-monitor > "$rm_backup/package-before.txt"
+systemctl is-enabled resource-monitor > "$rm_backup/enabled-before.txt"
+systemctl is-active resource-monitor > "$rm_backup/active-before.txt"
+systemctl cat resource-monitor > "$rm_backup/unit-before.txt"
+rm_output=$(python3 -c 'import json; s=json.load(open("/etc/resource-monitor/settings.json")); print(s.get("collection",{}).get("output_directory","/Monitor"))') || exit 1
+rm_credentials=$(python3 -c 'import json; s=json.load(open("/etc/resource-monitor/settings.json")); print(s.get("mysql",{}).get("credentials_file","/etc/resource-monitor/secrets/mysql.json"))') || exit 1
+rm_ca=$(python3 -c 'import json; s=json.load(open("/etc/resource-monitor/settings.json")); print(s.get("mysql",{}).get("tls_ca_file") or "")') || exit 1
+rm_analyzer=$(python3 -c 'import json; s=json.load(open("/etc/resource-monitor/settings.json")); print("true" if s.get("is_analyzer",False) else "false")') || exit 1
+rm_tls_mode=$(python3 -c 'import json; s=json.load(open("/etc/resource-monitor/settings.json")); print(s.get("mysql",{}).get("tls_mode","verify_identity"))') || exit 1
+printf 'output=%s\ncredentials_file=%s\ntls_ca_file=%s\n' "$rm_output" "$rm_credentials" "$rm_ca" > "$rm_backup/paths-before.txt"
+printf '백업 위치: %s\n출력 위치: %s\n' "$rm_backup" "$rm_output"
+du -sh -- "$rm_output" /etc/resource-monitor
+df -h -- "$rm_output" "$rm_backup"
+```
+
+원래 비활성 서비스라면 상태 조회가 0이 아닌 종료 코드를 반환할 수 있습니다. 기록된 상태를 확인하십시오. `--output`을 별도 지정한 서비스는 실제 출력 경로로 `rm_output`을 고쳐서 다음 단계에 사용합니다. 출력 파일 전체를 백업할 공간이 없으면 별도 백업 저장소를 확보한 후 진행합니다. 다른 위치의 계정·CA 파일도 아래 백업에 포함됩니다. 환경 파일이나 별도 systemd 단위가 참조하는 추가 파일은 그 파일까지 별도로 보존합니다. 아래 백업 코드는 계정·CA 경로가 심볼릭 링크라면 링크와 실제 대상 파일을 함께 보존합니다. 비활성 역할이나 TLS 비활성화로 사용하지 않는 파일이 없으면 생략하며, 분석 장비가 실제 사용하는 파일이 없으면 중단합니다.
+
+### 3. 서비스 중지와 설정·기존 JSON·구버전 RPM 백업
+
+```bash
+systemctl stop resource-monitor || exit 1
+systemctl is-active resource-monitor
+systemctl show resource-monitor -p MainPID
+test "$(systemctl show resource-monitor -p MainPID --value)" = 0 || exit 1
+```
+
+`inactive`와 `MainPID=0`을 확인한 뒤 계속합니다. 중지가 완료되지 않았으면 패키지 제거와 출력 폴더 백업을 진행하지 않습니다.
+
+```bash
+rm_config_paths=(etc/resource-monitor)
+for rm_path in "$rm_credentials" "$rm_ca"; do
+    case "$rm_path" in
+        "") continue ;;
+        /*) ;;
+        *) printf '설정 파일 경로가 절대 경로가 아닙니다.\n' >&2; exit 1 ;;
+    esac
+    if [ ! -e "$rm_path" ]; then
+        if [ "$rm_analyzer" = true ] && { [ "$rm_path" = "$rm_credentials" ] || [ "$rm_tls_mode" != disabled ]; }; then
+            printf '사용 중인 설정 파일이 없습니다: %s\n' "$rm_path" >&2
+            exit 1
+        fi
+        printf '존재하지 않는 미사용 파일은 생략합니다: %s\n' "$rm_path"
+        continue
+    fi
+    case "$rm_path" in
+        /etc/resource-monitor/*) ;;
+        *) rm_config_paths+=("${rm_path#/}") ;;
+    esac
+    rm_real_path=$(readlink -f -- "$rm_path") || exit 1
+    if [ "$rm_real_path" != "$rm_path" ]; then
+        case "$rm_real_path" in
+            /etc/resource-monitor/*) ;;
+            *) rm_config_paths+=("${rm_real_path#/}") ;;
+        esac
+    fi
+done
+for rm_path in etc/systemd/system/resource-monitor.service etc/systemd/system/resource-monitor.service.d; do
+    if [ -e "/$rm_path" ]; then
+        rm_config_paths+=("$rm_path")
+    fi
+done
+tar --acls --xattrs --selinux -czpf "$rm_backup/configuration.tar.gz" -C / "${rm_config_paths[@]}" || exit 1
+test -d "$rm_output" || exit 1
+rm_output=$(readlink -f -- "$rm_output") || exit 1
+case "$rm_output" in
+    ""|/) printf '출력 경로를 다시 확인하십시오.\n' >&2; exit 1 ;;
+esac
+case "$rm_backup/" in
+    "$rm_output/"*) printf '백업 폴더는 출력 경로 밖에 있어야 합니다.\n' >&2; exit 1 ;;
+esac
+printf '%s\n' "$rm_output" > "$rm_backup/output-directory.txt"
+tar --acls --xattrs --selinux -czpf "$rm_backup/monitor-output.tar.gz" -C "$rm_output" . || exit 1
+cp -a -- /etc/resource-monitor/settings.json "$rm_backup/settings.before.json" || exit 1
+cp -a -- "$rm_old_rpm" "$rm_backup/" || exit 1
+(cd "$rm_backup" && sha256sum configuration.tar.gz monitor-output.tar.gz settings.before.json "$(basename "$rm_old_rpm")" > SHA256SUMS.txt) || exit 1
+(cd "$rm_backup" && sha256sum -c SHA256SUMS.txt) || exit 1
+tar -tzf "$rm_backup/configuration.tar.gz" || exit 1
+tar -tzf "$rm_backup/monitor-output.tar.gz" > "$rm_backup/monitor-output.list.txt" || exit 1
+printf '복구에 사용할 백업 경로: %s\n' "$rm_backup"
+```
+
+모든 명령과 백업 검증이 성공해야 합니다. 백업 경로를 별도 작업 기록에 남깁니다. `configuration.tar.gz`에는 실제 DB 비밀번호가 포함될 수 있으므로 root 전용으로 유지하고 메일·일반 배포 ZIP에 포함하지 않습니다. 백업 과정은 DB 내용을 덤프하거나 변경하지 않습니다.
+
+### 4. 기존 1.8.0 패키지 제거
+
+제거 대상과 의존 패키지를 먼저 확인합니다. `--assumeno` 명령은 확인 후 취소되므로 0이 아닌 종료 코드는 예상된 결과입니다.
+
+```bash
+dnf remove --assumeno --setopt=clean_requirements_on_remove=False resource-monitor
+```
+
+예상 밖의 패키지가 함께 제거되는 거래라면 중단하고 의존 관계를 확인합니다. 제거 대상이 확인되면 실행합니다. 자동 의존성 정리를 끄므로 MariaDB Connector/C 등 기존 런타임 의존성을 불필요하게 제거하지 않습니다.
+
+```bash
+dnf remove --setopt=clean_requirements_on_remove=False resource-monitor || exit 1
+rpm -q resource-monitor
+```
+
+마지막 명령의 `package resource-monitor is not installed`는 이 단계의 정상 결과입니다. `%config(noreplace)`라도 **제거 후 재설치가 기존 설정의 자동 복원을 보장하지는 않습니다.** 수정된 파일은 `.rpmsave`로 남을 수 있고, 수정하지 않은 기본 설정은 제거될 수 있습니다. 다음 단계에서 백업으로 직접 복원합니다. 서비스 계정, 남아 있는 secrets와 결과 파일을 따로 삭제하거나 `/etc/resource-monitor`, `/Monitor`에 `rm -rf`를 실행하지 않습니다.
+
+### 5. 최신 RPM 설치와 기존 설정 복원
+
+```bash
+dnf install "$rm_new_rpm" || exit 1
+rpm -q resource-monitor
+/usr/sbin/resource-monitor --version
+getent passwd resource-monitor
+tar --acls --xattrs --selinux -xzpf "$rm_backup/configuration.tar.gz" -C / || exit 1
+cmp -- "$rm_backup/settings.before.json" /etc/resource-monitor/settings.json || exit 1
+systemctl daemon-reload || exit 1
+```
+
+`resource-monitor 1.10.0`과 설정 원본 일치를 확인합니다. 이 시점에는 **아직 서비스를 시작하지 않습니다.** 복원 대상은 설정·계정·CA·기존 사용자 정의 단위 파일이며 새 RPM의 `/usr/sbin/resource-monitor`와 `/usr/lib/systemd/system/resource-monitor.service`를 구버전으로 덮어쓰지 않습니다. 사용자 정의 단위가 있다면 `systemctl cat resource-monitor`로 새 바이너리를 실행하는지 다시 확인합니다. 기존 결과 폴더가 보존되어 있다면 JSON 백업을 그 위에 풀 필요가 없습니다.
+
+### 6. 1.10.0 설정 이전과 최초 자동 삭제 방지
+
+**1.8.0은 자동 삭제가 없었지만 1.10.0은 `retention` 생략 시 기본 1시간 보존입니다.** 기존 파일을 유지하며 전환할 수 있도록 아래에서는 첫 실행의 자동 삭제를 명시적으로 끕니다. 설치 확인 후 운영 보존 정책을 선택합니다. 기존 역할, 수집 주기, 저장 경로, DB 연결·계정 경로와 모든 임계값은 유지합니다.
+
+```bash
+install -m 0640 -o root -g resource-monitor /etc/resource-monitor/settings.json /etc/resource-monitor/settings.json.new || exit 1
+python3 - /etc/resource-monitor/settings.json.new <<'PY' || exit 1
+import json
+import sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    settings = json.load(stream)
+settings["retention"] = {"enabled": False, "max_age_seconds": 3600}
+profiles = settings.get("process_monitor", {})
+if "analyzer" in profiles:
+    renamed = ["AnalyzeEngine" if name == "SoarAnalyzerEngine" else name for name in profiles["analyzer"]]
+    profiles["analyzer"] = list(dict.fromkeys(renamed))
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(settings, stream, ensure_ascii=False, indent=2)
+    stream.write("\n")
+PY
+diff -u "$rm_backup/settings.before.json" /etc/resource-monitor/settings.json.new
+runuser -u resource-monitor -- /usr/sbin/resource-monitor --config /etc/resource-monitor/settings.json.new --check-config && mv -f -- /etc/resource-monitor/settings.json.new /etc/resource-monitor/settings.json || exit 1
+```
+
+`diff`는 변경이 있으면 종료 코드 1을 반환합니다. 자동 삭제 비활성화와 `SoarAnalyzerEngine` → `AnalyzeEngine` 이름 변경·중복 제거, JSON 정렬 형태 외의 운영값이 유지되었는지 확인합니다. 기존 `Collector`/`CloudESMCollector` 등 다른 DAPP 이름은 그대로 유지합니다. 실제 장비에 맞는 목록을 확인하되 전체 샘플 프로필로 덮어쓰지 않습니다.
+
+`Configuration is valid`가 출력되고 설정 교체까지 성공해야 합니다. 실패하면 `.new` 파일과 자격증명 접근 권한을 수정한 뒤 다시 검증합니다. `--check-config`는 설정 문법·값과 분석 장비의 계정 파일을 검사하며 실제 DB TCP 접속, TLS 연결 성공, 결과 저장 권한까지 보증하지 않습니다. `is_analyzer=false`인 수집 장비는 계정 파일 검사와 DB 연결을 수행하지 않습니다.
+
+기본 계정 파일을 사용하는 분석 장비의 권한이 잘못된 경우 다음처럼 맞춥니다. 사용자 정의 계정 경로는 해당 경로에 같은 원칙을 적용하고 비밀번호는 변경하지 않습니다.
+
+```bash
+chown root:resource-monitor /etc/resource-monitor/secrets || exit 1
+chmod 0750 /etc/resource-monitor/secrets || exit 1
+chown root:resource-monitor /etc/resource-monitor/secrets/mysql.json || exit 1
+chmod 0640 /etc/resource-monitor/secrets/mysql.json || exit 1
+```
+
+출력 디렉터리가 없을 때만 생성합니다. 기존 디렉터리·하위 파일의 소유권을 일괄 변경하지 않습니다. 권한 확인이 실패하면 해당 경로의 마운트·상위 디렉터리·ACL·SELinux 정책을 점검합니다.
+
+```bash
+if [ ! -d "$rm_output" ]; then
+    install -d -m 0750 -o resource-monitor -g resource-monitor -- "$rm_output" || exit 1
+fi
+namei -l -- "$rm_output"
+runuser -u resource-monitor -- test -x "$rm_output" || exit 1
+runuser -u resource-monitor -- test -w "$rm_output" || exit 1
+runuser -u resource-monitor -- /usr/sbin/resource-monitor --check-config || exit 1
+```
+
+### 7. 분석 장비의 무수신 조회 인덱스 확인
+
+`is_analyzer=true`인 장비에만 해당합니다. 기존 DB 계정을 다시 만들거나 비밀번호를 바꿀 필요는 없습니다. 조회 계정의 두 모니터링 테이블 `SELECT` 권한을 유지합니다. DB 서버의 관리자 SQL 세션에서 먼저 확인합니다.
+
+```sql
+SHOW INDEX FROM CloudESM.SUM_COLLECT_INFO;
+```
+
+사용 가능한 전체 열 BTREE 인덱스의 선두 열이 `(eqp_ip, recv_time, count)`이면 추가하지 않습니다. 해당 인덱스가 없을 때만 DBA가 테이블 크기, 여유 공간, DDL 지원 여부와 작업 시간을 검토한 뒤 제공 SQL을 실행합니다. 같은 이름의 인덱스가 다른 정의로 있으면 `IF NOT EXISTS`가 이를 고치지 않으므로 먼저 확인합니다. DB 서버의 Linux 셸에서 로컬 관리자 소켓 접속을 사용하는 예시는 다음과 같습니다.
+
+```bash
+mariadb -u root -p CloudESM < /usr/share/resource-monitor/sql/log_silence_index.sql
+```
+
+원격 DB는 SQL 파일을 DBA에게 전달하고 실제 접속 주소·포트에 맞춰 실행합니다. 인덱스 생성은 별도 DB 작업이며 RPM과 데몬이 자동 수행하지 않습니다. 인덱스가 없으면 기존 서버 측 집계를 사용해 기능은 유지됩니다. 인덱스가 있으면 장비별 `count > 0`의 최신 수신 행만 반환하는 쿼리를 사용합니다. 서버에서 보관 중인 오래 무수신인 장비도 감시 대상에 남습니다. 인덱스는 연결 시 확인하므로 이 단계에서 적용하면 다음 시작에 반영됩니다.
+
+### 8. 서비스 시작과 새 JSON 검증
+
+```bash
+systemctl daemon-reload || exit 1
+systemctl reset-failed resource-monitor || exit 1
+python3 -c 'import json; s=json.load(open("/etc/resource-monitor/settings.json")); assert s.get("retention",{}).get("enabled") is False, "First-start retention must be disabled"' || exit 1
+touch "$rm_backup/start-marker" || exit 1
+systemctl enable --now resource-monitor || exit 1
+systemctl is-enabled resource-monitor
+systemctl is-active resource-monitor
+systemctl status resource-monitor --no-pager
+/usr/sbin/resource-monitor --version
+journalctl -u resource-monitor --since '-10 minutes' --no-pager
+```
+
+시작 직전 Python 검사는 실제 적용 파일의 자동 삭제가 꺼져 있는지 다시 확인합니다. 검사가 실패하면 보존 설정을 먼저 수정하고 시작 명령을 실행하지 않습니다. `enabled`, `active`, `resource-monitor 1.10.0`을 확인합니다. 첫 파일은 시작 후 설정된 수집 주기만큼 지난 뒤 생성됩니다. 기본이면 약 60초이며, 수집 작업 시간이 추가될 수 있습니다. 최소 두 수집 주기에 걸쳐 파일이 계속 생성되는지 확인합니다. 아래 명령은 **이번 시작 이후** 생성·수정된 JSON만 선택하여 이전 파일을 성공 증거로 잘못 사용하지 않도록 합니다.
+
+```bash
+find "$rm_output" -maxdepth 1 -type f -name '*.json' -newer "$rm_backup/start-marker" -printf '%TY-%Tm-%Td %TH:%TM:%TS %f\n' | sort
+rm_latest=$(find "$rm_output" -maxdepth 1 -type f -name '*.json' -newer "$rm_backup/start-marker" -printf '%T@ %p\n' | sort -nr | head -n 1 | cut -d' ' -f2-)
+if [ -n "$rm_latest" ]; then
+    python3 -m json.tool "$rm_latest"
+else
+    printf '이번 시작 이후 JSON이 없습니다. 수집 주기와 journal을 확인하십시오.\n' >&2
+fi
+```
+
+| 확인 항목 | 판단 기준 |
+| --- | --- |
+| 시각·출력 | 이번 서비스 시작 이후의 `timestamp`, OS 시간대 및 지정한 저장 경로 |
+| 설정·리소스 | `config_status=ok`, CPU·메모리·스토리지 값과 `collection_status`, `errors` 확인 |
+| 역할·프로세스 | 분석은 `process_profile=analyzer`, 수집은 `collector`; DAPP 이름과 true/false 확인 |
+| 분석 DB | `collect_count`·`log_silence`의 상태와 `queried_at`이 갱신되는지 확인; 오류는 각 `error`와 최상위 `errors` 확인 |
+| 수집 DB | `collect_count.status=disabled`, `log_silence.status=disabled` |
+| JSON 계약 | 임계값 숫자 필드가 없어도 정상; 실제 측정값과 판정 결과, `thresholds_applied_at`은 유지 |
+| 보존 | 최초 전환 단계에서는 `retention.enabled=false`이므로 과거 파일 자동 삭제 없음 |
+
+장비 무수신, 임계치 초과 또는 DAPP 미실행에 따른 `warning`은 데몬 설치 실패와 구분합니다. DB 접속 실패는 `error`로 기록되지만 리소스 JSON은 계속 생성되어야 합니다. 최초 비동기 조회의 `pending`이 계속되거나 `error`가 남으면 실제 DB 연결·권한·쿼리 실행 시간을 확인합니다. 수집 서버에서 처리 파일 수가 임계치 미만이면 `processing_files` 항목이 없는 것이 정상입니다.
+
+1.10.0 결과에서 제거된 필드는 `applied_thresholds`, `collect_count.threshold_percent`, `log_silence.default_timeout_seconds`, `log_silence.equipment[].timeout_seconds`, `processing_files.alerts[].threshold`입니다. `schema_version`은 1을 유지하므로 외부 수집기나 대시보드가 이 필드를 필수로 읽고 있다면 함께 수정해야 합니다. 기존 JSON은 다시 작성하지 않습니다.
+
+### 9. 검증 후 보존 기간 선택
+
+자동 삭제를 계속 끄려면 현재 `retention.enabled=false`를 유지합니다. 하루 보존을 원하면 `/etc/resource-monitor/settings.json`의 **기존 `retention` 객체를** 다음과 같이 수정합니다. 최상위 객체에 같은 키를 중복 추가하지 않습니다.
+
+```json
+"retention": {
+  "enabled": true,
+  "max_age_seconds": 86400
+}
+```
+
+1시간은 `3600`, 하루는 `86400`, 7일은 `604800`초입니다. 허용 범위는 60~31536000의 정수입니다. 약 1초마다 설정을 다시 읽으므로 데몬 재시작은 필요하지 않습니다. 활성화하면 다음 60초 정리에서 현재 출력 경로의 **기존 파일에도** 보존 기준이 적용됩니다. 필요한 과거 파일은 먼저 출력 경로 밖에 보관합니다. 삭제 대상은 파일명·본문 수집 시각과 모니터링 구조가 검증된 직계 JSON이며 CloudESM의 `.tmp`·`.done` 파일은 대상이 아닙니다.
+
+```bash
+journalctl -u resource-monitor --since '-10 minutes' --no-pager
+```
+
+정리가 발생하면 `snapshots_pruned count=N`을 확인할 수 있습니다. 삭제할 파일이 없거나 삭제가 비활성 상태라면 해당 로그가 없는 것이 정상입니다.
+
+### 10. 재부팅 확인과 작업 완료 기록
+
+`enable --now`는 자동 시작 설정과 현재 실행을 적용합니다. 실제 재부팅 테스트는 장비 전체에 영향을 주므로 운영 점검 시간에 별도로 수행합니다. 재부팅 후 최소 한 수집 주기를 기다려 다음을 확인합니다.
+
+```bash
+systemctl is-enabled resource-monitor
+systemctl is-active resource-monitor
+journalctl -u resource-monitor -b --no-pager
+find "$rm_output" -maxdepth 1 -type f -name '*.json' -newermt "$(uptime -s)" -printf '%TY-%Tm-%Td %TH:%TM:%TS %f\n' | sort
+```
+
+재접속하면 셸 변수가 사라지므로 `rm_output`을 실제 설정 경로로 다시 지정합니다. 이번 부팅 이후의 JSON 시각과 내용을 확인하고, 적용 버전·보존 정책·백업 경로·DB 및 DAPP 확인 결과를 작업 기록에 남깁니다. 백업은 운영 확인 기간 동안 보호된 위치에 보관합니다.
+
+### 11. 실패 시 1.8.0으로 복구
+
+새 버전이 정상 동작하지 않고 현장에서 바로 해결할 수 없다면 아래 순서로 복구합니다. 재접속했다면 2단계에서 기록한 실제 백업 경로를 먼저 지정합니다. 아래 경로의 날짜·시각은 설명용이므로 그대로 실행하지 말고 실제 값으로 바꿉니다.
+
+```bash
+rm_backup=/var/backups/resource-monitor/실제백업폴더명
+umask 077
+test -f "$rm_backup/configuration.tar.gz" || exit 1
+(cd "$rm_backup" && sha256sum -c SHA256SUMS.txt) || exit 1
+. /etc/os-release
+rm_el=${VERSION_ID%%.*}
+rm_rollback_rpm="$rm_backup/resource-monitor-1.8.0-1.el${rm_el}.x86_64.rpm"
+test -f "$rm_rollback_rpm" || exit 1
+systemctl stop resource-monitor || exit 1
+systemctl show resource-monitor -p MainPID
+test "$(systemctl show resource-monitor -p MainPID --value)" = 0 || exit 1
+```
+
+`MainPID=0`과 백업 검증 성공을 확인한 뒤 현재 설정·오류 로그도 보존하고 구버전으로 교체합니다. 제거 거래에서 예상 밖의 패키지가 대상이면 진행하지 않습니다.
+
+```bash
+cp -a -- /etc/resource-monitor/settings.json "$rm_backup/settings.failed-1.10.0.json" || exit 1
+journalctl -u resource-monitor -n 300 --no-pager > "$rm_backup/journal.failed-1.10.0.txt"
+dnf remove --setopt=clean_requirements_on_remove=False resource-monitor || exit 1
+dnf install "$rm_rollback_rpm" || exit 1
+tar --acls --xattrs --selinux -xzpf "$rm_backup/configuration.tar.gz" -C / || exit 1
+cmp -- "$rm_backup/settings.before.json" /etc/resource-monitor/settings.json || exit 1
+/usr/sbin/resource-monitor --version
+runuser -u resource-monitor -- /usr/sbin/resource-monitor --check-config || exit 1
+systemctl daemon-reload || exit 1
+systemctl reset-failed resource-monitor || exit 1
+systemctl enable --now resource-monitor || exit 1
+systemctl is-active resource-monitor
+journalctl -u resource-monitor --since '-10 minutes' --no-pager
+```
+
+**1.8.0은 `retention` 키를 지원하지 않으므로 1.10.0 설정 파일을 그대로 사용하지 않습니다.** 반드시 제거 전 원본 설정·secrets를 복원하고 `resource-monitor 1.8.0`, 설정 검사 성공 및 새 JSON 생성을 확인합니다. 위 명령은 원래 상시 실행하던 장비 기준으로 자동 시작을 다시 활성화합니다. 원래 비활성 장비였다면 기록한 `enabled-before.txt`, `active-before.txt`에 맞게 상태를 복원합니다.
+
+기존 출력 폴더가 그대로 있다면 JSON 백업을 다시 풀지 않습니다. 보존 설정으로 삭제된 과거 결과가 필요하면 아래처럼 **별도 폴더에** 복구하고 확인합니다. 실행 중 출력 폴더의 잠금 파일을 덮어쓰지 않습니다.
+
+```bash
+rm_restore_dir=$(mktemp -d "$rm_backup/recovered-output.XXXXXX") || exit 1
+tar --acls --xattrs --selinux -xzpf "$rm_backup/monitor-output.tar.gz" -C "$rm_restore_dir" || exit 1
+printf '과거 결과 복구 위치: %s\n' "$rm_restore_dir"
+```
+
+추가한 DB 인덱스는 1.8.0 조회에도 사용할 수 있으므로 패키지 복구 과정에서 자동 삭제하지 않습니다. DB 인덱스 제거가 필요하면 DBA가 별도로 판단합니다. DB 계정과 원본 수집 데이터는 패키지 교체·복구 대상이 아닙니다.
