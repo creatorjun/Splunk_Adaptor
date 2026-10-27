@@ -4,6 +4,7 @@
 #include "application/JavaProcessMonitor.hpp"
 #include "application/LogSilenceMonitor.hpp"
 #include "application/ProcessingFileMonitor.hpp"
+#include "application/SnapshotRetention.hpp"
 #include "infrastructure/linux/DirectoryProcessingFileScanner.hpp"
 #include "infrastructure/linux/ProcessingFileReader.hpp"
 #include "infrastructure/linux/ProcJavaProcessReader.hpp"
@@ -41,7 +42,7 @@ int main(int argc, char* argv[]) {
                 return 0;
             }
             if (argument == "--version") {
-                std::cout << "resource-monitor 1.8.0\n";
+                std::cout << "resource-monitor 1.9.0\n";
                 return 0;
             }
             if (argument == "--once") {
@@ -125,7 +126,8 @@ int main(int argc, char* argv[]) {
         monitor::ProcessingFileMonitor processing_files{file_reader, settings};
         monitor::CollectAndStore use_case{reader, store, settings, &collect_count, &processes, &log_silence,
             &processing_files};
-        return monitor::run_daemon(use_case, options, &settings);
+        monitor::SnapshotRetention retention{store};
+        return monitor::run_daemon(use_case, options, &settings, &retention);
     } catch (const std::exception& error) {
         monitor::log_error({"runtime", "main", "unhandled_exception", error.what()});
         return 1;

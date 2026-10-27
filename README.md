@@ -1,7 +1,7 @@
 <!-- README.md -->
 # Resource Monitor
 
-Oracle Linux 8/9용 C++23 시스템 모니터링 데몬입니다. 기본 60초마다 CPU, 메모리, 마운트된 로컬 디스크 파일시스템을 수집하고 매 수집 주기의 전체 결과를 OS 시간대와 UTC 오프셋을 포함한 파일명으로 저장합니다. 예를 들어 OS가 Asia/Seoul이면 `/Monitor/20261019T123400+0900.json`에 저장합니다. `is_analyzer`에 맞는 Java `-DAPP` 프로세스의 실행 여부도 같은 JSON에 기록하며, 1.6.0부터 역할별 대상 목록을 설정 파일에서 재시작 없이 변경할 수 있습니다. 분석 장비에서는 `CloudESM.SUM_COLLECT_INFO_1DAY`의 일별 수집 건수 변동과 `CloudESM.SUM_COLLECT_INFO`의 장비별 로그 무수신 상태를 함께 기록합니다. 1.7.0부터 무수신 감시 대상 IP는 매 DB 조회에서 자동으로 발견합니다. 1.8.0부터 수집 장비의 처리 폴더를 60초마다 검사하여 `.tmp`·`.done` 파일 개수가 설정한 임계치 이상인 항목만 결과에 추가합니다. `/etc/resource-monitor/settings.json`에서 수집 주기, 저장 경로, 장비 역할, DAPP 목록, 임계치, 분석 기준과 MySQL 연결을 관리합니다. DB 사용자명과 비밀번호는 `/etc/resource-monitor/secrets/mysql.json`으로 분리합니다. 리소스 임계치는 경고 판정에 적용하며 모든 수집 주기의 파일을 남깁니다.
+Oracle Linux 8/9용 C++23 시스템 모니터링 데몬입니다. 기본 60초마다 CPU, 메모리, 마운트된 로컬 디스크 파일시스템을 수집하고 매 수집 주기의 전체 결과를 OS 시간대와 UTC 오프셋을 포함한 파일명으로 저장합니다. 예를 들어 OS가 Asia/Seoul이면 `/Monitor/20261019T123400+0900.json`에 저장합니다. `is_analyzer`에 맞는 Java `-DAPP` 프로세스의 실행 여부도 같은 JSON에 기록하며, 1.6.0부터 역할별 대상 목록을 설정 파일에서 재시작 없이 변경할 수 있습니다. 분석 장비에서는 `CloudESM.SUM_COLLECT_INFO_1DAY`의 일별 수집 건수 변동과 `CloudESM.SUM_COLLECT_INFO`의 장비별 로그 무수신 상태를 함께 기록합니다. 1.7.0부터 무수신 감시 대상 IP는 매 DB 조회에서 자동으로 발견합니다. 1.8.0부터 수집 장비의 처리 폴더를 60초마다 검사하여 `.tmp`·`.done` 파일 개수가 설정한 임계치 이상인 항목만 결과에 추가합니다. `/etc/resource-monitor/settings.json`에서 수집 주기, 저장 경로, 장비 역할, DAPP 목록, 임계치, 분석 기준과 MySQL 연결을 관리합니다. DB 사용자명과 비밀번호는 `/etc/resource-monitor/secrets/mysql.json`으로 분리합니다. 리소스 임계치는 경고 판정에 적용하며 모든 수집 주기의 파일을 남깁니다. 1.9.0부터 현재 저장 경로의 모니터링 JSON 중 수집 시각이 1시간 이상 지난 파일을 자동 삭제합니다.
 
 ## 구성
 
@@ -436,7 +436,7 @@ DB에는 초 단위 수신 시각이 없으므로 해당 분의 끝을 기준으
 
 측정할 수 없는 리소스 값은 0 대신 JSON null입니다. 리소스의 이전 결과를 현재 측정값처럼 재사용하지 않습니다. DB 분석은 위에서 설명한 캐시와 `queried_at`으로 조회 시점을 구분하며, 날짜별 행이 없는 경우에만 건수 0과 존재 여부를 함께 사용합니다. 빈 파일시스템 목록은 모든 디스크 정상으로 취급하지 않습니다.
 
-파일명은 `YYYYMMDDTHHMMSS+HHMM.json` 또는 음수 오프셋의 같은 형식을 사용합니다. UTC로 설정된 OS에서도 JSON에는 `+00:00`, 파일명에는 `+0000`을 명시하며 `Z`를 붙이지 않습니다. 시간대가 일광 절약 시간을 사용하면 해당 시각의 오프셋을 기록하므로 시계가 되돌아가 같은 지역 시각이 반복되어도 파일명을 구분할 수 있습니다. 이전 버전에서 생성한 `Z` 형식의 파일도 그대로 보존합니다.
+파일명은 `YYYYMMDDTHHMMSS+HHMM.json` 또는 음수 오프셋의 같은 형식을 사용합니다. UTC로 설정된 OS에서도 JSON에는 `+00:00`, 파일명에는 `+0000`을 명시하며 `Z`를 붙이지 않습니다. 시간대가 일광 절약 시간을 사용하면 해당 시각의 오프셋을 기록하므로 시계가 되돌아가 같은 지역 시각이 반복되어도 파일명을 구분할 수 있습니다. 이전 버전의 `Z` 형식도 읽으며, 모니터링 JSON 형식이 확인되면 같은 1시간 보존 규칙을 적용합니다.
 
 ## 측정 기준
 
@@ -468,11 +468,25 @@ proc, sysfs, tmpfs, overlay, 네트워크 파일시스템과 FUSE는 수집 대�
 
 SIGTERM/SIGINT는 signalfd로 처리하며 대기 중 즉시 종료할 수 있습니다. 진행 중인 동기 파일시스템 작업은 끝난 뒤 종료 신호를 처리합니다. 저장 장치 자체가 커널에서 장시간 멈춘 경우에는 즉시 종료를 보장하지 않습니다. systemd의 종료 제한 시간은 15초입니다.
 
-매 수집 주기에 임시 파일을 출력 디렉터리에 O_EXCL로 생성합니다. 모든 내용 기록과 파일 fsync 뒤 덮어쓰기 없는 원자적 이름 확정을 수행하고 디렉터리를 fsync합니다. 파일명이 이미 있으면 `_1`, `_2` 순번을 붙여 기존 파일을 보존합니다. 저장 실패는 journal에 기록하며, 다음 주기에 새로 수집한 결과의 저장을 다시 시도합니다. 실패한 과거 결과는 재전송하지 않습니다. 실패한 주기를 메모리에 무한 적재하거나 과거 파일을 삭제하지 않습니다. crash로 남은 `.tmp`는 결과 파일이 아니며, 자동으로 기존 파일을 삭제하지 않습니다.
+매 수집 주기에 임시 파일을 출력 디렉터리에 O_EXCL로 생성합니다. 모든 내용 기록과 파일 fsync 뒤 덮어쓰기 없는 원자적 이름 확정을 수행하고 디렉터리를 fsync합니다. 파일명이 이미 있으면 `_1`, `_2` 순번을 붙여 기존 파일을 보존합니다. 저장 실패는 journal에 기록하며, 다음 주기에 새로 수집한 결과의 저장을 다시 시도합니다. 실패한 과거 결과는 재전송하지 않습니다. 실패한 주기를 메모리에 무한 적재하지 않습니다. 완료된 과거 JSON은 아래 보존 규칙에 따라 정리합니다. crash로 남은 `.tmp`는 완료된 결과가 아니므로 자동 삭제 대상에서 제외합니다.
 
 기본 결과 파일 권한은 0640이며 systemd의 umask 0027이 적용됩니다. `.resource-monitor.lock`은 동일 출력 디렉터리에 대한 중복 실행을 막는 잠금 파일입니다. 저장기는 잠금을 확보한 디렉터리 FD에 결과를 기록하며, 경로가 외부에서 교체되어도 다른 디렉터리를 임의로 따라가지 않습니다. 실행 중 잠금 파일을 삭제하거나 교체하지 마십시오. 이전·준비 실패 경로의 잠금 파일은 남을 수 있으며 파일 존재 자체가 잠금 보유를 뜻하지는 않습니다.
 
-기본 60초 주기로 정상 실행되고 저장에 성공하면 한 호스트에서 하루 약 1,440개 파일이 생성됩니다. 자동 삭제 기능은 없으므로 보존 기간에 맞는 별도 보관·정리 정책이 필요합니다.
+### 모니터링 JSON 1시간 보존
+
+1.9.0은 데몬 시작 시 한 번, 이후 수집 주기와 독립된 60초 타이머로 오래된 모니터링 JSON을 정리합니다. 파일명에 기록된 **수집 시각부터 3,600초 이상** 지난 파일이 대상이며, 정확히 1시간인 파일도 삭제합니다. 파일시스템의 수정 시각이나 ctime으로 생성 시각을 추정하지 않습니다. JSON 본문의 `timestamp`와 파일명의 시각이 일치하는지도 확인합니다. 시간대 오프셋을 UTC 시각으로 환산하므로 OS 시간대를 변경해도 같은 기준으로 판단합니다.
+
+삭제 범위는 현재 적용된 `collection.output_directory`(기본 `/Monitor`)의 직계 파일입니다. 역할이 분석 또는 수집인지와 관계없이 같은 규칙을 적용합니다. 출력 경로를 변경하면 다음 정리부터 새 경로만 검사하며 이전 경로의 남은 파일을 계속 삭제하지 않습니다. 보존 시간과 정리 간격은 현재 각각 1시간과 60초로 고정되어 있습니다. 수집 주기를 60초보다 길게 바꾸어도 정리 타이머는 유지됩니다. 실행 중 작업이나 대량 과거 파일 검사에 시간이 걸리면 실제 정리 완료가 늦어질 수 있습니다.
+
+`YYYYMMDDTHHMMSS+HHMM.json`, 음수 오프셋, 기존 `Z` 형식과 `_1`~`_9999` 충돌 접미사를 인식합니다. 유효한 날짜와 모니터링 JSON 필수 구조를 확인한 16MiB 이하의 일반 파일만 삭제합니다. 다른 JSON, 내용이 손상되거나 시각이 일치하지 않는 파일, 미래 시각 파일, 하위 폴더, 심볼릭 링크, 하드링크, 잠금 파일과 `.tmp`는 보존합니다. `/CloudESM/data/processing/collector`와 `normalize`의 `.tmp`·`.done`은 삭제하지 않습니다.
+
+삭제 성공 시 journal에 `snapshots_pruned count=N`, 실패 시 `component=snapshot_retention` 오류를 남깁니다. 삭제 실패는 리소스 수집과 새 JSON 저장을 중단시키지 않으며 다음 정리 시 다시 시도합니다. 이 유지관리 결과는 현재 JSON 스키마에 새 필드를 추가하지 않고 journal에 기록합니다.
+
+```bash
+journalctl -u resource-monitor --since '-10 minutes' --no-pager
+```
+
+기본 60초 수집에서는 하루 약 1,440개 파일을 생성하되 통상 최근 1시간 분량만 남습니다. 업그레이드 후 첫 실행부터 이미 존재하는 정상 모니터링 JSON에도 이 규칙이 적용됩니다. 더 오래 보관할 자료는 현재 출력 경로 밖에 별도로 보관하십시오.
 
 ## 수동 진단
 
@@ -498,7 +512,7 @@ RPM은 빌드할 OL8 또는 OL9 시스템에서 다음처럼 생성합니다. So
 ```bash
 sudo dnf install -y rpm-build gcc-toolset-15-gcc-c++ cmake make python3 pkgconf-pkg-config mariadb-connector-c-devel
 mkdir -p "$HOME/rpmbuild/SOURCES" "$HOME/rpmbuild/SPECS"
-cp artifacts/resource-monitor-1.8.0.tar.gz "$HOME/rpmbuild/SOURCES/"
+cp artifacts/resource-monitor-1.9.0.tar.gz "$HOME/rpmbuild/SOURCES/"
 curl --fail --location https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz --output "$HOME/rpmbuild/SOURCES/json.tar.xz"
 cp packaging/rpm/resource-monitor.spec "$HOME/rpmbuild/SPECS/"
 rpmbuild -ba "$HOME/rpmbuild/SPECS/resource-monitor.spec"

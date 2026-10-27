@@ -1,6 +1,7 @@
 // tests/DaemonRunnerTest.cpp
 #include "TestSupport.hpp"
 #include "application/SettingsController.hpp"
+#include "application/SnapshotRetention.hpp"
 #include "infrastructure/linux/UniqueFd.hpp"
 #include "runtime/DaemonRunner.hpp"
 
@@ -376,6 +377,46 @@ void analysis_reload_before_collection_test() {
     CHECK(WEXITSTATUS(status) == 0);
 }
 
+void retention_failure_keeps_collection_test() {
+    class FailingRetention final : public ISnapshotRetention {
+    public:
+        std::expected<std::size_t, Error> prune(std::chrono::system_clock::time_point cutoff) override {
+            ++calls;
+            observed_cutoff = cutoff;
+            if (throw_error) throw std::runtime_error("fixture retention exception");
+            return std::unexpected(Error{"snapshot_retention", "fixture", "fixture_cleanup_failed",
+                "Unable to remove expired fixture"});
+        }
+        unsigned calls{};
+        bool throw_error{};
+        std::chrono::system_clock::time_point observed_cutoff;
+    };
+    for (const bool throw_error : {false, true}) {
+        FixtureReader reader;
+        FixedConfig config;
+        RecordingStore store;
+        CollectAndStore use_case(reader, store, config);
+        FailingRetention storage;
+        storage.throw_error = throw_error;
+        SnapshotRetention retention(storage);
+        const auto invalid_clock = retention.run(std::chrono::system_clock::time_point::min());
+        CHECK(!invalid_clock && invalid_clock.error().code == "invalid_timestamp");
+        CHECK(storage.calls == 0);
+        DaemonOptions options;
+        options.interval = 1s;
+        options.once = true;
+        CapturedLogs logs;
+        const auto started = std::chrono::system_clock::now();
+        CHECK(run_daemon(use_case, options, nullptr, &retention) == 0);
+        CHECK(storage.calls == 1);
+        CHECK(storage.observed_cutoff >= started - 1h);
+        CHECK(storage.observed_cutoff <= std::chrono::system_clock::now() - 1h);
+        CHECK(store.calls == 1);
+        CHECK(logs.errors.str().find("component=snapshot_retention") != std::string::npos);
+        CHECK(logs.output.str().find("snapshot_saved") != std::string::npos);
+    }
+}
+
 }
 
 int main() {
@@ -383,5 +424,6 @@ int main() {
         runtime_overrun_test();
         once_status_tests();
         analysis_reload_before_collection_test();
+        retention_failure_keeps_collection_test();
     });
 }

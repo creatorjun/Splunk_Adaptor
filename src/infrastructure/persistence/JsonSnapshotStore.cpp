@@ -7,8 +7,12 @@
 #include <atomic>
 #include <cerrno>
 #include <ctime>
+#include <dirent.h>
 #include <fcntl.h>
 #include <linux/fs.h>
+#include <memory>
+#include <optional>
+#include <string_view>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -54,6 +58,129 @@ Error store_error(const std::filesystem::path& path, std::string code, std::stri
 Error io_error(const std::filesystem::path& path, const char* operation, int error) {
     return store_error(path, "io_error", std::string(operation) + ": " +
         std::error_code(error, std::generic_category()).message());
+}
+
+Error retention_io_error(const std::filesystem::path& path, const char* operation, int error) {
+    auto result = io_error(path, operation, error);
+    result.component = "snapshot_retention";
+    return result;
+}
+
+std::optional<unsigned> decimal(std::string_view text) {
+    if (text.empty()) return std::nullopt;
+    unsigned result{};
+    for (const char character : text) {
+        if (character < '0' || character > '9') return std::nullopt;
+        result = result * 10 + static_cast<unsigned>(character - '0');
+    }
+    return result;
+}
+
+std::optional<std::chrono::sys_seconds> snapshot_time(std::string_view text) {
+    if ((text.size() != 16 && text.size() != 20) || text[8] != 'T') return std::nullopt;
+    const auto year = decimal(text.substr(0, 4));
+    const auto month = decimal(text.substr(4, 2));
+    const auto day = decimal(text.substr(6, 2));
+    const auto hour = decimal(text.substr(9, 2));
+    const auto minute = decimal(text.substr(11, 2));
+    const auto second = decimal(text.substr(13, 2));
+    if (!year || !month || !day || !hour || !minute || !second ||
+        *year == 0 || *hour > 23 || *minute > 59 || *second > 59) return std::nullopt;
+    const std::chrono::year_month_day date{std::chrono::year{static_cast<int>(*year)},
+        std::chrono::month{*month}, std::chrono::day{*day}};
+    if (!date.ok()) return std::nullopt;
+    int offset{};
+    if (text.size() == 16) {
+        if (text[15] != 'Z') return std::nullopt;
+    } else {
+        if (text[15] != '+' && text[15] != '-') return std::nullopt;
+        const auto offset_hour = decimal(text.substr(16, 2));
+        const auto offset_minute = decimal(text.substr(18, 2));
+        if (!offset_hour || !offset_minute || *offset_hour > 23 || *offset_minute > 59) return std::nullopt;
+        offset = static_cast<int>(*offset_hour * 60 + *offset_minute);
+        if (text[15] == '-') offset = -offset;
+    }
+    return std::chrono::sys_days{date} + std::chrono::hours{*hour} +
+        std::chrono::minutes{*minute} + std::chrono::seconds{*second} - std::chrono::minutes{offset};
+}
+
+std::optional<std::chrono::sys_seconds> snapshot_filename_time(std::string_view name) {
+    if (!name.ends_with(".json")) return std::nullopt;
+    name.remove_suffix(5);
+    const auto suffix = name.find('_');
+    if (suffix != std::string_view::npos) {
+        const auto collision = name.substr(suffix + 1);
+        if (collision.empty() || collision.size() > 4 || collision.front() == '0' || !decimal(collision)) {
+            return std::nullopt;
+        }
+        name = name.substr(0, suffix);
+    }
+    return snapshot_time(name);
+}
+
+std::optional<std::chrono::sys_seconds> snapshot_document_time(std::string_view text) {
+    if ((text.size() != 20 && text.size() != 25) || text[4] != '-' || text[7] != '-' ||
+        text[10] != 'T' || text[13] != ':' || text[16] != ':') return std::nullopt;
+    std::string compact{text.substr(0, 4)};
+    compact += text.substr(5, 2);
+    compact += text.substr(8, 2);
+    compact += 'T';
+    compact += text.substr(11, 2);
+    compact += text.substr(14, 2);
+    compact += text.substr(17, 2);
+    if (text.size() == 20) {
+        compact += text[19];
+    } else {
+        if (text[22] != ':') return std::nullopt;
+        compact += text.substr(19, 3);
+        compact += text.substr(23, 2);
+    }
+    return snapshot_time(compact);
+}
+
+bool monitor_document(const std::string& content, std::chrono::sys_seconds timestamp) {
+    const auto document = nlohmann::json::parse(content, nullptr, false);
+    if (document.is_discarded() || !document.is_object() ||
+        !document.contains("schema_version") || !document["schema_version"].is_number_integer() ||
+        document["schema_version"] != 1 || !document.contains("timestamp") ||
+        !document["timestamp"].is_string() || !document.contains("hostname") ||
+        !document["hostname"].is_string() || !document.contains("cpu") || !document["cpu"].is_object() ||
+        !document.contains("memory") || !document["memory"].is_object() ||
+        !document.contains("filesystems") || !document["filesystems"].is_array() ||
+        !document.contains("errors") || !document["errors"].is_array()) return false;
+    const auto recorded = snapshot_document_time(document["timestamp"].get_ref<const std::string&>());
+    if (!recorded || *recorded != timestamp || !document.contains("status") ||
+        !document["status"].is_string() || !document.contains("collection_status") ||
+        !document["collection_status"].is_string()) return false;
+    const auto& status = document["status"].get_ref<const std::string&>();
+    const auto& collection_status = document["collection_status"].get_ref<const std::string&>();
+    return (status == "ok" || status == "warning" || status == "unknown") &&
+        (collection_status == "ok" || collection_status == "partial" || collection_status == "error");
+}
+
+bool same_regular_file(const struct stat& left, const struct stat& right) {
+    return S_ISREG(left.st_mode) && S_ISREG(right.st_mode) && left.st_nlink == 1 && right.st_nlink == 1 &&
+        left.st_dev == right.st_dev && left.st_ino == right.st_ino && left.st_size == right.st_size &&
+        left.st_mtim.tv_sec == right.st_mtim.tv_sec && left.st_mtim.tv_nsec == right.st_mtim.tv_nsec &&
+        left.st_ctim.tv_sec == right.st_ctim.tv_sec && left.st_ctim.tv_nsec == right.st_ctim.tv_nsec;
+}
+
+std::expected<std::optional<std::string>, Error> read_retention_document(int file,
+    const std::filesystem::path& path) {
+    constexpr std::size_t maximum_bytes = 16 * 1024 * 1024;
+    std::string content;
+    std::array<char, 8192> buffer{};
+    for (;;) {
+        const auto count = ::read(file, buffer.data(), buffer.size());
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            return std::unexpected(retention_io_error(path, "read snapshot", errno));
+        }
+        if (count == 0) return content;
+        const auto bytes = static_cast<std::size_t>(count);
+        if (bytes > maximum_bytes - content.size()) return std::optional<std::string>{};
+        content.append(buffer.data(), bytes);
+    }
 }
 
 std::expected<int, Error> create_temporary_file(int directory, const std::filesystem::path& path,
@@ -395,6 +522,81 @@ std::expected<void, Error> JsonSnapshotStore::save(const ResourceSnapshot& snaps
         return {};
     }
     return std::unexpected(store_error(directory_, "name_collision", "Snapshot filename collision limit exceeded"));
+}
+
+std::expected<std::size_t, Error> JsonSnapshotStore::prune(std::chrono::system_clock::time_point cutoff) {
+    const std::lock_guard guard(mutex_);
+    if (directory_fd_ < 0) {
+        const auto configured = configure_output_locked(directory_);
+        if (!configured) {
+            auto error = configured.error();
+            error.component = "snapshot_retention";
+            return std::unexpected(std::move(error));
+        }
+    }
+    FileDescriptor scan_file(::openat(directory_fd_, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+    if (scan_file.get() < 0) {
+        return std::unexpected(retention_io_error(directory_, "open scan directory", errno));
+    }
+    struct CloseDirectory {
+        void operator()(DIR* directory) const noexcept { ::closedir(directory); }
+    };
+    std::unique_ptr<DIR, CloseDirectory> stream(::fdopendir(scan_file.get()));
+    if (!stream) return std::unexpected(retention_io_error(directory_, "open directory stream", errno));
+    static_cast<void>(scan_file.release());
+    std::size_t removed{};
+    const auto finish = [&](std::optional<Error> error = {}) -> std::expected<std::size_t, Error> {
+        if (removed > 0 && ::fsync(directory_fd_) < 0 && !error) {
+            error = retention_io_error(directory_, "fsync pruned directory", errno);
+        }
+        if (error) return std::unexpected(std::move(*error));
+        return removed;
+    };
+    const auto cutoff_seconds = std::chrono::floor<std::chrono::seconds>(cutoff);
+    for (;;) {
+        errno = 0;
+        const auto* entry = ::readdir(stream.get());
+        if (entry == nullptr) {
+            if (errno != 0) return finish(retention_io_error(directory_, "read directory stream", errno));
+            return finish();
+        }
+        const std::string name{entry->d_name};
+        const auto timestamp = snapshot_filename_time(name);
+        if (!timestamp || *timestamp > cutoff_seconds) continue;
+        const auto path = directory_ / name;
+        struct stat named{};
+        if (::fstatat(directory_fd_, name.c_str(), &named, AT_SYMLINK_NOFOLLOW) < 0) {
+            if (errno == ENOENT) continue;
+            return finish(retention_io_error(path, "stat snapshot candidate", errno));
+        }
+        constexpr off_t maximum_bytes = 16 * 1024 * 1024;
+        if (!S_ISREG(named.st_mode) || named.st_nlink != 1 || named.st_size <= 0 ||
+            named.st_size > maximum_bytes) continue;
+        FileDescriptor file(::openat(directory_fd_, name.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC));
+        if (file.get() < 0) {
+            if (errno == ENOENT || errno == ELOOP || errno == ENOTDIR) continue;
+            return finish(retention_io_error(path, "open snapshot candidate", errno));
+        }
+        struct stat opened{};
+        if (::fstat(file.get(), &opened) < 0) return finish(retention_io_error(path, "stat opened snapshot", errno));
+        if (!same_regular_file(named, opened)) continue;
+        const auto content = read_retention_document(file.get(), path);
+        if (!content) return finish(content.error());
+        if (!*content || !monitor_document(**content, *timestamp)) continue;
+        struct stat current{};
+        if (::fstat(file.get(), &current) < 0) return finish(retention_io_error(path, "recheck snapshot", errno));
+        if (!same_regular_file(opened, current)) continue;
+        if (::fstatat(directory_fd_, name.c_str(), &current, AT_SYMLINK_NOFOLLOW) < 0) {
+            if (errno == ENOENT) continue;
+            return finish(retention_io_error(path, "recheck snapshot pathname", errno));
+        }
+        if (!same_regular_file(opened, current)) continue;
+        if (::unlinkat(directory_fd_, name.c_str(), 0) < 0) {
+            if (errno == ENOENT) continue;
+            return finish(retention_io_error(path, "remove expired snapshot", errno));
+        }
+        ++removed;
+    }
 }
 
 }

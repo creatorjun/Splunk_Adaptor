@@ -9,6 +9,7 @@
 namespace monitor {
 
 class SettingsController;
+class SnapshotRetention;
 
 struct DaemonOptions {
     std::filesystem::path output_directory{"/Monitor"};
@@ -17,7 +18,7 @@ struct DaemonOptions {
 };
 
 int run_daemon(CollectAndStore& use_case, const DaemonOptions& options,
-    SettingsController* settings = nullptr);
+    SettingsController* settings = nullptr, SnapshotRetention* retention = nullptr);
 void log_error(const Error& error);
 
 }

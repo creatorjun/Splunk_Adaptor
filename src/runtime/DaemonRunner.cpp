@@ -2,6 +2,7 @@
 #include "runtime/DaemonRunner.hpp"
 
 #include "application/SettingsController.hpp"
+#include "application/SnapshotRetention.hpp"
 #include "infrastructure/linux/UniqueFd.hpp"
 
 #include <cerrno>
@@ -63,7 +64,7 @@ void log_error(const Error& error) {
 }
 
 int run_daemon(CollectAndStore& use_case, const DaemonOptions& options,
-    SettingsController* settings) {
+    SettingsController* settings, SnapshotRetention* retention) {
     SignalMask signal_mask;
     UniqueFd signals(::signalfd(-1, signal_mask.get(), SFD_CLOEXEC | SFD_NONBLOCK));
     if (!signals) {
@@ -98,15 +99,32 @@ int run_daemon(CollectAndStore& use_case, const DaemonOptions& options,
             return system_failure("arm settings timer");
         }
     }
+    UniqueFd retention_timer;
+    const auto clean_snapshots = [&] {
+        const auto cleaned = retention->run(std::chrono::system_clock::now());
+        if (!cleaned) {
+            log_error(cleaned.error());
+        } else if (*cleaned != 0) {
+            std::cout << "snapshots_pruned count=" << *cleaned << std::endl;
+        }
+    };
+    if (retention) {
+        retention_timer.reset(::timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK));
+        if (!retention_timer) return system_failure("create retention timer");
+        if (arm_timer(retention_timer.get(), SnapshotRetention::check_interval) != 0) {
+            return system_failure("arm retention timer");
+        }
+        clean_snapshots();
+    }
     std::cout << "resource-monitor started interval_seconds=" << interval.count()
               << " output=" << safe_log_text(settings ? settings->current().output_directory
                   : options.output_directory.string()) << std::endl;
     pollfd descriptors[]{{signals.get(), POLLIN, 0}, {timer.get(), POLLIN, 0},
-        {reload_timer.get(), POLLIN, 0}};
+        {reload_timer.get(), POLLIN, 0}, {retention_timer.get(), POLLIN, 0}};
     std::uint64_t skipped_intervals{};
     std::optional<Error> reload_error;
     for (;;) {
-        const int ready = ::poll(descriptors, 3, -1);
+        const int ready = ::poll(descriptors, 4, -1);
         if (ready < 0) {
             if (errno == EINTR) {
                 continue;
@@ -120,7 +138,7 @@ int run_daemon(CollectAndStore& use_case, const DaemonOptions& options,
                 return 0;
             }
         }
-        if ((descriptors[0].revents | descriptors[1].revents | descriptors[2].revents) &
+        if ((descriptors[0].revents | descriptors[1].revents | descriptors[2].revents | descriptors[3].revents) &
             (POLLERR | POLLHUP | POLLNVAL)) {
             log_error({"runtime", "poll", "descriptor_failure", "Event descriptor failed"});
             return 1;
@@ -160,11 +178,23 @@ int run_daemon(CollectAndStore& use_case, const DaemonOptions& options,
                                   << " output=" << safe_log_text(current.output_directory) << std::endl;
                     }
                     if (interval_changed) {
-                        continue;
+                        descriptors[1].revents = 0;
                     }
                 }
             } else if (count >= 0 || errno != EAGAIN) {
                 return system_failure("read settings timer");
+            }
+        }
+        if (retention && (descriptors[3].revents & POLLIN) != 0) {
+            std::uint64_t checks{};
+            ssize_t count{};
+            do {
+                count = ::read(retention_timer.get(), &checks, sizeof(checks));
+            } while (count < 0 && errno == EINTR);
+            if (count == sizeof(checks)) {
+                clean_snapshots();
+            } else if (count >= 0 || errno != EAGAIN) {
+                return system_failure("read retention timer");
             }
         }
         if ((descriptors[1].revents & POLLIN) == 0) {

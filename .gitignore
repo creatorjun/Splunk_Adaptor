@@ -1,6 +1,7 @@
 # .gitignore
 /build/
 /artifacts/
+/output/
 __pycache__/
 *.pyc
 secrets/
