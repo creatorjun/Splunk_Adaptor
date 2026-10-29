@@ -6,8 +6,8 @@ namespace {
 
 using namespace monitor;
 
-const std::string collector_path = "/CloudESM/data/processing/collector";
-const std::string normalize_path = "/CloudESM/data/processing/normalize";
+const std::string collector_path = "/custom/input-processing";
+const std::string normalize_path = "/custom/output-processing";
 
 struct Settings final : IMonitorSettingsProvider {
     MonitorSettings value;
@@ -49,6 +49,8 @@ int main() {
         reader.next.scan_started_at = started;
         reader.next.scanned_at = finished;
         reader.next.directories = {{collector_path, 7, 12, {}}, {normalize_path, 0, 2, {}}};
+        reader.next.directories.front().kind = ProcessingDirectoryKind::collector;
+        reader.next.directories.back().kind = ProcessingDirectoryKind::normalize;
         snapshot = monitor.collect();
         CHECK(snapshot.status == ProcessingFilesStatus::ok);
         CHECK(snapshot.scan_started_at == started);
@@ -62,6 +64,8 @@ int main() {
         CHECK(snapshot.alerts.empty());
 
         reader.next.directories = {{collector_path, 100, 99, {}}, {normalize_path, 101, 100, {}}};
+        reader.next.directories.front().kind = ProcessingDirectoryKind::collector;
+        reader.next.directories.back().kind = ProcessingDirectoryKind::normalize;
         snapshot = monitor.collect();
         CHECK(snapshot.status == ProcessingFilesStatus::warning);
         CHECK(snapshot.alerts.size() == 3);
@@ -100,6 +104,8 @@ int main() {
         settings.value.processing_files.collector = {0, 0};
         settings.value.processing_files.normalize = {0, 0};
         reader.next.directories = {{collector_path, 0, 0, {}}, {normalize_path, 0, 0, {}}};
+        reader.next.directories.front().kind = ProcessingDirectoryKind::collector;
+        reader.next.directories.back().kind = ProcessingDirectoryKind::normalize;
         snapshot = monitor.collect();
         CHECK(snapshot.status == ProcessingFilesStatus::warning);
         CHECK(snapshot.alerts.size() == 4);
@@ -133,6 +139,8 @@ int main() {
         settings.value.processing_files = {};
         reader.next.directories = {{collector_path, 4, 8, {}}, {normalize_path, {}, {},
             {{"processing_files", normalize_path, "permission_denied", "Cannot read directory"}}}};
+        reader.next.directories.front().kind = ProcessingDirectoryKind::collector;
+        reader.next.directories.back().kind = ProcessingDirectoryKind::normalize;
         snapshot = monitor.collect();
         CHECK(snapshot.status == ProcessingFilesStatus::partial);
         CHECK(snapshot.directories.front().tmp_count == 4);

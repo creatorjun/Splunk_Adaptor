@@ -122,11 +122,12 @@ ProcessingDirectoryCount scan_root(const std::filesystem::path& path,
 }
 
 DirectoryProcessingFileScanner::DirectoryProcessingFileScanner()
-    : DirectoryProcessingFileScanner({"/CloudESM/data/processing/collector",
-        "/CloudESM/data/processing/normalize"}) {}
+    : DirectoryProcessingFileScanner({
+        {"/CloudESM/data/processing/collector", ProcessingDirectoryKind::collector},
+        {"/CloudESM/data/processing/normalize", ProcessingDirectoryKind::normalize}}) {}
 
 DirectoryProcessingFileScanner::DirectoryProcessingFileScanner(
-    std::vector<std::filesystem::path> roots, ProcessingFileScanLimits limits)
+    std::vector<ProcessingDirectoryRoot> roots, ProcessingFileScanLimits limits)
     : roots_(std::move(roots)), limits_(limits) {
     if (roots_.empty() || roots_.size() > 32 || limits_.max_depth > 128
         || limits_.max_entries == 0 || limits_.max_duration.count() <= 0) {
@@ -140,9 +141,10 @@ ProcessingFilesSnapshot DirectoryProcessingFileScanner::scan(std::stop_token sto
     result.scan_started_at = std::chrono::system_clock::now();
     const auto deadline = Clock::now() + limits_.max_duration;
     std::size_t complete{};
-    for (const auto& path : roots_) {
+    for (const auto& root : roots_) {
         if (stop.stop_requested()) return result;
-        auto directory = scan_root(path, limits_, stop, deadline);
+        auto directory = scan_root(root.path, limits_, stop, deadline);
+        directory.kind = root.kind;
         if (stop.stop_requested()) return result;
         if (directory.errors.empty()) ++complete;
         result.directories.push_back(std::move(directory));

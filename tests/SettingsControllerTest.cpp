@@ -11,8 +11,11 @@ using namespace monitor;
 
 MonitorSettings settings(std::chrono::seconds interval = std::chrono::seconds{60},
     std::string directory = "/Monitor", double threshold = 80.0) {
-    return MonitorSettings{ThresholdPolicy{threshold, threshold, threshold}, interval,
+    auto result = MonitorSettings{ThresholdPolicy{threshold, threshold, threshold}, interval,
         std::move(directory)};
+    result.mysql.database = "CloudESM";
+    result.mysql.tls_mode = "disabled";
+    return result;
 }
 
 struct Reader final : ISettingsReader {
@@ -44,11 +47,13 @@ struct Database final : IMySqlConfiguration {
     std::expected<bool, Error> prepared{true};
     MySqlSettings candidate;
     MySqlSettings active;
+    std::size_t prepares{};
     std::size_t commits{};
     std::size_t connection_changes{};
     bool credential_changed{false};
 
     std::expected<bool, Error> prepare(const MySqlSettings& next) override {
+        ++prepares;
         candidate = next;
         return prepared;
     }
@@ -613,6 +618,54 @@ void processing_files_settings_reload_tests() {
     CHECK(output.attempts.size() == 1);
 }
 
+void invalid_reader_settings_are_rejected_before_side_effects() {
+    Reader reader;
+    reader.next->collection_interval = std::chrono::seconds{0};
+    Output output;
+    Database database;
+    SettingsController controller(reader, output, {}, &database);
+    const auto invalid_start = controller.initialize();
+    CHECK(!invalid_start && invalid_start.error().code == "invalid_interval");
+    CHECK(output.attempts.empty() && database.prepares == 0 && database.commits == 0);
+    reader.next = settings();
+    CHECK(controller.initialize());
+    const auto accepted = controller.current();
+    const auto output_attempts = output.attempts.size();
+    const auto prepares = database.prepares;
+    const auto commits = database.commits;
+    reader.next->output_directory = "/must-not-apply";
+    reader.next->process_monitor.prx = {"Repeated", "Repeated"};
+    const auto invalid_reload = controller.reload();
+    CHECK(!invalid_reload && invalid_reload.error().code == "invalid_process_monitor");
+    CHECK(controller.current() == accepted && output.active == accepted.output_directory);
+    CHECK(output.attempts.size() == output_attempts && database.prepares == prepares && database.commits == commits);
+    reader.next = accepted;
+    reader.next->role = ServerRole::anal;
+    reader.next->mysql.database.clear();
+    CHECK(!controller.reload());
+    CHECK(controller.reload_error()->code == "invalid_mysql");
+    CHECK(controller.current() == accepted && database.prepares == prepares);
+    reader.next = accepted;
+    CHECK(controller.reload());
+    CHECK(!controller.reload_error());
+}
+
+void invalid_overrides_are_rejected_before_side_effects() {
+    for (const auto& overrides : {
+        SettingsOverrides{std::chrono::seconds{0}, std::nullopt},
+        SettingsOverrides{std::chrono::seconds{86401}, std::nullopt},
+        SettingsOverrides{std::nullopt, "relative-output"},
+        SettingsOverrides{std::nullopt, std::string{"/bad\0output", 11}}}) {
+        Reader reader;
+        Output output;
+        Database database;
+        SettingsController controller(reader, output, overrides, &database);
+        const auto result = controller.initialize();
+        CHECK(!result && result.error().component == "settings_config");
+        CHECK(output.attempts.empty() && database.prepares == 0 && database.commits == 0);
+    }
+}
+
 }
 
 int main() {
@@ -628,5 +681,7 @@ int main() {
         role_reload_tests();
         process_monitor_settings_reload_tests();
         processing_files_settings_reload_tests();
+        invalid_reader_settings_are_rejected_before_side_effects();
+        invalid_overrides_are_rejected_before_side_effects();
     });
 }

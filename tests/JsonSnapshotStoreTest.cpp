@@ -254,7 +254,7 @@ void check_log_volume_snapshots() {
     monitor::JsonSnapshotStore store(directory.path);
     auto snapshot = make_snapshot();
     snapshot.log_volume.status = monitor::LogVolumeStatus::ok;
-    snapshot.log_volume.window = monitor::LogVolumeWindow{202610142125ULL, 202610142130ULL,
+    snapshot.log_volume.window = monitor::LogVolumeWindow{
         std::chrono::sys_days{std::chrono::year{2026}/10/14} + std::chrono::hours{12} + std::chrono::minutes{25},
         std::chrono::sys_days{std::chrono::year{2026}/10/14} + std::chrono::hours{12} + std::chrono::minutes{30}};
     snapshot.log_volume.queried_at = snapshot.timestamp;

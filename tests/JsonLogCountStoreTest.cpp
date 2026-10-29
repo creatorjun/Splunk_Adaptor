@@ -58,7 +58,7 @@ void write(const std::filesystem::path& path, const Json& value) {
 
 LogCountState unfinished() {
     return {"test-source", base + minutes{55},
-        LogCountHour{base, base + hours{1}, base, 11, {{"192.0.2.1", 110, 0}}}, std::nullopt};
+        LogCountHour{base, base + hours{1}, base, 11, {{"192.0.2.1", 110, {}}}}, std::nullopt};
 }
 
 LogCountState finished() {
@@ -66,7 +66,7 @@ LogCountState finished() {
 }
 
 LogCountReport report() {
-    return {"test-source", {base, base + hours{1}, base, 12, {{"192.0.2.1", 120, 0}}},
+    return {"test-source", {base, base + hours{1}, base, 12, {{"192.0.2.1", 120, {}}}},
         base + hours{1} + seconds{1}};
 }
 

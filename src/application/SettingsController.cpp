@@ -1,5 +1,6 @@
 // src/application/SettingsController.cpp
 #include "application/SettingsController.hpp"
+#include "application/SettingsValidation.hpp"
 
 #include <stdexcept>
 #include <utility>
@@ -70,6 +71,10 @@ std::expected<bool, Error> SettingsController::load_and_apply() {
     }
     if (overrides_.output_directory) {
         next->output_directory = *overrides_.output_directory;
+    }
+    if (const auto valid = validate_settings(*next); !valid) {
+        last_error_ = valid.error();
+        return std::unexpected(*last_error_);
     }
     next->mysql.enabled = next->role == ServerRole::anal;
     if (!mysql_ && next->mysql.enabled) {

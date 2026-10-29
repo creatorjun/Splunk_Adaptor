@@ -13,15 +13,20 @@ struct ProcessingFileScanLimits {
     std::chrono::milliseconds max_duration{std::chrono::seconds{55}};
 };
 
+struct ProcessingDirectoryRoot {
+    std::filesystem::path path;
+    ProcessingDirectoryKind kind{ProcessingDirectoryKind::unknown};
+};
+
 class DirectoryProcessingFileScanner final : public IProcessingFileScanner {
 public:
     DirectoryProcessingFileScanner();
-    explicit DirectoryProcessingFileScanner(std::vector<std::filesystem::path> roots,
+    explicit DirectoryProcessingFileScanner(std::vector<ProcessingDirectoryRoot> roots,
         ProcessingFileScanLimits limits = {});
     ProcessingFilesSnapshot scan(std::stop_token stop) override;
 
 private:
-    std::vector<std::filesystem::path> roots_;
+    std::vector<ProcessingDirectoryRoot> roots_;
     ProcessingFileScanLimits limits_;
 };
 

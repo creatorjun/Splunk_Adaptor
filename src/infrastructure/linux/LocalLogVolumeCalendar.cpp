@@ -1,6 +1,6 @@
 // src/infrastructure/linux/LocalLogVolumeCalendar.cpp
 #include "infrastructure/linux/LocalLogVolumeCalendar.hpp"
-#include "application/LogCountPolicy.hpp"
+#include "domain/LogCountPolicy.hpp"
 
 #include <ctime>
 
@@ -20,13 +20,6 @@ std::optional<std::tm> local_time(Clock::time_point timestamp) {
         return std::nullopt;
     }
     return local;
-}
-
-std::uint64_t minute_bucket(const std::tm& local) {
-    return static_cast<std::uint64_t>(local.tm_year + 1900) * 100000000ULL +
-        static_cast<std::uint64_t>(local.tm_mon + 1) * 1000000ULL +
-        static_cast<std::uint64_t>(local.tm_mday) * 10000ULL +
-        static_cast<std::uint64_t>(local.tm_hour) * 100ULL + static_cast<std::uint64_t>(local.tm_min);
 }
 
 bool same_local_minute(const std::tm& left, const std::tm& right) {
@@ -77,7 +70,8 @@ std::expected<LogVolumeWindow, Error> LocalLogVolumeCalendar::range(Clock::time_
     const auto local_start = local_time(start);
     const auto local_end = local_time(end);
     if (!local_start || !local_end || local_start->tm_sec != 0 || local_end->tm_sec != 0 ||
-        local_start->tm_min % 5 != 0 || local_end->tm_min % 5 != 0) return std::unexpected(calendar_error());
+        local_start->tm_min % std::chrono::duration_cast<std::chrono::minutes>(LogCountPolicy::query_interval).count() != 0 ||
+        local_end->tm_min % std::chrono::duration_cast<std::chrono::minutes>(LogCountPolicy::query_interval).count() != 0) return std::unexpected(calendar_error());
     for (auto cursor = start;; cursor += LogCountPolicy::query_interval) {
         const auto local = local_time(cursor);
         if (!local || ambiguous_local_time(*local)) {
@@ -86,10 +80,7 @@ std::expected<LogVolumeWindow, Error> LocalLogVolumeCalendar::range(Clock::time_
         }
         if (cursor == end) break;
     }
-    const auto start_bucket = minute_bucket(*local_start);
-    const auto end_bucket = minute_bucket(*local_end);
-    if (start_bucket >= end_bucket) return std::unexpected(calendar_error());
-    return LogVolumeWindow{start_bucket, end_bucket, start, end};
+    return LogVolumeWindow{start, end};
 }
 
 std::expected<LogCountHour, Error> LocalLogVolumeCalendar::hour(Clock::time_point timestamp) const {
@@ -99,8 +90,8 @@ std::expected<LogCountHour, Error> LocalLogVolumeCalendar::hour(Clock::time_poin
     local->tm_min = 0;
     local->tm_sec = 0;
     const auto start = Clock::from_time_t(::mktime(&*local));
-    if (start > Clock::time_point::max() - std::chrono::hours{1}) return std::unexpected(calendar_error());
-    const auto end = start + std::chrono::hours{1};
+    if (start > Clock::time_point::max() - LogCountPolicy::report_interval) return std::unexpected(calendar_error());
+    const auto end = start + LogCountPolicy::report_interval;
     const auto end_local = local_time(end);
     if (timestamp < start || timestamp >= end || !end_local || end_local->tm_min != 0 || end_local->tm_sec != 0) {
         return std::unexpected(calendar_error());

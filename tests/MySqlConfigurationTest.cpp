@@ -83,7 +83,7 @@ struct Session final : IMySqlSession {
         state.wake.wait_for(lock, 15s, [&] { return !state.volume_blocked; });
         if (state.throw_volume) throw std::runtime_error("sensitive volume exception");
         if (state.fail_volume) return std::unexpected(Error{"log_volume", "table", "2013", "Query failed"});
-        return std::vector<EquipmentLogVolume>{{"192.0.2.1", count, window.start_bucket}};
+        return std::vector<EquipmentLogVolume>{{"192.0.2.1", count, window.start}};
     }
 
     Control& state;
@@ -383,7 +383,7 @@ void volume_window_cache_tests() {
     const auto settings = enabled_settings();
     wait_ready(configuration, settings);
     CHECK(configuration.commit());
-    LogVolumeWindow window{202610291000ULL, 202610291005ULL,
+    LogVolumeWindow window{
         std::chrono::sys_days{std::chrono::year{2026}/10/29} + 10h,
         std::chrono::sys_days{std::chrono::year{2026}/10/29} + 10h + 5min};
     wait_for([&] { return configuration.read_log_volume(window).status == LogVolumeReadStatus::ready; });
@@ -395,8 +395,6 @@ void volume_window_cache_tests() {
         CHECK(repeated.queried_at == first.queried_at && repeated.equipment == first.equipment);
     }
     CHECK(factory.inspect([](const Control& state) { return state.volume_queries.size() == 1; }));
-    window.start_bucket += 5;
-    window.end_bucket += 5;
     window.start += 5min;
     window.end += 5min;
     wait_for([&] { return configuration.read_log_volume(window).status == LogVolumeReadStatus::ready; });
@@ -424,15 +422,13 @@ void volume_error_and_stale_request_tests() {
     const auto settings = enabled_settings();
     wait_ready(configuration, settings);
     CHECK(configuration.commit());
-    LogVolumeWindow first{202610291000ULL, 202610291005ULL,
+    LogVolumeWindow first{
         std::chrono::sys_days{std::chrono::year{2026}/10/29} + 10h,
         std::chrono::sys_days{std::chrono::year{2026}/10/29} + 10h + 5min};
     factory.inspect([](Control& state) { state.volume_blocked = true; });
     configuration.read_log_volume(first);
     wait_for([&] { return factory.inspect([](const Control& state) { return state.volume_queries.size() == 1; }); });
     auto second = first;
-    second.start_bucket += 5;
-    second.end_bucket += 5;
     second.start += 5min;
     second.end += 5min;
     CHECK(configuration.read_log_volume(second).status == LogVolumeReadStatus::pending);
@@ -451,7 +447,7 @@ void volume_error_and_stale_request_tests() {
 }
 
 LogVolumeWindow first_window() {
-    return {202610291000ULL, 202610291005ULL,
+    return {
         std::chrono::sys_days{std::chrono::year{2026}/10/29} + 10h,
         std::chrono::sys_days{std::chrono::year{2026}/10/29} + 10h + 5min};
 }
@@ -503,8 +499,6 @@ void pending_identity_does_not_query_old_connection_test() {
     wait_for([&] { return configuration.read_log_volume(window).status == LogVolumeReadStatus::ready; });
     credentials.next = std::unexpected(Error{"mysql_credentials", "credentials", "invalid_json", "Invalid credentials"});
     CHECK(!configuration.prepare(settings));
-    window.start_bucket += 5;
-    window.end_bucket += 5;
     window.start += 5min;
     window.end += 5min;
     const auto invalid = configuration.read_log_volume(window);

@@ -1,6 +1,7 @@
 // src/application/LogVolumeMonitor.cpp
 #include "application/LogVolumeMonitor.hpp"
-#include "application/LogCountPolicy.hpp"
+#include "domain/LogCountPolicy.hpp"
+#include "domain/LogCountValidation.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -86,14 +87,14 @@ std::expected<LogVolumeMonitor::PendingCommit, Error> LogVolumeMonitor::aggregat
     candidate.analysis.status = reading.equipment.empty() ? LogVolumeStatus::no_data : LogVolumeStatus::ok;
     candidate.analysis.window = reading.window;
     candidate.analysis.queried_at = reading.queried_at;
-    std::map<std::uint64_t, std::vector<const EquipmentLogVolume*>> intervals;
-    std::set<std::pair<std::uint64_t, std::string_view>> unique;
+    std::map<Clock::time_point, std::vector<const EquipmentLogVolume*>> intervals;
+    std::set<std::pair<Clock::time_point, std::string_view>> unique;
     for (const auto& equipment : reading.equipment) {
         if (equipment.eqp_ip.empty() || equipment.eqp_ip.size() > 39 ||
             std::any_of(equipment.eqp_ip.begin(), equipment.eqp_ip.end(),
                 [](unsigned char value) { return value < 32 || value == 127; }) ||
-            !unique.emplace(equipment.start_bucket, equipment.eqp_ip).second) return std::unexpected(invalid_data());
-        intervals[equipment.start_bucket].push_back(&equipment);
+            !unique.emplace(equipment.interval_start, equipment.eqp_ip).second) return std::unexpected(invalid_data());
+        intervals[equipment.interval_start].push_back(&equipment);
     }
     std::map<std::string, std::uint64_t> totals;
     if (state_->hour) {
@@ -111,11 +112,11 @@ std::expected<LogVolumeMonitor::PendingCommit, Error> LogVolumeMonitor::aggregat
             candidate.state.hour->coverage_start = start;
         }
         auto& hour = *candidate.state.hour;
-        if (start < hour.start || subwindow->end > hour.end || hour.completed_intervals >= 12 ||
+        if (start < hour.start || subwindow->end > hour.end || hour.completed_intervals >= LogCountPolicy::intervals_per_hour ||
             hour.coverage_start + LogCountPolicy::query_interval * hour.completed_intervals != start) {
             return std::unexpected(invalid_data());
         }
-        if (const auto found = intervals.find(subwindow->start_bucket); found != intervals.end()) {
+        if (const auto found = intervals.find(subwindow->start); found != intervals.end()) {
             for (const auto* equipment : found->second) {
                 auto& count = totals[equipment->eqp_ip];
                 if (equipment->count > std::numeric_limits<std::uint64_t>::max() - count) {
@@ -125,13 +126,13 @@ std::expected<LogVolumeMonitor::PendingCommit, Error> LogVolumeMonitor::aggregat
             }
             intervals.erase(found);
         }
-        if (totals.size() > 10000) return std::unexpected(invalid_data());
+        if (totals.size() > LogCountPolicy::maximum_equipment) return std::unexpected(invalid_data());
         ++hour.completed_intervals;
         candidate.state.next_start = subwindow->end;
         if (subwindow->end == hour.end || subwindow->end == active_->end) {
             hour.equipment.clear();
             hour.equipment.reserve(totals.size());
-            for (const auto& [equipment, count] : totals) hour.equipment.push_back({equipment, count, 0});
+            for (const auto& [equipment, count] : totals) hour.equipment.push_back({equipment, count, {}});
         }
         if (subwindow->end == hour.end) {
             candidate.state.last_saved_hour = hour.start;
@@ -140,7 +141,11 @@ std::expected<LogVolumeMonitor::PendingCommit, Error> LogVolumeMonitor::aggregat
             totals.clear();
         }
     }
-    if (!intervals.empty()) return std::unexpected(invalid_data());
+    if (!intervals.empty() || !valid_log_count_state(candidate.state) ||
+        std::any_of(candidate.reports.begin(), candidate.reports.end(),
+            [](const LogCountReport& report) { return !valid_log_count_hour(report.hour, true); })) {
+        return std::unexpected(invalid_data());
+    }
     candidate.analysis.last_saved_hour = candidate.state.last_saved_hour;
     candidate.analysis.completed_intervals = candidate.state.hour ? candidate.state.hour->completed_intervals : 0;
     return candidate;
@@ -160,6 +165,7 @@ bool LogVolumeMonitor::tick(Clock::time_point timestamp) {
     if (!state_ || state_->source_identity != identity) {
         auto loaded = store_.load(settings.output_directory);
         if (!loaded) return fail(loaded.error());
+        if (*loaded && !valid_log_count_state(**loaded)) return fail(invalid_data());
         LogCountState candidate = loaded->has_value() && (**loaded).source_identity == identity
             ? std::move(**loaded) : LogCountState{identity, latest->start, std::nullopt, std::nullopt};
         const auto saved = store_.commit(settings.output_directory, candidate, {});
@@ -192,7 +198,7 @@ bool LogVolumeMonitor::tick(Clock::time_point timestamp) {
     if (!next_prune_ || timestamp >= *next_prune_) {
         const bool had_retention_error = retention_error_.has_value();
         const auto pruned = store_.prune(directory_, timestamp - LogCountPolicy::retention);
-        next_prune_ = timestamp + std::chrono::minutes{5};
+        next_prune_ = timestamp + LogCountPolicy::query_interval;
         if (!pruned) {
             retention_error_ = pruned.error();
             retention_error_->component = "log_count_retention";

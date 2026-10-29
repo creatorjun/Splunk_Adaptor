@@ -22,10 +22,7 @@ struct Calendar final : ILogVolumeCalendar {
         if (invalid || start >= end || end - start > 1h || (end - start) % 300s != Clock::duration::zero()) {
             return std::unexpected(Error{"log_volume", "calendar", "invalid_window", "Invalid window"});
         }
-        return LogVolumeWindow{
-            static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::minutes>(start.time_since_epoch()).count()),
-            static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::minutes>(end.time_since_epoch()).count()),
-            start, end};
+        return LogVolumeWindow{start, end};
     }
     std::expected<LogVolumeWindow, Error> window(Clock::time_point now) const override {
         const auto end = Clock::time_point{std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()) / 300 * 300};
@@ -54,9 +51,9 @@ struct Reader final : ILogVolumeReader {
                 result.equipment = *custom_equipment;
                 return result;
             }
-            for (auto bucket = window.start_bucket; bucket < window.end_bucket; bucket += 5) {
-                result.equipment.push_back({"192.0.2.1", count, invalid_bucket ? bucket + 1 : bucket});
-                result.equipment.push_back({"192.0.2.2", 0, bucket});
+            for (auto interval = window.start; interval < window.end; interval += 5min) {
+                result.equipment.push_back({"192.0.2.1", count, invalid_bucket ? interval + 1min : interval});
+                result.equipment.push_back({"192.0.2.2", 0, interval});
             }
         }
         return result;
@@ -253,17 +250,17 @@ void catchup_hour_boundary_is_transactional() {
     LogVolumeMonitor monitor{reader, settings, calendar, store};
     CHECK(monitor.tick(base + 55min));
     const auto checkpoint = *store.state;
-    const auto previous_bucket = calendar.range(base + 55min, base + 1h)->start_bucket;
-    const auto next_bucket = calendar.range(base + 1h, base + 1h + 5min)->start_bucket;
+    const auto previous_bucket = calendar.range(base + 55min, base + 1h)->start;
+    const auto next_bucket = calendar.range(base + 1h, base + 1h + 5min)->start;
     reader.custom_equipment = std::vector<EquipmentLogVolume>{
         {"192.0.2.1", 20, previous_bucket},
         {"192.0.2.3", std::numeric_limits<std::uint64_t>::max(), next_bucket},
-        {"192.0.2.3", 1, next_bucket + 45}};
+        {"192.0.2.3", 1, next_bucket + 45min}};
     CHECK(monitor.tick(base + 1h + 50min));
     CHECK(monitor.collect().error->code == "invalid_interval_data");
     CHECK(*store.state == checkpoint && store.reports.empty());
     reader.custom_equipment = std::vector<EquipmentLogVolume>{
-        {"192.0.2.1", 5, next_bucket + 45}, {"192.0.2.1", 20, previous_bucket},
+        {"192.0.2.1", 5, next_bucket + 45min}, {"192.0.2.1", 20, previous_bucket},
         {"192.0.2.3", 7, next_bucket}};
     CHECK(monitor.tick(base + 1h + 55min));
     CHECK(store.reports.size() == 1);
@@ -294,6 +291,21 @@ void retention_recovery_preserves_no_data_status() {
     CHECK(!monitor.collect().error);
 }
 
+void invalid_restored_state_is_rejected() {
+    Settings settings;
+    settings.value.role = ServerRole::anal;
+    Calendar calendar;
+    Reader reader;
+    Store store;
+    store.state = LogCountState{"invalid-source", base + 1s, std::nullopt, std::nullopt};
+    LogVolumeMonitor monitor{reader, settings, calendar, store};
+    CHECK(monitor.tick(base + 5min));
+    CHECK(monitor.collect().status == LogVolumeStatus::error);
+    CHECK(monitor.collect().error->code == "invalid_interval_data");
+    CHECK(reader.calls == 0 && store.commits == 0 && store.prunes == 0);
+    CHECK(store.state->next_start == base + 1s);
+}
+
 }
 
 int main() {
@@ -305,5 +317,6 @@ int main() {
         retention_failure_does_not_stop_queries();
         catchup_hour_boundary_is_transactional();
         retention_recovery_preserves_no_data_status();
+        invalid_restored_state_is_rejected();
     });
 }

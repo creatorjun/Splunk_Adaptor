@@ -4,6 +4,7 @@
 #include "application/ports/IMySqlConfiguration.hpp"
 #include "application/ports/ILogVolumeReader.hpp"
 #include "infrastructure/database/IMySqlSession.hpp"
+#include "domain/LogCountPolicy.hpp"
 
 #include <chrono>
 #include <memory>
@@ -15,7 +16,7 @@ public:
     MySqlConfiguration(IMySqlCredentialsReader& credentials, IMySqlConnectionFactory& factory,
         std::chrono::milliseconds retry_interval = std::chrono::seconds{5},
         std::chrono::milliseconds health_interval = std::chrono::seconds{30},
-        std::chrono::milliseconds query_interval = std::chrono::minutes{5});
+        std::chrono::milliseconds query_interval = LogCountPolicy::query_interval);
     ~MySqlConfiguration() override;
     MySqlConfiguration(const MySqlConfiguration&) = delete;
     MySqlConfiguration& operator=(const MySqlConfiguration&) = delete;

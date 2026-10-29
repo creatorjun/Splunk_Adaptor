@@ -44,7 +44,7 @@ std::chrono::system_clock::time_point local_timestamp(std::uint64_t bucket) {
 }
 
 LogVolumeWindow window(std::uint64_t start = 202610291000ULL, std::uint64_t end = 202610291100ULL) {
-    return {start, end, local_timestamp(start), local_timestamp(end)};
+    return {local_timestamp(start), local_timestamp(end)};
 }
 
 LogVolumeQueryRow valid_row() {
@@ -79,23 +79,7 @@ void query_tests() {
 void invalid_window_tests() {
     ScopedTimezone timezone("UTC0");
     const auto valid = window(202610291000ULL, 202610291005ULL);
-    for (const auto bucket : {0ULL, 20261029100ULL, 2026102910000ULL, 202602291000ULL,
-        202613011000ULL, 202610001000ULL, 202610292400ULL, 202610291060ULL,
-        18446744073709551615ULL}) {
-        auto invalid = valid;
-        invalid.start_bucket = bucket;
-        CHECK(!make_log_volume_query(invalid));
-        invalid = valid;
-        invalid.end_bucket = bucket;
-        CHECK(!make_log_volume_query(invalid));
-    }
     auto invalid = valid;
-    invalid.end_bucket = invalid.start_bucket;
-    CHECK(!make_log_volume_query(invalid));
-    invalid = valid;
-    std::swap(invalid.start_bucket, invalid.end_bucket);
-    CHECK(!make_log_volume_query(invalid));
-    invalid = valid;
     invalid.start = invalid.end;
     CHECK(!make_log_volume_query(invalid));
     invalid = valid;
@@ -126,7 +110,8 @@ void timezone_tests() {
         auto wrong_timezone = selected;
         wrong_timezone.start += 9h;
         wrong_timezone.end += 9h;
-        CHECK(!make_log_volume_query(wrong_timezone));
+        const auto shifted = make_log_volume_query(wrong_timezone);
+        CHECK(shifted && shifted->find("recv_time >= 202610291900 AND recv_time < 202610291905") != std::string::npos);
     }
 
 }
@@ -155,7 +140,7 @@ void decoding_tests() {
     const auto counts = std::move(result).take();
     CHECK(counts.size() == 4);
     CHECK(counts[0].eqp_ip == "192.0.2.1" && counts[0].count == 150);
-    CHECK(counts[0].start_bucket == 202610291000ULL);
+    CHECK(counts[0].interval_start == local_timestamp(202610291000ULL));
     CHECK(counts[1].eqp_ip == "2001:db8::1" && counts[1].count == 0);
     CHECK(counts[2].count == std::numeric_limits<std::uint64_t>::max());
     CHECK(counts[3].count == 150);
@@ -212,7 +197,7 @@ void invalid_data_tests() {
     auto other_interval = valid_row();
     other_interval[5] = "202610291005";
     CHECK(duplicates.append(other_interval));
-    for (const auto invalid : {"202610290955", "202610291100", "202610291001", "202610291060"}) {
+    for (const auto invalid : {"202610290955", "202610291100", "202610291001", "202610291060", "202602291000", "202613011000", "202610292400", "202610001000"}) {
         auto wrong_bucket = valid_row();
         wrong_bucket[5] = invalid;
         CHECK(!accepts(wrong_bucket));
@@ -233,6 +218,31 @@ void bound_tests() {
     CHECK(!overflow && overflow.error().code == "equipment_limit_exceeded");
 }
 
+void daylight_decoding_tests() {
+    ScopedTimezone timezone("EST5EDT,M3.2.0/2,M11.1.0/2");
+    const auto boundary = std::chrono::sys_days{std::chrono::year{2026}/3/8} + 7h;
+    const LogVolumeWindow spring{boundary - 5min, boundary + 5min};
+    const auto query = make_log_volume_query(spring);
+    CHECK(query && query->find("recv_time >= 202603080155 AND recv_time < 202603080305") != std::string::npos);
+    LogVolumeQueryResult result(spring);
+    auto row = valid_row();
+    row[5] = "202603080155";
+    CHECK(result.append(row));
+    row[5] = "202603080300";
+    CHECK(result.append(row));
+    row[5] = "202603080200";
+    CHECK(!result.append(row));
+    const auto counts = std::move(result).take();
+    CHECK(counts.size() == 2);
+    CHECK(counts[0].interval_start == boundary - 5min && counts[1].interval_start == boundary);
+    const auto repeated = std::chrono::sys_days{std::chrono::year{2026}/11/1} + 5h;
+    const LogVolumeWindow autumn{repeated, repeated + 5min};
+    CHECK(!make_log_volume_query(autumn));
+    LogVolumeQueryResult invalid(autumn);
+    row[5] = "202611010100";
+    CHECK(!invalid.append(row));
+}
+
 }
 
 int main() {
@@ -240,6 +250,7 @@ int main() {
         query_tests();
         invalid_window_tests();
         timezone_tests();
+        daylight_decoding_tests();
         decoding_tests();
         invalid_data_tests();
         bound_tests();

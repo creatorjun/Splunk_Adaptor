@@ -21,11 +21,14 @@ inline std::string_view to_string(ProcessingFilesStatus status) {
     return "error";
 }
 
+enum class ProcessingDirectoryKind { unknown, collector, normalize };
+
 struct ProcessingDirectoryCount {
     std::string path;
     std::optional<std::uint64_t> tmp_count;
     std::optional<std::uint64_t> done_count;
     std::vector<Error> errors;
+    ProcessingDirectoryKind kind{ProcessingDirectoryKind::unknown};
 };
 
 struct ProcessingFileAlert {

@@ -17,9 +17,9 @@ ProcessingFilesSnapshot ProcessingFileMonitor::collect() {
     for (const auto& directory : snapshot.directories) {
         if (!directory.errors.empty()) continue;
         const ProcessingFileThresholds* thresholds = nullptr;
-        if (directory.path == "/CloudESM/data/processing/collector") {
+        if (directory.kind == ProcessingDirectoryKind::collector) {
             thresholds = &settings.processing_files.collector;
-        } else if (directory.path == "/CloudESM/data/processing/normalize") {
+        } else if (directory.kind == ProcessingDirectoryKind::normalize) {
             thresholds = &settings.processing_files.normalize;
         }
         if (!thresholds) continue;

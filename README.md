@@ -28,11 +28,11 @@
 
 | 위치 | 책임 |
 | --- | --- |
-| `src/domain` | 측정 모델, 계산식, 임계치와 상태, 5분·시간 집계 데이터 |
-| `src/application` | 수집·설정 적용·프로세스 선택·집계·저장·보존 유스케이스와 포트 |
+| `src/domain` | 측정 모델, 계산식, 임계치와 상태, 집계 상태의 유효성 규칙, 중계 경고 선정 규칙 |
+| `src/application` | 설정값 검증·검사·적용, 수집·프로세스 선택·집계·저장·보존 유스케이스와 포트 |
 | `src/infrastructure/linux` | procfs, mountinfo, 파일시스템·Java 프로세스·처리 파일·중계 로그·현지 시간 구간 |
-| `src/infrastructure/config` | 설정과 계정 JSON 파싱·검증 |
-| `src/infrastructure/database` | 한 개의 비동기 MySQL 연결과 범위 집계 SELECT |
+| `src/infrastructure/config` | 설정과 계정 파일 접근·JSON 형식 검사·내부 모델 변환 |
+| `src/infrastructure/database` | 한 개의 비동기 MySQL 연결, DB 날짜 표현 변환과 범위 집계 SELECT |
 | `src/infrastructure/persistence` | 일반 JSON 원자 저장, 시간별 집계와 처리 위치 저장 |
 | `src/runtime` | 수집·설정 확인 타이머와 종료 신호 |
 | `src/main.cpp` | 구성 객체 생성과 의존성 주입 |
@@ -40,6 +40,12 @@
 | `packaging` | systemd 단위, RPM 명세, Docker 빌드 환경 |
 
 Domain은 Linux와 JSON을 참조하지 않습니다. Application은 자신의 포트와 Domain에만 의존합니다. 운영체제·DB·JSON은 외부 계층의 어댑터로 구현하며 테스트에서 의존성 방향을 검사합니다.
+
+설정의 값 범위·역할별 필수 항목은 `validate_settings`에서 검사합니다. JSON 입력과 명령행 덮어쓰기를 포함한 설정 적용이 이 검증을 공유하므로 다른 `ISettingsReader` 구현도 같은 규칙을 따릅니다. `--check-config`의 역할별 계정 검사도 Application의 `check_settings`를 호출하며, main은 인자 해석과 객체 연결을 담당합니다.
+
+로그 수집량의 내부 구간은 `std::chrono` 시각으로 표현합니다. DB의 `YYYYMMDDHHmm` 숫자 변환은 SQL 어댑터 내부에서 수행하고, 시간별 누적·체크포인트의 유효성 규칙은 Domain에서 공유합니다. 처리 파일 임계치는 물리 경로 문자열 대신 `collector`·`normalize`라는 논리적 종류로 선택합니다. 중계 파일 읽기·회전·외부 헤더 해석은 Linux 어댑터가 맡고, ERROR와 connection을 모두 요구하는 선정 규칙은 Domain에 있습니다. 키워드가 긴 행의 잘린 표시 범위 뒤에 있어도 전체 읽기 과정에서 검사합니다.
+
+이 경계 정리는 설정 JSON, 모니터링 출력, 시간별 파일과 체크포인트의 형식을 변경하지 않습니다. `Architecture` 테스트는 상대 경로를 정규화한 include 방향과 외부 헤더 유입, CMake 계층별 소스·링크 구성을 검사합니다. Domain·Application의 정책 테스트는 Linux·JSON·DB 라이브러리를 링크하지 않고 실행합니다.
 
 ## 빌드
 

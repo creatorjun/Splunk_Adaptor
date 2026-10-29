@@ -33,7 +33,10 @@ public:
         output << "fixture\n";
         CHECK(output.good());
     }
-    std::vector<fs::path> roots() const { return {root / "collector", root / "normalize"}; }
+    std::vector<ProcessingDirectoryRoot> roots() const {
+        return {{root / "collector", ProcessingDirectoryKind::collector},
+            {root / "normalize", ProcessingDirectoryKind::normalize}};
+    }
     fs::path root;
 };
 
@@ -60,6 +63,8 @@ void recursive_counts() {
     CHECK(result.scan_started_at);
     CHECK(result.scanned_at >= result.scan_started_at);
     CHECK(result.directories.size() == 2);
+    CHECK(result.directories[0].kind == ProcessingDirectoryKind::collector);
+    CHECK(result.directories[1].kind == ProcessingDirectoryKind::normalize);
     CHECK(result.directories[0].tmp_count == 3);
     CHECK(result.directories[0].done_count == 1);
     CHECK(result.directories[1].tmp_count == 0);

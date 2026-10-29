@@ -1,9 +1,11 @@
 // src/infrastructure/persistence/JsonLogCountStore.cpp
 #include "infrastructure/persistence/JsonLogCountStore.hpp"
 
+#include "domain/LogCountPolicy.hpp"
+#include "domain/LogCountValidation.hpp"
+
 #include <nlohmann/json.hpp>
 
-#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cerrno>
@@ -13,7 +15,6 @@
 #include <fcntl.h>
 #include <limits>
 #include <memory>
-#include <set>
 #include <stdexcept>
 #include <sys/file.h>
 #include <sys/stat.h>
@@ -48,40 +49,14 @@ Clock::time_point timestamp(const Json& value) {
     const auto seconds = value.get<std::int64_t>();
     const auto minimum = std::chrono::duration_cast<std::chrono::seconds>(Clock::duration::min()).count();
     const auto maximum = std::chrono::duration_cast<std::chrono::seconds>(Clock::duration::max()).count();
-    if (seconds <= minimum || seconds >= maximum || seconds % 300 != 0) {
+    if (seconds <= minimum || seconds >= maximum) {
         throw std::runtime_error("Timestamp is out of range or is not a five-minute boundary");
     }
-    return Clock::time_point{std::chrono::seconds{seconds}};
-}
-
-bool valid_equipment(const std::vector<EquipmentLogVolume>& equipment) {
-    if (equipment.size() > 10000) return false;
-    std::set<std::string> seen;
-    for (const auto& item : equipment) {
-        if (item.eqp_ip.empty() || item.eqp_ip.size() > 39 || item.start_bucket != 0 ||
-            std::any_of(item.eqp_ip.begin(), item.eqp_ip.end(), [](unsigned char value) { return value < 32 || value == 127; }) ||
-            !seen.insert(item.eqp_ip).second) return false;
+    const auto result = Clock::time_point{std::chrono::seconds{seconds}};
+    if (!valid_log_count_boundary(result)) {
+        throw std::runtime_error("Timestamp is out of range or is not a five-minute boundary");
     }
-    return true;
-}
-
-bool valid_hour(const LogCountHour& hour, bool completed) {
-    const auto start = epoch(hour.start);
-    const auto end = epoch(hour.end);
-    const auto coverage = epoch(hour.coverage_start);
-    return start % 300 == 0 && end - start == 3600 && coverage >= start && coverage < end &&
-        coverage % 300 == 0 && hour.completed_intervals > 0 && hour.completed_intervals <= 12 &&
-        coverage + static_cast<std::int64_t>(hour.completed_intervals) * 300 <= end &&
-        (completed ? coverage + static_cast<std::int64_t>(hour.completed_intervals) * 300 == end
-                   : coverage + static_cast<std::int64_t>(hour.completed_intervals) * 300 < end) &&
-        valid_equipment(hour.equipment);
-}
-
-bool valid_state(const LogCountState& state) {
-    if (state.source_identity.empty() || state.source_identity.size() > 8192 || epoch(state.next_start) % 300 != 0 ||
-        (state.last_saved_hour && *state.last_saved_hour >= state.next_start)) return false;
-    return !state.hour || (valid_hour(*state.hour, false) &&
-        state.hour->coverage_start + std::chrono::seconds{300} * state.hour->completed_intervals == state.next_start);
+    return result;
 }
 
 Json equipment_json(const std::vector<EquipmentLogVolume>& equipment) {
@@ -103,14 +78,14 @@ LogCountHour parse_hour(const Json& document) {
     hour.end = timestamp(document.at("end_epoch"));
     hour.coverage_start = timestamp(document.at("coverage_start_epoch"));
     const auto& completed = document.at("completed_intervals");
-    if (!completed.is_number_unsigned() || completed.get<std::uint64_t>() > 12) throw std::runtime_error("Invalid interval count");
+    if (!completed.is_number_unsigned() || completed.get<std::uint64_t>() > LogCountPolicy::intervals_per_hour) throw std::runtime_error("Invalid interval count");
     hour.completed_intervals = completed.get<unsigned int>();
     const auto& equipment = document.at("equipment");
-    if (!equipment.is_array() || equipment.size() > 10000) throw std::runtime_error("Invalid equipment list");
+    if (!equipment.is_array() || equipment.size() > LogCountPolicy::maximum_equipment) throw std::runtime_error("Invalid equipment list");
     hour.equipment.reserve(equipment.size());
     for (const auto& item : equipment) {
         if (!item.at("count").is_number_unsigned()) throw std::runtime_error("Invalid equipment count");
-        hour.equipment.push_back({item.at("eqp_ip").get<std::string>(), item.at("count").get<std::uint64_t>(), 0});
+        hour.equipment.push_back({item.at("eqp_ip").get<std::string>(), item.at("count").get<std::uint64_t>(), {}});
     }
     return hour;
 }
@@ -279,7 +254,7 @@ std::expected<std::optional<LogCountState>, Error> JsonLogCountStore::load(const
         state.next_start = timestamp(document.at("next_start_epoch"));
         if (!document.at("hour").is_null()) state.hour = parse_hour(document.at("hour"));
         if (!document.at("last_saved_hour_epoch").is_null()) state.last_saved_hour = timestamp(document.at("last_saved_hour_epoch"));
-        if (!valid_state(state)) throw std::runtime_error("Checkpoint contains inconsistent totals or cursor");
+        if (!valid_log_count_state(state)) throw std::runtime_error("Checkpoint contains inconsistent totals or cursor");
         return state;
     } catch (const std::exception& error) {
         return std::unexpected(store_error("invalid_checkpoint", error.what()));
@@ -288,12 +263,12 @@ std::expected<std::optional<LogCountState>, Error> JsonLogCountStore::load(const
 
 std::expected<void, Error> JsonLogCountStore::commit(const std::string& directory, const LogCountState& state,
     const std::vector<LogCountReport>& reports) {
-    if (!valid_state(state) || reports.size() > 2) return std::unexpected(store_error("invalid_checkpoint", "Invalid log count state"));
+    if (!valid_log_count_state(state) || reports.size() > 2) return std::unexpected(store_error("invalid_checkpoint", "Invalid log count state"));
     const auto opened = open_directory(directory);
     if (!opened) return std::unexpected(opened.error());
     try {
         for (const auto& report : reports) {
-            if (report.source_identity != state.source_identity || !valid_hour(report.hour, true) ||
+            if (report.source_identity != state.source_identity || !valid_log_count_hour(report.hour, true) ||
                 report.hour.end > state.next_start) return std::unexpected(store_error("invalid_report", "Invalid completed hour"));
             const auto filename = "log_cnt_" + local_format(report.hour.start, true) + ".json";
             const auto existing = read_json(directory_fd_.get(), filename);
@@ -316,7 +291,7 @@ std::expected<void, Error> JsonLogCountStore::commit(const std::string& director
                     {"start_inclusive", true}, {"end_exclusive", true}}},
                 {"coverage", {{"start", local_format(report.hour.coverage_start, false)},
                     {"start_epoch", epoch(report.hour.coverage_start)}, {"completed_intervals", report.hour.completed_intervals},
-                    {"expected_intervals", 12}, {"complete", report.hour.coverage_start == report.hour.start && report.hour.completed_intervals == 12}}},
+                    {"expected_intervals", LogCountPolicy::intervals_per_hour}, {"complete", report.hour.coverage_start == report.hour.start && report.hour.completed_intervals == LogCountPolicy::intervals_per_hour}}},
                 {"equipment", equipment_json(report.hour.equipment)}};
             const auto saved = write_json(directory_fd_.get(), filename, document);
             if (!saved) return saved;
@@ -354,7 +329,7 @@ std::expected<std::size_t, Error> JsonLogCountStore::prune(const std::string& di
         }
         const std::string name{entry->d_name};
         const auto start = filename_timestamp(name);
-        if (!start || *start + std::chrono::hours{1} > cutoff) continue;
+        if (!start || *start + LogCountPolicy::report_interval > cutoff) continue;
         struct stat before{};
         if (::fstatat(directory_fd_.get(), name.c_str(), &before, AT_SYMLINK_NOFOLLOW) != 0) {
             if (errno == ENOENT) continue;
@@ -368,7 +343,7 @@ std::expected<std::size_t, Error> JsonLogCountStore::prune(const std::string& di
             if (value.at("kind") != "resource-monitor-log-counts" || value.at("schema_version") != 1 ||
                 value.at("source") != "CloudESM.SUM_COLLECT_INFO" || !value.at("equipment").is_array() ||
                 value.at("window").at("start_epoch") != epoch(*start) ||
-                value.at("window").at("end_epoch") != epoch(*start + std::chrono::hours{1})) continue;
+                value.at("window").at("end_epoch") != epoch(*start + LogCountPolicy::report_interval)) continue;
         } catch (const std::exception&) {
             continue;
         }

@@ -1,5 +1,6 @@
 // src/main.cpp
 #include "application/CollectAndStore.hpp"
+#include "application/CheckSettings.hpp"
 #include "application/JavaProcessMonitor.hpp"
 #include "application/ProcessingFileMonitor.hpp"
 #include "application/LogVolumeMonitor.hpp"
@@ -87,17 +88,10 @@ int main(int argc, char* argv[]) {
         monitor::JsonSettingsReader config{config_path};
         monitor::JsonMySqlCredentialsReader credentials;
         if (check_config) {
-            const auto parsed = config.read_settings();
-            if (!parsed) {
-                monitor::log_error(parsed.error());
+            const auto checked = monitor::check_settings(config, credentials);
+            if (!checked) {
+                monitor::log_error(checked.error());
                 return 78;
-            }
-            if (parsed->role == monitor::ServerRole::anal) {
-                const auto secret = credentials.read_credentials(parsed->mysql.credentials_file);
-                if (!secret) {
-                    monitor::log_error(secret.error());
-                    return 78;
-                }
             }
             std::cout << "Configuration is valid\n";
             return 0;

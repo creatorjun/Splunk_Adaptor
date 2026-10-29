@@ -1,16 +1,16 @@
 // src/infrastructure/config/JsonSettingsReader.cpp
 #include "infrastructure/config/JsonSettingsReader.hpp"
+#include "application/SettingsValidation.hpp"
 
 #include <nlohmann/json.hpp>
 
 #include <array>
 #include <cerrno>
-#include <cmath>
 #include <cstdint>
 #include <fcntl.h>
+#include <limits>
 #include <set>
 #include <stdexcept>
-#include <string_view>
 #include <sys/stat.h>
 #include <system_error>
 #include <unistd.h>
@@ -41,31 +41,13 @@ Error io_error(const std::filesystem::path& path, const char* operation, int err
         std::error_code(error, std::generic_category()).message());
 }
 
-bool has_control_characters(const std::string& value) {
-    for (std::size_t index = 0; index < value.size(); ++index) {
-        const auto character = static_cast<unsigned char>(value[index]);
-        if (character < 0x20 || character == 0x7f) return true;
-        if (character == 0xc2 && index + 1 < value.size()) {
-            const auto next = static_cast<unsigned char>(value[index + 1]);
-            if (next >= 0x80 && next <= 0x9f) return true;
-        }
-    }
-    return false;
-}
-
 bool read_process_apps(const nlohmann::json& value, std::vector<std::string>& destination) {
-    if (!value.is_array() || value.size() > 256) return false;
-    std::set<std::string> unique;
+    if (!value.is_array()) return false;
     std::vector<std::string> apps;
     apps.reserve(value.size());
     for (const auto& item : value) {
         if (!item.is_string()) return false;
-        const auto& app = item.get_ref<const std::string&>();
-        if (app.empty() || app.size() > 128 || has_control_characters(app) ||
-            app.front() == ' ' || app.back() == ' ' || !unique.insert(app).second) {
-            return false;
-        }
-        apps.push_back(app);
+        apps.push_back(item.get<std::string>());
     }
     destination = std::move(apps);
     return true;
@@ -80,15 +62,8 @@ bool read_retention(const nlohmann::json& value, SnapshotRetentionSettings& dest
             destination.enabled = setting.get<bool>();
         } else if (key == "max_age_seconds") {
             if (!setting.is_number_integer()) return false;
-            if (setting.is_number_unsigned()) {
-                const auto seconds = setting.get<std::uint64_t>();
-                if (seconds < static_cast<std::uint64_t>(SnapshotRetentionSettings::minimum_age.count()) ||
-                    seconds > static_cast<std::uint64_t>(SnapshotRetentionSettings::maximum_age.count())) return false;
-            } else {
-                const auto seconds = setting.get<std::int64_t>();
-                if (seconds < SnapshotRetentionSettings::minimum_age.count() ||
-                    seconds > SnapshotRetentionSettings::maximum_age.count()) return false;
-            }
+            if (setting.is_number_unsigned() && setting.get<std::uint64_t>() >
+                static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) return false;
             destination.max_age = std::chrono::seconds{setting.get<std::int64_t>()};
         } else {
             return false;
@@ -101,11 +76,7 @@ bool read_processing_file_thresholds(const nlohmann::json& value, ProcessingFile
     if (!value.is_object()) return false;
     for (const auto& [key, count] : value.items()) {
         if ((key != "tmp_count" && key != "done_count") || !count.is_number_integer()) return false;
-        if (count.is_number_unsigned()) {
-            if (count.get<std::uint64_t>() > 1000000000000ULL) return false;
-        } else if (count.get<std::int64_t>() < 0 || count.get<std::int64_t>() > 1000000000000LL) {
-            return false;
-        }
+        if (!count.is_number_unsigned() && count.get<std::int64_t>() < 0) return false;
         (key == "tmp_count" ? destination.tmp_count : destination.done_count) = count.get<std::uint64_t>();
     }
     return true;
@@ -221,12 +192,6 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::parse_document(const s
             thresholds[keys[1]].get<double>(),
             thresholds[keys[2]].get<double>()
         };
-        if (auto valid = validate_thresholds(policy); !valid) {
-            auto error = valid.error();
-            error.component = "settings_config";
-            error.target = path_.string();
-            return std::unexpected(std::move(error));
-        }
         MonitorSettings settings{policy};
         if (json.contains("retention") && !read_retention(json["retention"], settings.retention)) {
             return std::unexpected(config_error(path_, "invalid_retention",
@@ -253,14 +218,7 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::parse_document(const s
                     return std::unexpected(config_error(path_, "invalid_relay_log",
                         "relay_log supports only a path string"));
                 }
-                const auto& path = value.get_ref<const std::string&>();
-                const auto relay_path = std::filesystem::path{path};
-                if (path.empty() || has_control_characters(path) || !relay_path.is_absolute() ||
-                    relay_path.filename().empty() || relay_path.filename() == "." || relay_path.filename() == "..") {
-                    return std::unexpected(config_error(path_, "invalid_relay_log",
-                        "relay_log.path must be an absolute file path without control characters"));
-                }
-                settings.relay_log.path = path;
+                settings.relay_log.path = value.get<std::string>();
             }
         }
         if (json.contains("process_monitor")) {
@@ -302,15 +260,12 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::parse_document(const s
                 std::int64_t seconds{};
                 if (interval.is_number_unsigned()) {
                     const auto value = interval.get<std::uint64_t>();
-                    if (value < 1 || value > 86400) {
+                    if (value > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
                         return std::unexpected(config_error(path_, "invalid_interval", "interval_seconds must be an integer between 1 and 86400"));
                     }
                     seconds = static_cast<std::int64_t>(value);
                 } else {
                     seconds = interval.get<std::int64_t>();
-                    if (seconds < 1 || seconds > 86400) {
-                        return std::unexpected(config_error(path_, "invalid_interval", "interval_seconds must be an integer between 1 and 86400"));
-                    }
                 }
                 settings.collection_interval = std::chrono::seconds{seconds};
             }
@@ -319,11 +274,7 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::parse_document(const s
                 if (!output.is_string()) {
                     return std::unexpected(config_error(path_, "invalid_output_directory", "output_directory must be an absolute path without control characters"));
                 }
-                const auto& value = output.get_ref<const std::string&>();
-                if (value.empty() || has_control_characters(value) || !std::filesystem::path(value).is_absolute()) {
-                    return std::unexpected(config_error(path_, "invalid_output_directory", "output_directory must be an absolute path without control characters"));
-                }
-                settings.output_directory = value;
+                settings.output_directory = output.get<std::string>();
             }
         }
         if (json.contains("mysql")) {
@@ -353,9 +304,6 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::parse_document(const s
                     return std::unexpected(config_error(path_, "invalid_mysql", std::string("mysql.") + key + " must be a string"));
                 }
                 *destination = mysql[key].get<std::string>();
-                if (has_control_characters(*destination)) {
-                    return std::unexpected(config_error(path_, "invalid_mysql", "MySQL settings must not contain control characters"));
-                }
             }
             const std::array numeric_fields{
                 std::pair{"port", &settings.mysql.port},
@@ -366,29 +314,19 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::parse_document(const s
             for (const auto& [key, destination] : numeric_fields) {
                 if (!mysql.contains(key)) continue;
                 const auto& number = mysql[key];
-                const auto maximum = std::string_view(key) == "port" ? 65535U : 10U;
+                constexpr auto maximum = std::numeric_limits<unsigned int>::max();
                 if (!number.is_number_integer() ||
-                    (number.is_number_unsigned() && (number.get<std::uint64_t>() < 1 || number.get<std::uint64_t>() > maximum)) ||
-                    (!number.is_number_unsigned() && (number.get<std::int64_t>() < 1 || number.get<std::int64_t>() > maximum))) {
+                    (number.is_number_unsigned() && number.get<std::uint64_t>() > maximum) ||
+                    (!number.is_number_unsigned() && (number.get<std::int64_t>() < 0 || number.get<std::int64_t>() > maximum))) {
                     return std::unexpected(config_error(path_, "invalid_mysql", "MySQL port must be 1..65535 and timeouts must be 1..10 integer seconds"));
                 }
                 *destination = number.get<unsigned int>();
             }
-            if (settings.mysql.host.empty() || (settings.role == ServerRole::anal && settings.mysql.database.empty())) {
-                return std::unexpected(config_error(path_, "invalid_mysql", "MySQL host is required and database is required when enabled"));
-            }
-            if (settings.mysql.credentials_file.empty() || !std::filesystem::path(settings.mysql.credentials_file).is_absolute()) {
-                return std::unexpected(config_error(path_, "invalid_mysql", "MySQL credentials_file must be an absolute path"));
-            }
-            if (settings.mysql.tls_mode != "disabled" && settings.mysql.tls_mode != "verify_identity") {
-                return std::unexpected(config_error(path_, "invalid_mysql", "MySQL tls_mode must be disabled or verify_identity"));
-            }
-            if ((!settings.mysql.tls_ca_file.empty() && !std::filesystem::path(settings.mysql.tls_ca_file).is_absolute()) ||
-                (settings.role == ServerRole::anal && settings.mysql.tls_mode == "verify_identity" && settings.mysql.tls_ca_file.empty())) {
-                return std::unexpected(config_error(path_, "invalid_mysql", "MySQL tls_ca_file must be absolute and is required when enabled with verify_identity"));
-            }
-        } else if (settings.role == ServerRole::anal) {
-            return std::unexpected(config_error(path_, "invalid_mysql", "mysql settings are required for the anal role"));
+        }
+        if (auto valid = validate_settings(settings); !valid) {
+            auto error = std::move(valid.error());
+            error.target = path_.string();
+            return std::unexpected(std::move(error));
         }
         return settings;
     } catch (const nlohmann::json::exception&) {

@@ -50,6 +50,8 @@ endif()
 
 add_library(monitor_domain
     src/domain/LogVolume.cpp
+    src/domain/LogCountValidation.cpp
+    src/domain/RelayLogPolicy.cpp
     src/domain/RelayLog.cpp
     src/domain/MetricCalculators.cpp
     src/domain/ThresholdPolicy.cpp
@@ -57,7 +59,7 @@ add_library(monitor_domain
 target_include_directories(monitor_domain PUBLIC src)
 target_link_libraries(monitor_domain PRIVATE monitor_options)
 
-add_library(monitor_application src/application/CollectAndStore.cpp src/application/SettingsController.cpp src/application/JavaProcessMonitor.cpp src/application/ProcessingFileMonitor.cpp src/application/SnapshotRetention.cpp src/application/LogVolumeMonitor.cpp src/application/RelayLogMonitor.cpp)
+add_library(monitor_application src/application/CollectAndStore.cpp src/application/SettingsController.cpp src/application/SettingsValidation.cpp src/application/CheckSettings.cpp src/application/JavaProcessMonitor.cpp src/application/ProcessingFileMonitor.cpp src/application/SnapshotRetention.cpp src/application/LogVolumeMonitor.cpp src/application/RelayLogMonitor.cpp)
 target_link_libraries(monitor_application PUBLIC monitor_domain PRIVATE monitor_options)
 
 find_package(Threads REQUIRED)
@@ -89,12 +91,12 @@ target_link_libraries(resource-monitor PRIVATE monitor_runtime monitor_infrastru
 
 include(CTest)
 if(BUILD_TESTING)
-    foreach(test_name MetricCalculators LogVolumeMonitor RelayLogMonitor RelayLogReader ProcessingFileMonitor DirectoryProcessingFileScanner ProcessingFileReader JavaProcessMonitor ProcJavaProcessReader LocalLogVolumeCalendar LogVolumeQuery CollectAndStore SettingsController LinuxCollectors JsonSnapshotStore JsonLogCountStore SnapshotRetention JsonSettingsReader JsonMySqlCredentialsReader MySqlConfiguration)
+    foreach(test_name MetricCalculators LogCountValidation RelayLogPolicy LogVolumeMonitor RelayLogMonitor RelayLogReader ProcessingFileMonitor DirectoryProcessingFileScanner ProcessingFileReader JavaProcessMonitor ProcJavaProcessReader LocalLogVolumeCalendar LogVolumeQuery CollectAndStore SettingsController SettingsValidation CheckSettings LinuxCollectors JsonSnapshotStore JsonLogCountStore SnapshotRetention JsonSettingsReader JsonMySqlCredentialsReader MySqlConfiguration)
         add_executable(${test_name}Test tests/${test_name}Test.cpp)
         target_include_directories(${test_name}Test PRIVATE tests)
-        if(test_name STREQUAL "MetricCalculators")
+        if(test_name STREQUAL "MetricCalculators" OR test_name STREQUAL "LogCountValidation" OR test_name STREQUAL "RelayLogPolicy")
             target_link_libraries(${test_name}Test PRIVATE monitor_domain monitor_options)
-        elseif(test_name STREQUAL "CollectAndStore" OR test_name STREQUAL "SettingsController" OR test_name STREQUAL "JavaProcessMonitor" OR test_name STREQUAL "ProcessingFileMonitor" OR test_name STREQUAL "LogVolumeMonitor" OR test_name STREQUAL "RelayLogMonitor")
+        elseif(test_name STREQUAL "CollectAndStore" OR test_name STREQUAL "SettingsController" OR test_name STREQUAL "SettingsValidation" OR test_name STREQUAL "CheckSettings" OR test_name STREQUAL "JavaProcessMonitor" OR test_name STREQUAL "ProcessingFileMonitor" OR test_name STREQUAL "LogVolumeMonitor" OR test_name STREQUAL "RelayLogMonitor")
             target_link_libraries(${test_name}Test PRIVATE monitor_application monitor_options)
         else()
             target_link_libraries(${test_name}Test PRIVATE monitor_infrastructure nlohmann_json::nlohmann_json monitor_options Threads::Threads)

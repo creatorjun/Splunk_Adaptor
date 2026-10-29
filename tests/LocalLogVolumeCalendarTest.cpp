@@ -24,35 +24,35 @@ void boundary_tests() {
     LocalLogVolumeCalendar calendar;
     const auto boundary = sys_days{year{2026}/10/29} + hours{1} + minutes{5};
     const auto result = calendar.window(boundary);
-    CHECK(result && result->start_bucket == 202610291000ULL && result->end_bucket == 202610291005ULL);
+    CHECK(result);
     CHECK(result->start == boundary - minutes{5} && result->end == boundary);
     const auto same = calendar.window(boundary + minutes{4} + seconds{59});
     CHECK(same && *same == *result);
     const auto before = calendar.window(boundary - nanoseconds{1});
-    CHECK(before && before->start_bucket == 202610290955ULL && before->end_bucket == 202610291000ULL);
+    CHECK(before && before->start == boundary - minutes{10} && before->end == boundary - minutes{5});
     const auto hour = calendar.hour(boundary);
     CHECK(hour && hour->start == boundary - minutes{5} && hour->end == boundary + minutes{55});
     CHECK(hour->coverage_start == boundary && hour->completed_intervals == 0);
     const auto range = calendar.range(boundary - minutes{10}, boundary + minutes{50});
-    CHECK(range && range->start_bucket == 202610290955ULL && range->end_bucket == 202610291055ULL);
+    CHECK(range && range->start == boundary - minutes{10} && range->end == boundary + minutes{50});
     CHECK(!calendar.range(boundary - minutes{15}, boundary + minutes{50}));
     CHECK(!calendar.range(boundary, boundary + minutes{1}));
     CHECK(!calendar.range(boundary + seconds{1}, boundary + minutes{5}));
     CHECK(!calendar.range(boundary, boundary));
     CHECK(::setenv("TZ", "UTC0", 1) == 0);
     const auto midnight = calendar.window(sys_days{year{2026}/1/1});
-    CHECK(midnight && midnight->start_bucket == 202512312355ULL && midnight->end_bucket == 202601010000ULL);
+    CHECK(midnight && midnight->start == sys_days{year{2025}/12/31} + hours{23} + minutes{55} && midnight->end == sys_days{year{2026}/1/1});
     const auto leap = calendar.window(sys_days{year{2024}/3/1});
-    CHECK(leap && leap->start_bucket == 202402292355ULL && leap->end_bucket == 202403010000ULL);
+    CHECK(leap && leap->start == sys_days{year{2024}/2/29} + hours{23} + minutes{55} && leap->end == sys_days{year{2024}/3/1});
     const auto negative = calendar.window(sys_days{year{1970}/1/1} - seconds{1});
-    CHECK(negative && negative->start_bucket == 196912312350ULL && negative->end_bucket == 196912312355ULL);
+    CHECK(negative && negative->start == sys_days{year{1970}/1/1} - minutes{10} && negative->end == sys_days{year{1970}/1/1} - minutes{5});
 }
 
 void daylight_and_extreme_tests() {
     CHECK(::setenv("TZ", "EST5EDT,M3.2.0/2,M11.1.0/2", 1) == 0);
     LocalLogVolumeCalendar calendar;
     const auto spring = calendar.window(sys_days{year{2026}/3/8} + hours{7});
-    CHECK(spring && spring->start_bucket == 202603080155ULL && spring->end_bucket == 202603080300ULL);
+    CHECK(spring && spring->start == sys_days{year{2026}/3/8} + hours{6} + minutes{55} && spring->end == sys_days{year{2026}/3/8} + hours{7});
     const auto hour = calendar.hour(sys_days{year{2026}/3/8} + hours{6} + minutes{55});
     CHECK(hour && hour->end == sys_days{year{2026}/3/8} + hours{7});
     const auto autumn = calendar.window(sys_days{year{2026}/11/1} + hours{6});

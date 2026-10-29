@@ -1,6 +1,7 @@
 // src/infrastructure/linux/RelayLogReader.cpp
 #include "infrastructure/linux/RelayLogReader.hpp"
 
+#include "domain/RelayLogPolicy.hpp"
 #include "infrastructure/linux/UniqueFd.hpp"
 
 #include <algorithm>
@@ -33,8 +34,7 @@ struct Stream {
     bool truncated{false};
     bool skip_line{false};
     bool ignored_line{false};
-    std::size_t connection_match{};
-    bool connection_found{false};
+    RelayLogSelection selection;
 };
 
 bool valid_path(const std::string& path) {
@@ -239,8 +239,7 @@ private:
         stream.line.clear();
         stream.truncated = false;
         stream.ignored_line = false;
-        stream.connection_match = 0;
-        stream.connection_found = false;
+        stream.selection.reset();
     }
 
     void consume(Stream& stream, char value) {
@@ -250,23 +249,15 @@ private:
         }
         if (value != '\n') {
             if (stream.ignored_line) return;
-            if (!stream.connection_found) {
-                constexpr std::string_view keyword{"connection"};
-                constexpr std::array<std::size_t, 10> prefix{0, 0, 0, 0, 0, 1, 0, 0, 0, 0};
-                const char lowered = value >= 'A' && value <= 'Z' ? static_cast<char>(value + ('a' - 'A')) : value;
-                while (stream.connection_match > 0 && lowered != keyword[stream.connection_match]) {
-                    stream.connection_match = prefix[stream.connection_match - 1];
-                }
-                if (lowered == keyword[stream.connection_match]) ++stream.connection_match;
-                stream.connection_found = stream.connection_match == keyword.size();
-            }
+            stream.selection.consume(value);
             if (stream.line.size() < maximum_line_bytes) stream.line.push_back(value);
             else stream.truncated = true;
-            if (stream.line.size() == 30 && !error_line(stream.line)) stream.ignored_line = true;
+            if (stream.line.size() == 30 && !RelayLogSelection::accepts_level(
+                error_line(stream.line) ? RelayLogLevel::error : RelayLogLevel::other)) stream.ignored_line = true;
             return;
         }
         if (!stream.truncated && !stream.line.empty() && stream.line.back() == '\r') stream.line.pop_back();
-        if (stream.connection_found && error_line(stream.line)) {
+        if (stream.selection.matches(error_line(stream.line) ? RelayLogLevel::error : RelayLogLevel::other)) {
             RelayLogEntry entry;
             entry.timestamp = stream.line.substr(0, 23);
             const auto separator = stream.line.find(" - ", 29);
@@ -278,15 +269,12 @@ private:
         stream.line.clear();
         stream.truncated = false;
         stream.ignored_line = false;
-        stream.connection_match = 0;
-        stream.connection_found = false;
+        stream.selection.reset();
     }
 
     RelayLogSnapshot snapshot(bool backlog) const {
         RelayLogSnapshot result;
-        result.status = !events_.empty() ? RelayLogStatus::warning
-            : !errors_.empty() ? RelayLogStatus::error
-            : backlog ? RelayLogStatus::partial : RelayLogStatus::ok;
+        result.status = evaluate_relay_log(!events_.empty(), !errors_.empty(), backlog);
         result.path = path_;
         result.checked_at = std::chrono::system_clock::now();
         result.events = events_;

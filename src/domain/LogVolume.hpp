@@ -6,8 +6,6 @@
 namespace monitor {
 
 struct LogVolumeWindow {
-    std::uint64_t start_bucket{};
-    std::uint64_t end_bucket{};
     std::chrono::system_clock::time_point start;
     std::chrono::system_clock::time_point end;
 
@@ -17,7 +15,7 @@ struct LogVolumeWindow {
 struct EquipmentLogVolume {
     std::string eqp_ip;
     std::uint64_t count{};
-    std::uint64_t start_bucket{};
+    std::chrono::system_clock::time_point interval_start;
 
     bool operator==(const EquipmentLogVolume&) const = default;
 };
