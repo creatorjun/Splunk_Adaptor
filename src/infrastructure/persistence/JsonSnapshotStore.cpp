@@ -319,6 +319,16 @@ nlohmann::json serialize(const ResourceSnapshot& snapshot, const std::string& ti
         volume_error = {{"component", error.component}, {"target", error.target},
             {"code", error.code}, {"message", error.message}};
     }
+    auto relay_events = nlohmann::json::array();
+    for (const auto& event : snapshot.relay_log.events) {
+        relay_events.push_back({{"timestamp", event.timestamp}, {"message", event.message},
+            {"line", event.line}, {"truncated", event.truncated}});
+    }
+    auto relay_errors = nlohmann::json::array();
+    for (const auto& error : snapshot.relay_log.errors) {
+        relay_errors.push_back({{"component", error.component}, {"target", error.target},
+            {"code", error.code}, {"message", error.message}});
+    }
     auto filesystems = nlohmann::json::array();
     for (const auto& filesystem : snapshot.filesystems) {
         filesystems.push_back({
@@ -344,10 +354,11 @@ nlohmann::json serialize(const ResourceSnapshot& snapshot, const std::string& ti
         {"timestamp", timestamp},
         {"thresholds_applied_at", applied_at},
         {"hostname", snapshot.hostname},
+        {"role", to_string(snapshot.java_processes.role)},
         {"status", to_string(snapshot.status)},
         {"processes", std::move(processes)},
         {"process_status", to_string(snapshot.java_processes.status)},
-        {"process_profile", snapshot.java_processes.is_analyzer ? "analyzer" : "collector"},
+        {"process_profile", to_string(snapshot.java_processes.role)},
         {"collection_status", to_string(snapshot.collection_status)},
         {"config_status", to_string(snapshot.config_status)},
         {"missed_intervals", snapshot.missed_intervals},
@@ -397,6 +408,15 @@ nlohmann::json serialize(const ResourceSnapshot& snapshot, const std::string& ti
             {"equipment_count", snapshot.log_volume.equipment.size()},
             {"equipment", std::move(volume_equipment)},
             {"error", std::move(volume_error)}
+        }},
+        {"relay_log", {
+            {"status", to_string(snapshot.relay_log.status)},
+            {"source", snapshot.relay_log.path},
+            {"checked_at", nullable_time(snapshot.relay_log.checked_at)},
+            {"error_count", snapshot.relay_log.events.size()},
+            {"events", std::move(relay_events)},
+            {"backlog", snapshot.relay_log.backlog},
+            {"errors", std::move(relay_errors)}
         }},
         {"errors", std::move(errors)}
     };

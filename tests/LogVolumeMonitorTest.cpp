@@ -46,7 +46,7 @@ void state_and_duplicate_tests() {
     CHECK(!monitor.tick(now));
     CHECK(monitor.collect().status == LogVolumeStatus::disabled);
     CHECK(reader.calls == 0 && calendar.calls == 0);
-    settings.value.is_analyzer = true;
+    settings.value.role = ServerRole::analyzer;
     CHECK(!monitor.tick(now));
     CHECK(monitor.collect().status == LogVolumeStatus::pending);
     CHECK(reader.requested == *calendar.next);
@@ -78,9 +78,15 @@ void state_and_duplicate_tests() {
     CHECK(monitor.tick(now + 5s));
     CHECK(monitor.collect().status == LogVolumeStatus::no_data);
     CHECK(!monitor.tick(now + 6s));
-    settings.value.is_analyzer = false;
+    settings.value.role = ServerRole::collector;
     const auto reads = reader.calls;
     CHECK(!monitor.tick(now + 7s));
+    result = monitor.collect();
+    CHECK(result.status == LogVolumeStatus::disabled && result.equipment.empty());
+    CHECK(!result.error && !result.window && !result.queried_at);
+    CHECK(reader.calls == reads);
+    settings.value.role = ServerRole::relay;
+    CHECK(!monitor.tick(now + 8s));
     result = monitor.collect();
     CHECK(result.status == LogVolumeStatus::disabled && result.equipment.empty());
     CHECK(!result.error && !result.window && !result.queried_at);
@@ -89,7 +95,7 @@ void state_and_duplicate_tests() {
 
 void reload_and_window_tests() {
     Settings settings;
-    settings.value.is_analyzer = true;
+    settings.value.role = ServerRole::analyzer;
     Calendar calendar;
     Reader reader;
     LogVolumeMonitor monitor{reader, settings, calendar};

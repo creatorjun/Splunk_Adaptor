@@ -5,9 +5,11 @@
 #include "application/LogSilenceMonitor.hpp"
 #include "application/ProcessingFileMonitor.hpp"
 #include "application/LogVolumeMonitor.hpp"
+#include "application/RelayLogMonitor.hpp"
 #include "application/SnapshotRetention.hpp"
 #include "infrastructure/linux/DirectoryProcessingFileScanner.hpp"
 #include "infrastructure/linux/ProcessingFileReader.hpp"
+#include "infrastructure/linux/RelayLogReader.hpp"
 #include "infrastructure/linux/ProcJavaProcessReader.hpp"
 #include "infrastructure/linux/LocalDayWindow.hpp"
 #include "infrastructure/linux/LocalLogVolumeCalendar.hpp"
@@ -40,11 +42,11 @@ int main(int argc, char* argv[]) {
                           << "Default config: /etc/resource-monitor/settings.json\n"
                           << "Explicit output and interval options override the configuration.\n"
                           << "Settings are reloaded every second without restarting.\n"
-                          << "First snapshot follows one full configured interval.\n";
+                          << "Resource snapshots follow the interval; completed DB windows can save earlier.\n";
                 return 0;
             }
             if (argument == "--version") {
-                std::cout << "resource-monitor 1.11.0\n";
+                std::cout << "resource-monitor 1.12.0\n";
                 return 0;
             }
             if (argument == "--once") {
@@ -92,7 +94,7 @@ int main(int argc, char* argv[]) {
                 monitor::log_error(parsed.error());
                 return 78;
             }
-            if (parsed->is_analyzer) {
+            if (parsed->role == monitor::ServerRole::analyzer) {
                 const auto secret = credentials.read_credentials(parsed->mysql.credentials_file);
                 if (!secret) {
                     monitor::log_error(secret.error());
@@ -130,8 +132,10 @@ int main(int argc, char* argv[]) {
         monitor::ProcessingFileMonitor processing_files{file_reader, settings};
         monitor::LocalLogVolumeCalendar volume_calendar;
         monitor::LogVolumeMonitor log_volume{volume_database, settings, volume_calendar};
+        monitor::RelayLogReader relay_reader;
+        monitor::RelayLogMonitor relay_log{relay_reader, settings};
         monitor::CollectAndStore use_case{reader, store, settings, &collect_count, &processes, &log_silence,
-            &processing_files, &log_volume};
+            &processing_files, &log_volume, &relay_log};
         monitor::SnapshotRetention retention{store};
         return monitor::run_daemon(use_case, options, &settings, &retention);
     } catch (const std::exception& error) {

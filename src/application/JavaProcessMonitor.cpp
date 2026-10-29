@@ -13,9 +13,9 @@ JavaProcessMonitor::JavaProcessMonitor(IJavaProcessReader& reader,
 JavaProcessSnapshot JavaProcessMonitor::collect() {
     JavaProcessSnapshot result;
     const auto& settings = settings_.current();
-    result.is_analyzer = settings.is_analyzer;
-    const auto expected = result.is_analyzer ? settings.process_monitor.analyzer
-        : settings.process_monitor.collector;
+    result.role = settings.role;
+    const auto& expected = settings.role == ServerRole::analyzer ? settings.process_monitor.analyzer
+        : settings.role == ServerRole::relay ? settings.process_monitor.relay : settings.process_monitor.collector;
     if (expected.empty()) {
         result.status = MetricStatus::ok;
         return result;

@@ -10,15 +10,15 @@ LogSilenceMonitor::LogSilenceMonitor(ILogSilenceReader& reader,
 
 void LogSilenceMonitor::settings_changed(std::chrono::system_clock::time_point) {
     const auto& settings = settings_.current();
-    reader_.read_last_received(settings.is_analyzer, settings.collection_interval);
+    reader_.read_last_received(settings.role == ServerRole::analyzer, settings.collection_interval);
 }
 
 LogSilenceAnalysis LogSilenceMonitor::collect(std::chrono::system_clock::time_point) {
     const auto& settings = settings_.current();
-    auto reading = reader_.read_last_received(settings.is_analyzer, settings.collection_interval);
+    auto reading = reader_.read_last_received(settings.role == ServerRole::analyzer, settings.collection_interval);
     LogSilenceAnalysis result;
     result.default_timeout_seconds = settings.log_silence.default_timeout_seconds;
-    if (!settings.is_analyzer) return result;
+    if (settings.role != ServerRole::analyzer) return result;
     result.queried_at = reading.queried_at;
     if (reading.status == LogSilenceReadStatus::error || reading.error) {
         result.status = LogSilenceStatus::error;

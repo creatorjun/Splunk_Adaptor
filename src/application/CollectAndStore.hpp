@@ -9,6 +9,7 @@
 #include "application/ports/ILogSilenceMonitor.hpp"
 #include "application/ports/IProcessingFileMonitor.hpp"
 #include "application/ports/ILogVolumeMonitor.hpp"
+#include "application/ports/IRelayLogMonitor.hpp"
 
 namespace monitor {
 
@@ -19,7 +20,8 @@ public:
         IJavaProcessMonitor* java_processes = nullptr,
         ILogSilenceMonitor* log_silence = nullptr,
         IProcessingFileMonitor* processing_files = nullptr,
-        ILogVolumeMonitor* log_volume = nullptr);
+        ILogVolumeMonitor* log_volume = nullptr,
+        IRelayLogMonitor* relay_log = nullptr);
     std::expected<void, Error> initialize();
     void settings_changed(std::chrono::system_clock::time_point timestamp);
     bool tick(std::chrono::system_clock::time_point timestamp);
@@ -34,6 +36,7 @@ private:
     ILogSilenceMonitor* log_silence_;
     IProcessingFileMonitor* processing_files_;
     ILogVolumeMonitor* log_volume_;
+    IRelayLogMonitor* relay_log_;
     std::optional<ThresholdPolicy> policy_;
     std::chrono::system_clock::time_point policy_applied_at_;
     std::optional<CpuCounters> previous_cpu_;

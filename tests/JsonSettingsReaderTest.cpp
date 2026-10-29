@@ -54,18 +54,18 @@ std::string document_with_analyzer(const std::string& analyzer) {
 }
 
 std::string document_with_process_monitor(const std::string& processes, bool is_analyzer = false) {
-    return R"({"schema_version":1,"thresholds":{"cpu_usage_percent":80,"memory_usage_percent":85.5,"storage_usage_percent":90},"mysql":{"database":"monitoring","tls_mode":"disabled"},"is_analyzer":)"
-        + std::string{is_analyzer ? "true" : "false"} + ",\"process_monitor\":" + processes + "}";
+    return R"({"schema_version":1,"thresholds":{"cpu_usage_percent":80,"memory_usage_percent":85.5,"storage_usage_percent":90},"mysql":{"database":"monitoring","tls_mode":"disabled"},"role":)"
+        + std::string{is_analyzer ? "\"analyzer\"" : "\"collector\""} + ",\"process_monitor\":" + processes + "}";
 }
 
 std::string document_with_log_silence(const std::string& silence, bool is_analyzer = false) {
-    return R"({"schema_version":1,"thresholds":{"cpu_usage_percent":80,"memory_usage_percent":85.5,"storage_usage_percent":90},"mysql":{"database":"monitoring","tls_mode":"disabled"},"is_analyzer":)"
-        + std::string{is_analyzer ? "true" : "false"} + ",\"log_silence\":" + silence + "}";
+    return R"({"schema_version":1,"thresholds":{"cpu_usage_percent":80,"memory_usage_percent":85.5,"storage_usage_percent":90},"mysql":{"database":"monitoring","tls_mode":"disabled"},"role":)"
+        + std::string{is_analyzer ? "\"analyzer\"" : "\"collector\""} + ",\"log_silence\":" + silence + "}";
 }
 
 std::string document_with_processing_files(const std::string& processing, bool is_analyzer = false) {
-    return R"({"schema_version":1,"thresholds":{"cpu_usage_percent":80,"memory_usage_percent":85.5,"storage_usage_percent":90},"mysql":{"database":"monitoring","tls_mode":"disabled"},"is_analyzer":)"
-        + std::string{is_analyzer ? "true" : "false"} + ",\"processing_files\":" + processing + "}";
+    return R"({"schema_version":1,"thresholds":{"cpu_usage_percent":80,"memory_usage_percent":85.5,"storage_usage_percent":90},"mysql":{"database":"monitoring","tls_mode":"disabled"},"role":)"
+        + std::string{is_analyzer ? "\"analyzer\"" : "\"collector\""} + ",\"processing_files\":" + processing + "}";
 }
 
 void check_failure(monitor::JsonSettingsReader& reader, const std::filesystem::path& path) {
@@ -79,6 +79,81 @@ void check_failure(monitor::JsonSettingsReader& reader, const std::filesystem::p
     CHECK(thresholds.error().component == "settings_config");
     CHECK(thresholds.error().target == path.string());
     CHECK(!thresholds.error().message.empty());
+}
+
+void role_and_relay_settings_tests() {
+    TemporaryDirectory directory;
+    const auto path = directory.path / "settings.json";
+    monitor::JsonSettingsReader reader(path);
+    const auto base = nlohmann::json::parse(document_with_collection("{}"));
+    for (const auto role : {monitor::ServerRole::collector, monitor::ServerRole::analyzer, monitor::ServerRole::relay}) {
+        auto document = base;
+        document["role"] = monitor::to_string(role);
+        document["mysql"] = {{"database", "monitoring"}, {"tls_mode", "disabled"}};
+        document["process_monitor"] = {{"relay", {"RelayCustom", "CollectorForAgent"}}};
+        document["relay_log"] = {{"path", "/custom/missing-relay.log"}};
+        write_file(path, document.dump());
+        auto settings = reader.read_settings();
+        CHECK(settings && settings->role == role);
+        CHECK(settings->relay_log.path == "/custom/missing-relay.log");
+        CHECK(settings->process_monitor.relay == (std::vector<std::string>{"RelayCustom", "CollectorForAgent"}));
+        for (const bool legacy : {false, true}) {
+            document["is_analyzer"] = legacy;
+            write_file(path, document.dump());
+            const auto rejected = reader.read_settings();
+            CHECK(!rejected && rejected.error().code == "invalid_role");
+        }
+        document.erase("is_analyzer");
+        document.erase("mysql");
+        write_file(path, document.dump());
+        settings = reader.read_settings();
+        CHECK(settings.has_value() == (role != monitor::ServerRole::analyzer));
+        if (!settings) CHECK(settings.error().code == "invalid_mysql");
+    }
+    for (const auto* invalid : {"null", "false", "true", "0", "1", "[]", "{}", "\"\"",
+        "\"Analyzer\"", "\"relay \"", "\"unknown\"", "\"redaction-marker\""}) {
+        auto document = base;
+        document["role"] = nlohmann::json::parse(invalid);
+        write_file(path, document.dump());
+        const auto rejected = reader.read_settings();
+        CHECK(!rejected && rejected.error().code == "invalid_role");
+        CHECK(rejected.error().message.find("redaction-marker") == std::string::npos);
+    }
+    for (const auto* invalid : {"null", "false", "1", "[]", "\"file\"", R"({"unknown":1})",
+        R"({"path":null})", R"({"path":1})", R"({"path":[]})", R"({"path":""})",
+        R"({"path":"relative.log"})", R"({"path":"/"})", R"({"path":"/logs/"})",
+        R"({"path":"/logs/."})", R"({"path":"/logs/.."})", R"({"path":"/logs/redaction-marker\n.log"})",
+        R"({"path":"/logs/redaction-marker\u0000.log"})", R"({"path":"/logs/redaction-marker\u0085.log"})"}) {
+        auto document = base;
+        document["role"] = "relay";
+        document["relay_log"] = nlohmann::json::parse(invalid);
+        write_file(path, document.dump());
+        const auto rejected = reader.read_settings();
+        CHECK(!rejected && rejected.error().code == "invalid_relay_log");
+        CHECK(rejected.error().message.find("redaction-marker") == std::string::npos);
+    }
+    auto document = base;
+    document["role"] = "relay";
+    document["relay_log"] = nlohmann::json::object();
+    document["process_monitor"] = {{"relay", nlohmann::json::array()}};
+    write_file(path, document.dump());
+    auto settings = reader.read_settings();
+    CHECK(settings && settings->relay_log == monitor::RelayLogSettings{});
+    CHECK(settings->process_monitor.relay.empty());
+    document.erase("process_monitor");
+    write_file(path, document.dump());
+    settings = reader.read_settings();
+    CHECK(settings && settings->process_monitor.relay == (std::vector<std::string>{"CollectorForAgent"}));
+    for (const auto* invalid : {R"({"role":"collector","role":"relay"})",
+        R"({"relay_log":{"path":"/a.log","path":"/b.log"}})",
+        R"({"process_monitor":{"relay":[],"relay":[]}})"}) {
+        auto fragment = std::string{invalid};
+        fragment.erase(0, 1);
+        auto text = base.dump();
+        text.pop_back();
+        write_file(path, text + "," + fragment);
+        CHECK(!reader.read_settings());
+    }
 }
 
 void processing_files_settings_tests() {
@@ -97,7 +172,7 @@ void processing_files_settings_tests() {
             R"({"thresholds":{"collector":{"tmp_count":0,"done_count":1000000000000},"normalize":{"tmp_count":101,"done_count":99}}})", analyzer));
         const auto settings = reader.read_settings();
         CHECK(settings);
-        CHECK(settings->is_analyzer == analyzer);
+        CHECK(settings->role == (analyzer ? monitor::ServerRole::analyzer : monitor::ServerRole::collector));
         CHECK(settings->processing_files.collector.tmp_count == 0);
         CHECK(settings->processing_files.collector.done_count == 1000000000000ULL);
         CHECK(settings->processing_files.normalize.tmp_count == 101);
@@ -264,7 +339,7 @@ int main() {
         CHECK(settings->collection_interval == std::chrono::seconds{60});
         CHECK(settings->output_directory == "/Monitor");
         CHECK(settings->mysql == monitor::MySqlSettings{});
-        CHECK(!settings->is_analyzer);
+        CHECK(settings->role == monitor::ServerRole::collector);
         CHECK(settings->analyzer.collect_count_change_percent == 10.0);
         CHECK(settings->analyzer.comparison_day == monitor::ComparisonDay::yesterday);
         const std::vector<std::string> default_analyzer{
@@ -298,7 +373,7 @@ int main() {
             {"analyzer", custom_analyzer}, {"collector", custom_collector}}.dump(), true));
         settings = reader.read_settings();
         CHECK(settings);
-        CHECK(settings->is_analyzer);
+        CHECK(settings->role == monitor::ServerRole::analyzer);
         CHECK(settings->process_monitor.analyzer == custom_analyzer);
         CHECK(settings->process_monitor.collector == custom_collector);
         CHECK(settings->thresholds == *policy);
@@ -363,7 +438,7 @@ int main() {
             maximum_apps.dump()
         };
         for (const auto is_analyzer : {false, true}) {
-            for (const auto* profile : {"analyzer", "collector"}) {
+            for (const auto* profile : {"analyzer", "collector", "relay"}) {
                 for (const auto& apps : invalid_process_lists) {
                     write_file(path, document_with_process_monitor(
                         "{\"" + std::string{profile} + "\":" + apps + "}", is_analyzer));
@@ -469,7 +544,7 @@ int main() {
             CHECK(settings);
             CHECK(settings->analyzer.collect_count_change_percent == std::stod(threshold));
             CHECK(settings->analyzer.comparison_day == monitor::ComparisonDay::yesterday);
-            CHECK(!settings->is_analyzer);
+            CHECK(settings->role == monitor::ServerRole::collector);
         }
         for (const auto& day : {"today", "yesterday"}) {
             write_file(path, document_with_analyzer(
@@ -632,7 +707,7 @@ int main() {
         write_file(path, document_with_mysql(R"({"host":"db.internal","port":3307,"database":"monitoring","credentials_file":"/etc/resource-monitor/secrets/custom.json","connect_timeout_seconds":1,"read_timeout_seconds":5,"write_timeout_seconds":10,"tls_mode":"verify_identity","tls_ca_file":"/etc/pki/db-ca.pem"})"));
         settings = reader.read_settings();
         CHECK(settings);
-        CHECK(settings->is_analyzer);
+        CHECK(settings->role == monitor::ServerRole::analyzer);
         CHECK(settings->mysql.host == "db.internal");
         CHECK(settings->mysql.port == 3307);
         CHECK(settings->mysql.database == "monitoring");
@@ -651,7 +726,7 @@ int main() {
                 write_file(path, document_with_mysql(mysql, analyzer));
                 settings = reader.read_settings();
                 CHECK(settings);
-                CHECK(!settings->is_analyzer);
+                CHECK(settings->role == monitor::ServerRole::collector);
             }
         }
         for (const auto& analyzer : {"null", "1", "0", "1.0", "\"true\"", "\"false\"", "[]", "{}"}) {
@@ -749,5 +824,6 @@ int main() {
         processing_files_settings_tests();
         log_volume_settings_tests();
         retention_settings_tests();
+        role_and_relay_settings_tests();
     });
 }

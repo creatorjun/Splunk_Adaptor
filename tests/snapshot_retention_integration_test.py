@@ -13,7 +13,7 @@ import time
 def write_config(path, output, interval, retention=None):
     settings = {
         'schema_version': 1,
-        'is_analyzer': False,
+        'role': 'collector',
         'collection': {'interval_seconds': interval, 'output_directory': str(output)},
         'process_monitor': {'analyzer': [], 'collector': []},
         'thresholds': {'cpu_usage_percent': 100, 'memory_usage_percent': 100, 'storage_usage_percent': 100},

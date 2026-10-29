@@ -47,7 +47,7 @@ int main() {
         JavaProcessMonitor monitor{reader, settings};
         auto snapshot = monitor.collect();
         CHECK(reader.reads == 1);
-        CHECK(!snapshot.is_analyzer);
+        CHECK(snapshot.role == ServerRole::collector);
         CHECK(names(snapshot) == collector);
         CHECK(snapshot.status == MetricStatus::warning);
         for (const auto& [app, active] : snapshot.apps) {
@@ -67,9 +67,9 @@ int main() {
             CHECK(active == true);
         }
 
-        settings.value.is_analyzer = true;
+        settings.value.role = ServerRole::analyzer;
         snapshot = monitor.collect();
-        CHECK(snapshot.is_analyzer);
+        CHECK(snapshot.role == ServerRole::analyzer);
         CHECK(names(snapshot) == analyzer);
         CHECK(snapshot.status == MetricStatus::warning);
         CHECK(snapshot.apps.at("pmsServer") == true);
@@ -101,9 +101,9 @@ int main() {
         CHECK(!snapshot.apps.at("AnalyzeEngine").has_value());
         CHECK(names(snapshot) == analyzer);
 
-        settings.value.is_analyzer = false;
+        settings.value.role = ServerRole::collector;
         snapshot = monitor.collect();
-        CHECK(!snapshot.is_analyzer);
+        CHECK(snapshot.role == ServerRole::collector);
         CHECK(names(snapshot) == collector);
         CHECK(snapshot.apps.at("SearchEngine") == true);
         CHECK(!snapshot.apps.at("Reducer").has_value());
@@ -140,9 +140,9 @@ int main() {
         CHECK(names(snapshot) == (std::set<std::string>{"custom-collector"}));
         CHECK(snapshot.status == MetricStatus::ok);
 
-        settings.value.is_analyzer = true;
+        settings.value.role = ServerRole::analyzer;
         snapshot = monitor.collect();
-        CHECK(snapshot.is_analyzer);
+        CHECK(snapshot.role == ServerRole::analyzer);
         CHECK(names(snapshot) == (std::set<std::string>{"custom-analyzer", "Analyzer2", "InactiveNewApp"}));
         CHECK(snapshot.apps.at("custom-analyzer") == true);
         CHECK(snapshot.apps.at("Analyzer2") == false);
@@ -159,16 +159,16 @@ int main() {
         settings.value.process_monitor.analyzer.clear();
         const auto before_empty = reader.reads;
         snapshot = monitor.collect();
-        CHECK(snapshot.is_analyzer);
+        CHECK(snapshot.role == ServerRole::analyzer);
         CHECK(snapshot.apps.empty());
         CHECK(snapshot.status == MetricStatus::ok);
         CHECK(snapshot.errors.empty());
         CHECK(reader.reads == before_empty);
 
-        settings.value.is_analyzer = false;
+        settings.value.role = ServerRole::collector;
         settings.value.process_monitor.collector.clear();
         snapshot = monitor.collect();
-        CHECK(!snapshot.is_analyzer);
+        CHECK(snapshot.role == ServerRole::collector);
         CHECK(snapshot.apps.empty());
         CHECK(snapshot.status == MetricStatus::ok);
         CHECK(snapshot.errors.empty());
@@ -181,5 +181,29 @@ int main() {
         CHECK(snapshot.status == MetricStatus::unknown);
         CHECK(snapshot.errors.size() == 1);
         CHECK(reader.reads == before_empty + 1);
+        settings.value.role = ServerRole::relay;
+        reader.next.errors.clear();
+        reader.next.running_apps = {"CollectorForAgent", "RestoredApp"};
+        snapshot = monitor.collect();
+        CHECK(snapshot.role == ServerRole::relay);
+        CHECK(names(snapshot) == (std::set<std::string>{"CollectorForAgent"}));
+        CHECK(snapshot.apps.at("CollectorForAgent") == true);
+        CHECK(snapshot.status == MetricStatus::ok);
+        settings.value.process_monitor.relay = {"CustomRelay"};
+        snapshot = monitor.collect();
+        CHECK(names(snapshot) == (std::set<std::string>{"CustomRelay"}));
+        CHECK(snapshot.apps.at("CustomRelay") == false);
+        CHECK(snapshot.status == MetricStatus::warning);
+        settings.value.process_monitor.relay.clear();
+        const auto before_empty_relay = reader.reads;
+        snapshot = monitor.collect();
+        CHECK(snapshot.role == ServerRole::relay);
+        CHECK(snapshot.apps.empty() && snapshot.errors.empty());
+        CHECK(snapshot.status == MetricStatus::ok);
+        CHECK(reader.reads == before_empty_relay);
+        CHECK(to_string(ServerRole::collector) == "collector");
+        CHECK(to_string(ServerRole::analyzer) == "analyzer");
+        CHECK(to_string(ServerRole::relay) == "relay");
+        CHECK(to_string(static_cast<ServerRole>(-1)) == "unknown");
     });
 }

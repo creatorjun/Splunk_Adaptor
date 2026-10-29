@@ -8,6 +8,8 @@
 #include "application/LogVolumeSettings.hpp"
 #include "application/ProcessingFileSettings.hpp"
 #include "application/SnapshotRetentionSettings.hpp"
+#include "application/RelayLogSettings.hpp"
+#include "domain/ServerRole.hpp"
 #include "domain/ThresholdPolicy.hpp"
 
 #include <chrono>
@@ -20,13 +22,14 @@ struct MonitorSettings {
     std::chrono::seconds collection_interval{60};
     std::string output_directory{"/Monitor"};
     MySqlSettings mysql{};
-    bool is_analyzer{false};
+    ServerRole role{ServerRole::collector};
     AnalyzerSettings analyzer{};
     ProcessMonitorSettings process_monitor{};
     LogSilenceSettings log_silence{};
     ProcessingFileSettings processing_files{};
     SnapshotRetentionSettings retention{};
     LogVolumeSettings log_volume{};
+    RelayLogSettings relay_log{};
 
     bool operator==(const MonitorSettings&) const = default;
 };

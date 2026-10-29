@@ -916,6 +916,51 @@ void accepted_settings_survive_later_failure_test() {
     }
 }
 
+void relay_log_snapshot_test() {
+    struct Relay final : IRelayLogMonitor {
+        RelayLogSnapshot next;
+        unsigned changes{};
+        unsigned acknowledgements{};
+        void settings_changed() override { ++changes; }
+        RelayLogSnapshot collect() override { return next; }
+        void acknowledge() noexcept override {
+            ++acknowledgements;
+            next.events.clear();
+            next.status = RelayLogStatus::ok;
+        }
+    } relay;
+    Reader reader;
+    Store store;
+    Config config;
+    CollectAndStore use_case{reader, store, config, nullptr, nullptr, nullptr, nullptr, nullptr, &relay};
+    CHECK(use_case.initialize());
+    CHECK(relay.changes == 1);
+    use_case.settings_changed(sample(1).timestamp);
+    CHECK(relay.changes == 2);
+    relay.next.status = RelayLogStatus::warning;
+    relay.next.events = {{"2026-10-29 10:42:07.413", "Connection refused", "ERROR line", false}};
+    reader.next = sample(1);
+    store.failure = Error{"store", "/Monitor", "disk_full", "No space"};
+    CHECK(!use_case.run());
+    CHECK(relay.acknowledgements == 0 && relay.next.events.size() == 1);
+    store.failure.reset();
+    reader.next = sample(2);
+    auto result = use_case.run();
+    CHECK(result && result->status == MetricStatus::warning);
+    CHECK(result->collection_status == CollectionStatus::ok);
+    CHECK(result->relay_log.events.front().message == "Connection refused");
+    CHECK(relay.acknowledgements == 1 && relay.next.events.empty());
+    reader.next = sample(3);
+    result = use_case.run();
+    CHECK(result && result->status == MetricStatus::ok && result->relay_log.events.empty());
+    relay.next.status = RelayLogStatus::error;
+    relay.next.errors = {{"relay_log", "/logs", "13", "Permission denied"}};
+    reader.next = sample(4);
+    result = use_case.run();
+    CHECK(result && result->status == MetricStatus::unknown && has_error(*result, "13"));
+    CHECK(result->collection_status == CollectionStatus::ok);
+}
+
 void log_volume_snapshot_test() {
     struct Volume final : ILogVolumeMonitor {
         LogVolumeAnalysis next;
@@ -956,6 +1001,7 @@ int main() {
         log_silence_tests();
         processing_file_tests();
         log_volume_snapshot_test();
+        relay_log_snapshot_test();
         database_dependency_error_test();
         reload_tests();
         partial_failure_tests();

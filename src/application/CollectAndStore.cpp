@@ -10,10 +10,10 @@ namespace monitor {
 CollectAndStore::CollectAndStore(IResourceReader& reader, ISnapshotStore& store,
     IThresholdConfigReader& config, ICollectCountMonitor* collect_count,
     IJavaProcessMonitor* java_processes, ILogSilenceMonitor* log_silence,
-    IProcessingFileMonitor* processing_files, ILogVolumeMonitor* log_volume)
+    IProcessingFileMonitor* processing_files, ILogVolumeMonitor* log_volume, IRelayLogMonitor* relay_log)
     : reader_(reader), store_(store), config_(config), collect_count_(collect_count),
       java_processes_(java_processes), log_silence_(log_silence), processing_files_(processing_files),
-      log_volume_(log_volume) {
+      log_volume_(log_volume), relay_log_(relay_log) {
 }
 
 std::expected<void, Error> CollectAndStore::initialize() {
@@ -33,6 +33,7 @@ std::expected<void, Error> CollectAndStore::initialize() {
     if (log_silence_) log_silence_->collect(sample.timestamp);
     if (processing_files_) processing_files_->settings_changed();
     if (log_volume_) log_volume_->tick(sample.timestamp);
+    if (relay_log_) relay_log_->settings_changed();
     if (sample.cpu.value && !sample.cpu.error) {
         previous_cpu_ = *sample.cpu.value;
         previous_cpu_time_ = sample.cpu_observed_at;
@@ -44,6 +45,7 @@ void CollectAndStore::settings_changed(std::chrono::system_clock::time_point tim
     if (policy_ && collect_count_) collect_count_->settings_changed(timestamp);
     if (policy_ && log_silence_) log_silence_->settings_changed(timestamp);
     if (policy_ && processing_files_) processing_files_->settings_changed();
+    if (policy_ && relay_log_) relay_log_->settings_changed();
 }
 
 bool CollectAndStore::tick(std::chrono::system_clock::time_point timestamp) {
@@ -201,6 +203,16 @@ std::expected<ResourceSnapshot, Error> CollectAndStore::run(std::uint64_t missed
             snapshot.status = MetricStatus::unknown;
         }
     }
+    if (relay_log_) {
+        snapshot.relay_log = relay_log_->collect();
+        snapshot.errors.insert(snapshot.errors.end(), snapshot.relay_log.errors.begin(), snapshot.relay_log.errors.end());
+        if (!snapshot.relay_log.events.empty()) {
+            snapshot.status = MetricStatus::warning;
+        } else if (snapshot.relay_log.status != RelayLogStatus::ok &&
+            snapshot.relay_log.status != RelayLogStatus::disabled && snapshot.status == MetricStatus::ok) {
+            snapshot.status = MetricStatus::unknown;
+        }
+    }
     if (!dependency_errors.empty() && snapshot.status == MetricStatus::ok) {
         snapshot.status = MetricStatus::unknown;
     }
@@ -213,6 +225,7 @@ std::expected<ResourceSnapshot, Error> CollectAndStore::run(std::uint64_t missed
         }
         return std::unexpected(std::move(error));
     }
+    if (relay_log_) relay_log_->acknowledge();
     return snapshot;
 }
 

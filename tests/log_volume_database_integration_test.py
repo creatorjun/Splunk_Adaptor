@@ -204,7 +204,7 @@ def main():
         log = root / 'daemon.log'
         settings = {
             'schema_version': 1,
-            'is_analyzer': True,
+            'role': 'analyzer',
             'collection': {'interval_seconds': 600, 'output_directory': str(output)},
             'retention': {'enabled': False, 'max_age_seconds': 3600},
             'process_monitor': {'analyzer': [], 'collector': []},
@@ -242,12 +242,12 @@ def main():
             payload = wait_snapshot(output, seen, lambda item: item['log_volume']['mode'] == 'interval' and item['log_volume']['status'] == 'no_data', process, log)
             assert_volume(payload, 'interval', {})
             evidence['checks'].append({'name': 'empty_interval_no_data', 'snapshot': payload})
-            settings['is_analyzer'] = False
+            settings['role'] = 'collector'
             settings['collection']['interval_seconds'] = 1
             write_settings(config, settings)
             wait_snapshot(output, seen, lambda item: item['log_volume']['status'] == 'disabled', process, log)
             settings['mysql']['port'] = 1
-            settings['is_analyzer'] = True
+            settings['role'] = 'analyzer'
             write_settings(config, settings)
             payload = wait_snapshot(output, seen, lambda item: item['log_volume']['status'] == 'error', process, log)
             assert payload['log_volume']['error'], payload
@@ -259,7 +259,7 @@ def main():
             payload = wait_snapshot(output, seen, lambda item: item['log_volume']['status'] == 'no_data', process, log)
             assert_volume(payload, 'interval', {})
             evidence['checks'].append({'name': 'connection_settings_recovery_without_restart', 'snapshot': payload})
-        settings['is_analyzer'] = False
+        settings['role'] = 'collector'
         settings['mysql']['port'] = 1
         settings['mysql']['credentials_file'] = str(root / 'deliberately-missing.json')
         write_settings(config, settings)

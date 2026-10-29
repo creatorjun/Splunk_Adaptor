@@ -1,6 +1,6 @@
 # CMakeLists.txt
 cmake_minimum_required(VERSION 3.20)
-project(resource-monitor VERSION 1.11.0 LANGUAGES CXX)
+project(resource-monitor VERSION 1.12.0 LANGUAGES CXX)
 
 if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
     set(CMAKE_INSTALL_PREFIX "/usr" CACHE PATH "Installation prefix" FORCE)
@@ -52,13 +52,14 @@ add_library(monitor_domain
     src/domain/CollectCountAnalysis.cpp
     src/domain/LogSilenceAnalysis.cpp
     src/domain/LogVolume.cpp
+    src/domain/RelayLog.cpp
     src/domain/MetricCalculators.cpp
     src/domain/ThresholdPolicy.cpp
 )
 target_include_directories(monitor_domain PUBLIC src)
 target_link_libraries(monitor_domain PRIVATE monitor_options)
 
-add_library(monitor_application src/application/CollectAndStore.cpp src/application/SettingsController.cpp src/application/CollectCountMonitor.cpp src/application/JavaProcessMonitor.cpp src/application/LogSilenceMonitor.cpp src/application/ProcessingFileMonitor.cpp src/application/SnapshotRetention.cpp src/application/LogVolumeMonitor.cpp)
+add_library(monitor_application src/application/CollectAndStore.cpp src/application/SettingsController.cpp src/application/CollectCountMonitor.cpp src/application/JavaProcessMonitor.cpp src/application/LogSilenceMonitor.cpp src/application/ProcessingFileMonitor.cpp src/application/SnapshotRetention.cpp src/application/LogVolumeMonitor.cpp src/application/RelayLogMonitor.cpp)
 target_link_libraries(monitor_application PUBLIC monitor_domain PRIVATE monitor_options)
 
 find_package(Threads REQUIRED)
@@ -67,6 +68,7 @@ pkg_check_modules(MARIADB REQUIRED IMPORTED_TARGET libmariadb>=3.1)
 add_library(monitor_infrastructure
     src/infrastructure/linux/DirectoryProcessingFileScanner.cpp
     src/infrastructure/linux/ProcessingFileReader.cpp
+    src/infrastructure/linux/RelayLogReader.cpp
     src/infrastructure/linux/ProcJavaProcessReader.cpp
     src/infrastructure/linux/LocalDayWindow.cpp
     src/infrastructure/linux/LocalLogVolumeCalendar.cpp
@@ -91,12 +93,12 @@ target_link_libraries(resource-monitor PRIVATE monitor_runtime monitor_infrastru
 
 include(CTest)
 if(BUILD_TESTING)
-    foreach(test_name MetricCalculators CollectCountAnalysis LogSilenceAnalysis CollectCountMonitor LogSilenceMonitor LogVolumeMonitor ProcessingFileMonitor DirectoryProcessingFileScanner ProcessingFileReader JavaProcessMonitor ProcJavaProcessReader LocalDayWindow LocalLogVolumeCalendar CollectCountQuery LogSilenceQuery LogVolumeQuery CollectAndStore SettingsController LinuxCollectors JsonSnapshotStore SnapshotRetention JsonSettingsReader JsonMySqlCredentialsReader MySqlConfiguration)
+    foreach(test_name MetricCalculators CollectCountAnalysis LogSilenceAnalysis CollectCountMonitor LogSilenceMonitor LogVolumeMonitor RelayLogMonitor RelayLogReader ProcessingFileMonitor DirectoryProcessingFileScanner ProcessingFileReader JavaProcessMonitor ProcJavaProcessReader LocalDayWindow LocalLogVolumeCalendar CollectCountQuery LogSilenceQuery LogVolumeQuery CollectAndStore SettingsController LinuxCollectors JsonSnapshotStore SnapshotRetention JsonSettingsReader JsonMySqlCredentialsReader MySqlConfiguration)
         add_executable(${test_name}Test tests/${test_name}Test.cpp)
         target_include_directories(${test_name}Test PRIVATE tests)
         if(test_name STREQUAL "MetricCalculators" OR test_name STREQUAL "CollectCountAnalysis" OR test_name STREQUAL "LogSilenceAnalysis")
             target_link_libraries(${test_name}Test PRIVATE monitor_domain monitor_options)
-        elseif(test_name STREQUAL "CollectAndStore" OR test_name STREQUAL "SettingsController" OR test_name STREQUAL "CollectCountMonitor" OR test_name STREQUAL "JavaProcessMonitor" OR test_name STREQUAL "LogSilenceMonitor" OR test_name STREQUAL "ProcessingFileMonitor" OR test_name STREQUAL "LogVolumeMonitor")
+        elseif(test_name STREQUAL "CollectAndStore" OR test_name STREQUAL "SettingsController" OR test_name STREQUAL "CollectCountMonitor" OR test_name STREQUAL "JavaProcessMonitor" OR test_name STREQUAL "LogSilenceMonitor" OR test_name STREQUAL "ProcessingFileMonitor" OR test_name STREQUAL "LogVolumeMonitor" OR test_name STREQUAL "RelayLogMonitor")
             target_link_libraries(${test_name}Test PRIVATE monitor_application monitor_options)
         else()
             target_link_libraries(${test_name}Test PRIVATE monitor_infrastructure nlohmann_json::nlohmann_json monitor_options Threads::Threads)
@@ -111,6 +113,8 @@ if(BUILD_TESTING)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     add_test(NAME Architecture COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/architecture_test.py ${CMAKE_SOURCE_DIR})
     add_test(NAME DaemonIntegration COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/daemon_integration_test.py $<TARGET_FILE:resource-monitor>)
+    add_test(NAME RelayLogIntegration COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/relay_log_integration_test.py $<TARGET_FILE:resource-monitor>)
+    set_tests_properties(RelayLogIntegration PROPERTIES TIMEOUT 90)
     add_test(NAME SnapshotRetentionIntegration COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/snapshot_retention_integration_test.py $<TARGET_FILE:resource-monitor>)
     add_test(NAME Installation COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/installation_test.py ${CMAKE_COMMAND} ${CMAKE_BINARY_DIR})
     set_tests_properties(DaemonIntegration PROPERTIES TIMEOUT 90)

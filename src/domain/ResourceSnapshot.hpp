@@ -8,6 +8,7 @@
 #include "domain/LogSilenceAnalysis.hpp"
 #include "domain/ProcessingFilesSnapshot.hpp"
 #include "domain/LogVolume.hpp"
+#include "domain/RelayLog.hpp"
 
 namespace monitor {
 
@@ -58,6 +59,7 @@ struct ResourceSnapshot {
     LogSilenceAnalysis log_silence;
     ProcessingFilesSnapshot processing_files;
     LogVolumeAnalysis log_volume;
+    RelayLogSnapshot relay_log;
 };
 
 }

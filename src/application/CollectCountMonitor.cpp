@@ -11,7 +11,7 @@ CollectCountMonitor::CollectCountMonitor(ICollectCountReader& reader,
 
 void CollectCountMonitor::settings_changed(std::chrono::system_clock::time_point timestamp) {
     const auto& settings = settings_.current();
-    if (!settings.is_analyzer) return;
+    if (settings.role != ServerRole::analyzer) return;
     const auto window = calendar_.make(timestamp, settings.analyzer.comparison_day);
     if (window) reader_.read_daily_counts(*window, settings.collection_interval);
 }
@@ -20,7 +20,7 @@ CollectCountAnalysis CollectCountMonitor::collect(std::chrono::system_clock::tim
     const auto& settings = settings_.current();
     CollectCountAnalysis result;
     result.threshold_percent = settings.analyzer.collect_count_change_percent;
-    if (!settings.is_analyzer) return result;
+    if (settings.role != ServerRole::analyzer) return result;
     const auto window = calendar_.make(timestamp, settings.analyzer.comparison_day);
     if (!window) {
         result.status = CollectCountStatus::error;

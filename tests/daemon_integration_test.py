@@ -20,7 +20,7 @@ COLLECTOR_APPS = {
 }
 
 
-def write_config(path, cpu=0, memory=0, storage=0, collection=None, is_analyzer=None, mysql=None, process_monitor=None, retention=None):
+def write_config(path, cpu=0, memory=0, storage=0, collection=None, is_analyzer=None, mysql=None, process_monitor=None, retention=None, role=None):
     temporary = path.with_suffix('.new')
     settings = {
         'schema_version': 1,
@@ -34,6 +34,8 @@ def write_config(path, cpu=0, memory=0, storage=0, collection=None, is_analyzer=
         settings['collection'] = collection
     if is_analyzer is not None:
         settings['is_analyzer'] = is_analyzer
+    if role is not None:
+        settings['role'] = role
     if mysql is not None:
         settings['mysql'] = mysql
     if process_monitor is not None:
@@ -191,7 +193,7 @@ def validate_settings(executable, config, output):
             assert result.returncode == 78, result.stderr
             assert 'component=settings_config' in result.stderr
     for database in (None, {}, {'database': '', 'tls_mode': 'disabled'}, {'database': 'monitoring'}):
-        write_config(config, is_analyzer=True, mysql=database)
+        write_config(config, role='analyzer', mysql=database)
         result = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
         assert result.returncode == 78, result.stderr
         assert 'component=settings_config' in result.stderr
@@ -200,6 +202,23 @@ def validate_settings(executable, config, output):
         result = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
         assert result.returncode == 78, result.stderr
         assert 'component=settings_config' in result.stderr
+    for role in ('collector', 'analyzer', 'relay'):
+        database = {
+            'database': 'monitoring',
+            'tls_mode': 'disabled',
+            'credentials_file': str(config.parent / 'missing-mysql.json'),
+        }
+        write_config(config, role=role, mysql=database)
+        result = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
+        assert result.returncode == (78 if role == 'analyzer' else 0), result.stderr
+        for legacy in (False, True):
+            write_config(config, role=role, is_analyzer=legacy, mysql=database)
+            result = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
+            assert result.returncode == 78 and 'code=invalid_role' in result.stderr, result.stderr
+    for role in ('invalid', 'Relay', False, True, 0, [], {}):
+        write_config(config, role=role)
+        result = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
+        assert result.returncode == 78 and 'code=invalid_role' in result.stderr, result.stderr
     for profiles in ({}, {'analyzer': [], 'collector': []}, {'collector': ['custom.App-1']}):
         write_config(config, process_monitor=profiles)
         result = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
@@ -268,13 +287,13 @@ def analyzer_reload_test(executable, root, config):
             assert_no_connection()
             database['enabled'] = True
             write_config(config, 100, 100, 100, collection=collection(1, output),
-                         is_analyzer=True, mysql=database, process_monitor=profiles)
+                         role='analyzer', mysql=database, process_monitor=profiles)
             wait_snapshot(output, seen, lambda value: value['config_status'] == 'using_last_valid',
                           process, expected_apps=[])
             assert_no_connection()
             del database['enabled']
             write_config(config, 100, 100, 100, collection=collection(1, active_output),
-                         is_analyzer=True, mysql=database, process_monitor=profiles)
+                         role='analyzer', mysql=database, process_monitor=profiles)
             deadline = time.monotonic() + 5
             connections = 0
             while time.monotonic() < deadline and connections < 2:
@@ -297,7 +316,7 @@ def analyzer_reload_test(executable, root, config):
             assert failed['log_silence']['equipment'] == []
             assert any(error['component'] == 'mysql' for error in failed['errors'])
             changed_at = time.monotonic()
-            write_config(config, collection=collection(2, reloaded_output), is_analyzer=True,
+            write_config(config, collection=collection(2, reloaded_output), role='analyzer',
                          mysql=database, process_monitor=profiles,
                          retention={'enabled': False, 'max_age_seconds': 86400})
             reloaded = wait_snapshot(reloaded_output, set(),
@@ -311,7 +330,7 @@ def analyzer_reload_test(executable, root, config):
             assert reloaded['log_silence']['error']['code'] == failure_code
             log_offset = len(log_path.read_text(encoding='utf-8'))
             database['credentials_file'] = str(root / 'missing-analyzer-credentials.json')
-            write_config(config, collection=collection(1, output), is_analyzer=False,
+            write_config(config, collection=collection(1, output), role='collector',
                          mysql=database, process_monitor=profiles)
             wait_log(log_path, 'settings_reloaded', process, offset=log_offset)
             drain_connections()

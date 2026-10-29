@@ -186,7 +186,7 @@ void check_process_snapshots() {
     TemporaryDirectory directory;
     monitor::JsonSnapshotStore store(directory.path);
     auto snapshot = make_snapshot();
-    snapshot.java_processes.is_analyzer = true;
+    snapshot.java_processes.role = monitor::ServerRole::analyzer;
     snapshot.java_processes.status = monitor::MetricStatus::warning;
     snapshot.java_processes.apps = {{"SearchEngine", true}, {"AnalyzeEngine", false},
         {"pmsServer", std::nullopt}};
@@ -203,7 +203,7 @@ void check_process_snapshots() {
     CHECK(analyzer["processes"]["pmsServer"].is_null());
 
     snapshot.timestamp += std::chrono::seconds(1);
-    snapshot.java_processes.is_analyzer = false;
+    snapshot.java_processes.role = monitor::ServerRole::collector;
     snapshot.java_processes.status = monitor::MetricStatus::ok;
     snapshot.java_processes.apps = {{"Reducer", true}, {"CloudESMCollector", true}};
     CHECK(store.save(snapshot));
@@ -215,6 +215,37 @@ void check_process_snapshots() {
     CHECK(collector["processes"]["CloudESMCollector"] == true);
     CHECK(!collector["processes"].contains("AnalyzeEngine"));
     check_no_temporary_files(directory.path);
+}
+
+void check_relay_log_snapshots() {
+    ScopedTimezone scoped_zone("UTC0");
+    TemporaryDirectory directory;
+    monitor::JsonSnapshotStore store(directory.path);
+    auto snapshot = make_snapshot();
+    snapshot.java_processes.role = monitor::ServerRole::relay;
+    snapshot.relay_log.status = monitor::RelayLogStatus::warning;
+    snapshot.relay_log.path = "/CloudESM/logs/CollectorForAgent.log";
+    snapshot.relay_log.checked_at = snapshot.timestamp;
+    snapshot.relay_log.events = {{"2026-10-29 10:42:07.413", "Connection refused", "ERROR \"line\"\t\xFF", true}};
+    snapshot.relay_log.backlog = true;
+    snapshot.relay_log.errors = {{"relay_log", snapshot.relay_log.path, "read_failed", "Cannot read more"}};
+    CHECK(store.save(snapshot));
+    const auto document = read_json(directory.path / "20261014T123400+0000.json");
+    CHECK(document["role"] == "relay" && document["process_profile"] == "relay");
+    const auto& relay = document["relay_log"];
+    CHECK(relay["status"] == "warning" && relay["source"] == snapshot.relay_log.path);
+    CHECK(relay["error_count"] == 1 && relay["events"].size() == 1);
+    CHECK(relay["events"][0]["timestamp"] == "2026-10-29 10:42:07.413");
+    CHECK(relay["events"][0]["message"] == "Connection refused");
+    CHECK(relay["events"][0]["truncated"] == true && relay["backlog"] == true);
+    CHECK(relay["errors"][0]["code"] == "read_failed");
+    CHECK(relay["checked_at"] == "2026-10-14T12:34:00.000+00:00");
+    snapshot.timestamp += std::chrono::seconds{1};
+    snapshot.relay_log = {};
+    CHECK(store.save(snapshot));
+    const auto disabled = read_json(directory.path / "20261014T123401+0000.json")["relay_log"];
+    CHECK(disabled["status"] == "disabled" && disabled["events"].empty());
+    CHECK(disabled["error_count"] == 0 && disabled["checked_at"].is_null());
 }
 
 void check_log_volume_snapshots() {
@@ -715,6 +746,7 @@ int main() {
         check_process_snapshots();
         check_log_silence_snapshots();
         check_log_volume_snapshots();
+        check_relay_log_snapshots();
         check_processing_files_snapshots();
     });
 }

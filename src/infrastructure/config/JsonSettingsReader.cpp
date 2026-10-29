@@ -247,10 +247,10 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::read_settings() {
         const auto json = nlohmann::json::parse(document, callback);
         if (!json.is_object() || !json.contains("schema_version") ||
             !json.contains("thresholds")) {
-            return std::unexpected(config_error(path_, "invalid_schema", "Expected schema_version, thresholds, and optional is_analyzer, analyzer, process_monitor, processing_files, log_silence, log_volume, collection, retention and mysql"));
+            return std::unexpected(config_error(path_, "invalid_schema", "Expected schema_version, thresholds, and optional role, analyzer, process_monitor, processing_files, log_silence, log_volume, relay_log, collection, retention and mysql"));
         }
         for (const auto& [key, value] : json.items()) {
-            if (key != "schema_version" && key != "thresholds" && key != "collection" && key != "mysql" && key != "is_analyzer" && key != "analyzer" && key != "process_monitor" && key != "processing_files" && key != "log_silence" && key != "log_volume" && key != "retention") {
+            if (key != "schema_version" && key != "thresholds" && key != "collection" && key != "mysql" && key != "is_analyzer" && key != "role" && key != "analyzer" && key != "process_monitor" && key != "processing_files" && key != "log_silence" && key != "log_volume" && key != "relay_log" && key != "retention") {
                 return std::unexpected(config_error(path_, "invalid_schema", "Unknown configuration key"));
             }
         }
@@ -287,11 +287,40 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::read_settings() {
             return std::unexpected(config_error(path_, "invalid_retention",
                 "Retention must contain only enabled (boolean) and max_age_seconds (integer between 60 and 31536000)"));
         }
-        if (json.contains("is_analyzer")) {
+        if (json.contains("role")) {
+            const auto& role = json["role"];
+            if (json.contains("is_analyzer") || !role.is_string() ||
+                (role != "collector" && role != "analyzer" && role != "relay")) {
+                return std::unexpected(config_error(path_, "invalid_role",
+                    "role must be collector, analyzer or relay and must not be combined with is_analyzer"));
+            }
+            settings.role = role == "analyzer" ? ServerRole::analyzer
+                : role == "relay" ? ServerRole::relay : ServerRole::collector;
+        } else if (json.contains("is_analyzer")) {
             if (!json["is_analyzer"].is_boolean()) {
                 return std::unexpected(config_error(path_, "invalid_schema", "is_analyzer must be a boolean"));
             }
-            settings.is_analyzer = json["is_analyzer"].get<bool>();
+            settings.role = json["is_analyzer"].get<bool>() ? ServerRole::analyzer : ServerRole::collector;
+        }
+        if (json.contains("relay_log")) {
+            const auto& relay_log = json["relay_log"];
+            if (!relay_log.is_object()) {
+                return std::unexpected(config_error(path_, "invalid_relay_log", "relay_log must be an object"));
+            }
+            for (const auto& [key, value] : relay_log.items()) {
+                if (key != "path" || !value.is_string()) {
+                    return std::unexpected(config_error(path_, "invalid_relay_log",
+                        "relay_log supports only a path string"));
+                }
+                const auto& path = value.get_ref<const std::string&>();
+                const auto relay_path = std::filesystem::path{path};
+                if (path.empty() || has_control_characters(path) || !relay_path.is_absolute() ||
+                    relay_path.filename().empty() || relay_path.filename() == "." || relay_path.filename() == "..") {
+                    return std::unexpected(config_error(path_, "invalid_relay_log",
+                        "relay_log.path must be an absolute file path without control characters"));
+                }
+                settings.relay_log.path = path;
+            }
         }
         if (json.contains("analyzer")) {
             const auto& analyzer = json["analyzer"];
@@ -328,11 +357,11 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::read_settings() {
                 return std::unexpected(config_error(path_, "invalid_process_monitor", "process_monitor must be an object"));
             }
             for (const auto& [key, value] : process_monitor.items()) {
-                if (key != "analyzer" && key != "collector") {
+                if (key != "analyzer" && key != "collector" && key != "relay") {
                     return std::unexpected(config_error(path_, "invalid_process_monitor", "Unknown process_monitor setting"));
                 }
-                auto& destination = key == "analyzer"
-                    ? settings.process_monitor.analyzer : settings.process_monitor.collector;
+                auto& destination = key == "analyzer" ? settings.process_monitor.analyzer
+                    : key == "relay" ? settings.process_monitor.relay : settings.process_monitor.collector;
                 if (!read_process_apps(value, destination)) {
                     return std::unexpected(config_error(path_, "invalid_process_monitor", "Process lists must contain at most 256 unique names, each 1..128 UTF-8 bytes without control characters or leading or trailing ASCII whitespace"));
                 }
@@ -446,7 +475,7 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::read_settings() {
                 }
                 *destination = number.get<unsigned int>();
             }
-            if (settings.mysql.host.empty() || (settings.is_analyzer && settings.mysql.database.empty())) {
+            if (settings.mysql.host.empty() || (settings.role == ServerRole::analyzer && settings.mysql.database.empty())) {
                 return std::unexpected(config_error(path_, "invalid_mysql", "MySQL host is required and database is required when enabled"));
             }
             if (settings.mysql.credentials_file.empty() || !std::filesystem::path(settings.mysql.credentials_file).is_absolute()) {
@@ -456,11 +485,11 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::read_settings() {
                 return std::unexpected(config_error(path_, "invalid_mysql", "MySQL tls_mode must be disabled or verify_identity"));
             }
             if ((!settings.mysql.tls_ca_file.empty() && !std::filesystem::path(settings.mysql.tls_ca_file).is_absolute()) ||
-                (settings.is_analyzer && settings.mysql.tls_mode == "verify_identity" && settings.mysql.tls_ca_file.empty())) {
+                (settings.role == ServerRole::analyzer && settings.mysql.tls_mode == "verify_identity" && settings.mysql.tls_ca_file.empty())) {
                 return std::unexpected(config_error(path_, "invalid_mysql", "MySQL tls_ca_file must be absolute and is required when enabled with verify_identity"));
             }
-        } else if (settings.is_analyzer) {
-            return std::unexpected(config_error(path_, "invalid_mysql", "mysql settings are required when is_analyzer is true"));
+        } else if (settings.role == ServerRole::analyzer) {
+            return std::unexpected(config_error(path_, "invalid_mysql", "mysql settings are required for the analyzer role"));
         }
         return settings;
     } catch (const nlohmann::json::exception&) {

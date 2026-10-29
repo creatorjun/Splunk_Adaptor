@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "is_analyzer": false,
+  "role": "collector",
   "analyzer": {
     "collect_count_change_percent": 10.0,
     "comparison_day": "yesterday"
@@ -29,6 +29,9 @@
       "CDMEngine",
       "pmsClient",
       "ProcessMonitor"
+    ],
+    "relay": [
+      "CollectorForAgent"
     ]
   },
   "collection": {
@@ -64,6 +67,9 @@
   "log_silence": {
     "default_timeout_seconds": 300,
     "overrides": []
+  },
+  "relay_log": {
+    "path": "/CloudESM/logs/CollectorForAgent.log"
   },
   "mysql": {
     "host": "127.0.0.1",

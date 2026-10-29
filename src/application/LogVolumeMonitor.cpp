@@ -28,7 +28,7 @@ bool LogVolumeMonitor::tick(std::chrono::system_clock::time_point timestamp) {
     const auto& settings = settings_.current();
     LogVolumeAnalysis next;
     next.mode = settings.log_volume.mode;
-    if (!settings.is_analyzer) {
+    if (settings.role != ServerRole::analyzer) {
         current_ = std::move(next);
         last_emitted_.reset();
         return false;

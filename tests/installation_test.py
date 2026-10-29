@@ -33,7 +33,7 @@ def main():
         index_sql = fresh / 'usr/share/resource-monitor/sql/log_silence_index.sql'
         assert 'ON CloudESM.SUM_COLLECT_INFO (eqp_ip, recv_time, `count`)' in index_sql.read_text()
         assert original['thresholds']['cpu_usage_percent'] == 80
-        assert original['is_analyzer'] is False
+        assert original['role'] == 'collector'
         assert original['log_silence'] == {'default_timeout_seconds': 300, 'overrides': []}
         assert original['processing_files'] == {'thresholds': {
             'collector': {'tmp_count': 100, 'done_count': 100},
@@ -50,6 +50,9 @@ def main():
                 'CDMEngine', 'pmsClient', 'ProcessMonitor',
             ],
         }
+        default_profiles['relay'] = ['CollectorForAgent']
+        assert original['relay_log'] == {'path': '/CloudESM/logs/CollectorForAgent.log'}
+        assert 'is_analyzer' not in original
         assert original['process_monitor'] == default_profiles
         assert 'enabled' not in original['mysql']
         assert original['mysql']['credentials_file'] == '/etc/resource-monitor/secrets/mysql.json'
@@ -69,7 +72,7 @@ def main():
         assert not list(fresh.rglob('thresholds.json'))
         assert len(list(fresh.rglob('settings.json'))) == 2
         original['thresholds']['cpu_usage_percent'] = 42
-        original['is_analyzer'] = True
+        original['role'] = 'analyzer'
         original['log_silence'] = {'default_timeout_seconds': 600, 'overrides': []}
         original['processing_files']['thresholds']['collector']['tmp_count'] = 250
         original['process_monitor'] = {'analyzer': ['CustomAnalyzer'], 'collector': []}
@@ -87,7 +90,7 @@ def main():
         assert (fresh / 'usr/lib/systemd/system/resource-monitor.service').is_file()
         assert (fresh / 'usr/share/doc/resource-monitor/THIRD_PARTY_NOTICES.txt').is_file()
         assert json.loads(shared.read_text())['thresholds']['cpu_usage_percent'] == 80
-        assert json.loads(shared.read_text())['is_analyzer'] is False
+        assert json.loads(shared.read_text())['role'] == 'collector'
         assert json.loads(shared.read_text())['log_silence'] == {'default_timeout_seconds': 300, 'overrides': []}
         assert json.loads(shared.read_text())['process_monitor'] == default_profiles
         assert 'enabled' not in json.loads(shared.read_text())['mysql']

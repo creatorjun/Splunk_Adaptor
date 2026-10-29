@@ -14,6 +14,7 @@ struct ProcessMonitorSettings {
     std::vector<std::string> collector{
         "SearchEngine", "Reducer", "Normalizer", "CloudESMCollector", "CollectorForAgent",
         "CDMEngine", "pmsClient", "ProcessMonitor"};
+    std::vector<std::string> relay{"CollectorForAgent"};
 
     bool operator==(const ProcessMonitorSettings&) const = default;
 };

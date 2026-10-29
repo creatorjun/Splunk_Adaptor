@@ -3,6 +3,7 @@
 
 #include "domain/ResourceSample.hpp"
 #include "domain/ThresholdPolicy.hpp"
+#include "domain/ServerRole.hpp"
 
 #include <map>
 
@@ -14,7 +15,7 @@ struct JavaProcessReading {
 };
 
 struct JavaProcessSnapshot {
-    bool is_analyzer{};
+    ServerRole role{ServerRole::collector};
     MetricStatus status{MetricStatus::unknown};
     std::map<std::string, std::optional<bool>> apps;
     std::vector<Error> errors;

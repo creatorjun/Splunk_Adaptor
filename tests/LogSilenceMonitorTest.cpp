@@ -41,7 +41,7 @@ void role_and_reload_tests() {
     CHECK(!reader.enabled);
     monitor.settings_changed(now);
     CHECK(reader.cancellations == 2);
-    settings.value.is_analyzer = true;
+    settings.value.role = ServerRole::analyzer;
     result = monitor.collect(now);
     CHECK(result.status == LogSilenceStatus::pending);
     CHECK(result.default_timeout_seconds == 600);
@@ -84,7 +84,7 @@ void role_and_reload_tests() {
     CHECK(result.equipment.empty());
     CHECK(result.checked_at == now + 2s);
     CHECK(reader.enabled);
-    settings.value.is_analyzer = false;
+    settings.value.role = ServerRole::collector;
     reader.next.error = Error{"log_silence", "receipts", "query_failed", "Query failed"};
     result = monitor.collect(now);
     CHECK(result.status == LogSilenceStatus::disabled);
@@ -95,11 +95,18 @@ void role_and_reload_tests() {
     CHECK(reader.cancellations == 3);
     monitor.settings_changed(now);
     CHECK(reader.cancellations == 4);
+    settings.value.role = ServerRole::relay;
+    monitor.settings_changed(now);
+    result = monitor.collect(now);
+    CHECK(result.status == LogSilenceStatus::disabled);
+    CHECK(!result.error && !result.queried_at && result.equipment.empty());
+    CHECK(!reader.enabled);
+    CHECK(reader.cancellations == 6);
 }
 
 void pending_and_error_tests() {
     Settings settings;
-    settings.value.is_analyzer = true;
+    settings.value.role = ServerRole::analyzer;
     settings.value.log_silence.default_timeout_seconds = 600;
     Reader reader;
     LogSilenceMonitor monitor{reader, settings};

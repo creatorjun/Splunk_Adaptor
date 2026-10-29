@@ -45,7 +45,7 @@ int main() {
         const auto now = std::chrono::system_clock::now();
         CHECK(monitor.collect(now).status == CollectCountStatus::disabled);
         CHECK(reader.reads == 0);
-        settings.value.is_analyzer = true;
+        settings.value.role = ServerRole::analyzer;
         CHECK(monitor.collect(now).status == CollectCountStatus::pending);
         CHECK(reader.reads == 1);
         CHECK(reader.window == *calendar.window);
@@ -81,7 +81,11 @@ int main() {
         CHECK(reader.reads == reads);
         monitor.settings_changed(now);
         CHECK(reader.reads == reads);
-        settings.value.is_analyzer = false;
+        settings.value.role = ServerRole::relay;
+        CHECK(monitor.collect(now).status == CollectCountStatus::disabled);
+        monitor.settings_changed(now);
+        CHECK(reader.reads == reads);
+        settings.value.role = ServerRole::collector;
         CHECK(monitor.collect(now).status == CollectCountStatus::disabled);
         monitor.settings_changed(now);
         CHECK(reader.reads == reads);

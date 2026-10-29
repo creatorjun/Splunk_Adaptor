@@ -288,7 +288,7 @@ void database_reload_tests() {
     Database database;
     SettingsController controller(reader, output, {}, &database);
     CHECK(controller.initialize());
-    reader.next->is_analyzer = true;
+    reader.next->role = ServerRole::analyzer;
     reader.next->mysql.enabled = true;
     reader.next->mysql.database = "monitoring";
     reader.next->collection_interval = std::chrono::seconds{2};
@@ -331,7 +331,7 @@ void database_reload_tests() {
     changed = controller.reload();
     CHECK(changed && *changed);
     CHECK(controller.current() == *reader.next);
-    reader.next->is_analyzer = false;
+    reader.next->role = ServerRole::collector;
     changed = controller.reload();
     CHECK(changed && *changed);
     CHECK(!database.active.enabled);
@@ -340,7 +340,7 @@ void database_reload_tests() {
 void database_startup_tests() {
     for (const bool pending : {true, false}) {
         Reader reader;
-        reader.next->is_analyzer = true;
+        reader.next->role = ServerRole::analyzer;
         reader.next->mysql.enabled = true;
         reader.next->mysql.database = "monitoring";
         Output output;
@@ -368,7 +368,7 @@ void database_startup_tests() {
         CHECK(controller.dependency_errors().empty());
     }
     Reader reader;
-    reader.next->is_analyzer = true;
+    reader.next->role = ServerRole::analyzer;
     reader.next->mysql.enabled = true;
     Output output;
     SettingsController controller(reader, output);
@@ -376,17 +376,64 @@ void database_startup_tests() {
     CHECK(output.attempts.empty());
 }
 
+void role_reload_tests() {
+    Reader reader;
+    Output output;
+    Database counts;
+    Database silence;
+    Database volume;
+    SettingsController controller(reader, output, {}, &counts, &silence, &volume);
+    CHECK(controller.initialize());
+    for (const auto role : {ServerRole::analyzer, ServerRole::relay, ServerRole::collector, ServerRole::relay}) {
+        reader.next->role = role;
+        reader.next->mysql.enabled = role != ServerRole::analyzer;
+        const auto changed = controller.reload();
+        CHECK(changed && *changed);
+        CHECK(controller.current().role == role);
+        CHECK(controller.current().mysql.enabled == (role == ServerRole::analyzer));
+        for (const auto* database : {&counts, &silence, &volume}) {
+            CHECK(database->candidate.enabled == (role == ServerRole::analyzer));
+            CHECK(database->active.enabled == (role == ServerRole::analyzer));
+        }
+        CHECK(controller.dependency_errors().empty());
+    }
+    const auto connections = counts.connection_changes;
+    reader.next->relay_log.path = "/custom/relay.log";
+    reader.next->process_monitor.relay = {"CustomRelay"};
+    auto changed = controller.reload();
+    CHECK(changed && *changed);
+    CHECK(controller.current().relay_log.path == "/custom/relay.log");
+    CHECK(controller.current().process_monitor.relay == (std::vector<std::string>{"CustomRelay"}));
+    CHECK(counts.connection_changes == connections);
+    const auto accepted = controller.current();
+    reader.next = std::unexpected(Error{"settings_config", "settings.json", "invalid_role", "Invalid role"});
+    CHECK(!controller.reload());
+    CHECK(controller.current() == accepted);
+    CHECK(!counts.active.enabled && !silence.active.enabled && !volume.active.enabled);
+    reader.next = accepted;
+    reader.next->relay_log.path = "/another/relay.log";
+    changed = controller.reload();
+    CHECK(changed && *changed && !controller.reload_error());
+    CHECK(controller.current().relay_log.path == "/another/relay.log");
+    Reader relay;
+    relay.next->role = ServerRole::relay;
+    Output relay_output;
+    SettingsController no_database(relay, relay_output);
+    CHECK(no_database.initialize());
+    CHECK(no_database.current().role == ServerRole::relay);
+}
+
 void analyzer_gate_tests() {
     for (const bool analyzer : {false, true}) {
         for (const bool enabled : {false, true}) {
             Reader reader;
-            reader.next->is_analyzer = analyzer;
+            reader.next->role = analyzer ? ServerRole::analyzer : ServerRole::collector;
             reader.next->mysql.enabled = enabled;
             Output output;
             Database database;
             SettingsController controller(reader, output, {}, &database);
             CHECK(controller.initialize());
-            CHECK(controller.current().is_analyzer == analyzer);
+            CHECK(controller.current().role == (analyzer ? ServerRole::analyzer : ServerRole::collector));
             CHECK(controller.current().mysql.enabled == analyzer);
             CHECK(database.candidate.enabled == analyzer);
             CHECK(database.active.enabled == analyzer);
@@ -403,16 +450,16 @@ void analyzer_gate_tests() {
     Database database;
     SettingsController controller(reader, output, {}, &database);
     CHECK(controller.initialize());
-    CHECK(!controller.current().is_analyzer);
+    CHECK(controller.current().role == ServerRole::collector);
     CHECK(!controller.current().mysql.enabled);
     CHECK(reader.next->mysql.enabled);
     CHECK(!database.active.enabled);
 
-    reader.next->is_analyzer = true;
+    reader.next->role = ServerRole::analyzer;
     database.prepared = false;
     const auto activated = controller.reload();
     CHECK(activated && *activated);
-    CHECK(controller.current().is_analyzer);
+    CHECK(controller.current().role == ServerRole::analyzer);
     CHECK(controller.current().mysql.enabled);
     CHECK(!database.active.enabled);
     CHECK(!controller.reload_error());
@@ -420,14 +467,14 @@ void analyzer_gate_tests() {
     database.prepared = true;
     auto changed = controller.reload();
     CHECK(changed && *changed);
-    CHECK(controller.current().is_analyzer);
+    CHECK(controller.current().role == ServerRole::analyzer);
     CHECK(controller.current().mysql.enabled);
     CHECK(database.active.enabled);
 
-    reader.next->is_analyzer = false;
+    reader.next->role = ServerRole::collector;
     changed = controller.reload();
     CHECK(changed && *changed);
-    CHECK(!controller.current().is_analyzer);
+    CHECK(controller.current().role == ServerRole::collector);
     CHECK(!controller.current().mysql.enabled);
     CHECK(!database.active.enabled);
     CHECK(reader.next->mysql.enabled);
@@ -435,14 +482,14 @@ void analyzer_gate_tests() {
     changed = controller.reload();
     CHECK(changed && !*changed);
 
-    reader.next->is_analyzer = true;
+    reader.next->role = ServerRole::analyzer;
     changed = controller.reload();
     CHECK(changed && *changed);
     CHECK(database.active.enabled);
     reader.next->mysql.enabled = false;
     changed = controller.reload();
     CHECK(changed && !*changed);
-    CHECK(controller.current().is_analyzer);
+    CHECK(controller.current().role == ServerRole::analyzer);
     CHECK(controller.current().mysql.enabled);
     CHECK(database.active.enabled);
 
@@ -458,7 +505,7 @@ void analyzer_gate_tests() {
 
 void independent_database_reload_tests() {
     Reader reader;
-    reader.next->is_analyzer = true;
+    reader.next->role = ServerRole::analyzer;
     reader.next->mysql.database = "CloudESM";
     Output output;
     Database daily;
@@ -492,7 +539,7 @@ void independent_database_reload_tests() {
     CHECK(controller.dependency_errors().at(0).target == "collect_count.connection");
     CHECK(silence.active.enabled);
     daily.prepared = true;
-    reader.next->is_analyzer = false;
+    reader.next->role = ServerRole::collector;
     changed = controller.reload();
     CHECK(changed && *changed);
     CHECK(!daily.active.enabled && !silence.active.enabled);
@@ -501,7 +548,7 @@ void independent_database_reload_tests() {
 
 void analyzer_settings_reload_tests() {
     Reader reader;
-    reader.next->is_analyzer = true;
+    reader.next->role = ServerRole::analyzer;
     reader.next->mysql.database = "CloudESM";
     Output output;
     Database database;
@@ -547,7 +594,7 @@ void analyzer_settings_reload_tests() {
 
 void log_silence_settings_reload_tests() {
     Reader reader;
-    reader.next->is_analyzer = true;
+    reader.next->role = ServerRole::analyzer;
     reader.next->mysql.database = "CloudESM";
     Output output;
     Database database;
@@ -589,7 +636,7 @@ void log_silence_settings_reload_tests() {
     CHECK(database.active == original_mysql);
     CHECK(database.connection_changes == connections);
 
-    reader.next->is_analyzer = false;
+    reader.next->role = ServerRole::collector;
     changed = controller.reload();
     CHECK(changed && *changed);
     CHECK(!database.active.enabled);
@@ -606,7 +653,7 @@ void log_silence_settings_reload_tests() {
 
 void process_monitor_settings_reload_tests() {
     Reader reader;
-    reader.next->is_analyzer = true;
+    reader.next->role = ServerRole::analyzer;
     reader.next->mysql.database = "CloudESM";
     Output output;
     Database database;
@@ -621,7 +668,7 @@ void process_monitor_settings_reload_tests() {
     CHECK(changed && *changed);
     CHECK(controller.current().process_monitor.analyzer == reader.next->process_monitor.analyzer);
     CHECK(controller.current().process_monitor.collector == ProcessMonitorSettings{}.collector);
-    CHECK(controller.current().is_analyzer);
+    CHECK(controller.current().role == ServerRole::analyzer);
     CHECK(database.active == original_mysql);
     CHECK(database.connection_changes == connections);
     CHECK(output.attempts.size() == 1);
@@ -655,7 +702,7 @@ void process_monitor_settings_reload_tests() {
     CHECK(changed && !*changed);
     CHECK(!controller.reload_error());
 
-    reader.next->is_analyzer = false;
+    reader.next->role = ServerRole::collector;
     changed = controller.reload();
     CHECK(changed && *changed);
     CHECK(!controller.current().mysql.enabled);
@@ -666,7 +713,7 @@ void process_monitor_settings_reload_tests() {
     changed = controller.reload();
     CHECK(changed && *changed);
     CHECK(controller.current().process_monitor == reader.next->process_monitor);
-    CHECK(!controller.current().is_analyzer);
+    CHECK(controller.current().role == ServerRole::collector);
     CHECK(!controller.current().mysql.enabled);
     CHECK(database.connection_changes == disabled_connections);
     CHECK(output.attempts.size() == 1);
@@ -710,7 +757,7 @@ void processing_files_settings_reload_tests() {
     changed = controller.reload();
     CHECK(changed && *changed);
     CHECK(controller.current().processing_files == ProcessingFileSettings{});
-    CHECK(!controller.current().is_analyzer);
+    CHECK(controller.current().role == ServerRole::collector);
     CHECK(!database.active.enabled);
     CHECK(database.connection_changes == connections);
     CHECK(output.attempts.size() == 1);
@@ -729,6 +776,7 @@ int main() {
         database_startup_tests();
         independent_database_reload_tests();
         analyzer_gate_tests();
+        role_reload_tests();
         analyzer_settings_reload_tests();
         process_monitor_settings_reload_tests();
         log_silence_settings_reload_tests();

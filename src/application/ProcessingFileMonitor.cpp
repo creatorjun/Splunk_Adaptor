@@ -8,7 +8,7 @@ ProcessingFileMonitor::ProcessingFileMonitor(IProcessingFileReader& reader,
 
 ProcessingFilesSnapshot ProcessingFileMonitor::collect() {
     const auto& settings = settings_.current();
-    const bool enabled = !settings.is_analyzer;
+    const bool enabled = settings.role == ServerRole::collector;
     auto snapshot = reader_.read(enabled);
     if (!enabled) return {};
     snapshot.alerts.clear();
@@ -37,7 +37,7 @@ ProcessingFilesSnapshot ProcessingFileMonitor::collect() {
 }
 
 void ProcessingFileMonitor::settings_changed() {
-    reader_.read(!settings_.current().is_analyzer);
+    reader_.read(settings_.current().role == ServerRole::collector);
 }
 
 }
