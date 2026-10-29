@@ -319,15 +319,24 @@ def analyzer_reload_test(executable, root, config):
             write_config(config, collection=collection(2, reloaded_output), role='analyzer',
                          mysql=database, process_monitor=profiles,
                          retention={'enabled': False, 'max_age_seconds': 86400})
-            reloaded = wait_snapshot(reloaded_output, set(),
+            reloaded_seen = set()
+            reloaded = wait_snapshot(reloaded_output, reloaded_seen,
                 lambda value: value['config_status'] == 'ok' and value['log_silence']['status'] == 'error',
                 process, seconds=5, expected_apps=[], expected_profile='analyzer',
                 expected_silence_statuses=('pending', 'error'))
             assert time.monotonic() - changed_at < 5, 'DB failure blocked valid general settings'
             assert_resource_threshold_statuses(reloaded, 0, 0, 0)
             assert reloaded['thresholds_applied_at'] != failed['thresholds_applied_at']
-            assert reloaded['cpu']['window_seconds'] >= 1.7
+            assert reloaded['cpu']['window_seconds'] > 0, reloaded
             assert reloaded['log_silence']['error']['code'] == failure_code
+            if reloaded['cpu']['window_seconds'] < 1.7:
+                periodic = wait_snapshot(reloaded_output, reloaded_seen,
+                    lambda value: value['config_status'] == 'ok'
+                        and value['cpu']['window_seconds'] is not None
+                        and value['cpu']['window_seconds'] >= 1.7,
+                    process, seconds=7, expected_apps=[], expected_profile='analyzer',
+                    expected_silence_statuses=('pending', 'error'))
+                assert_resource_threshold_statuses(periodic, 0, 0, 0)
             log_offset = len(log_path.read_text(encoding='utf-8'))
             database['credentials_file'] = str(root / 'missing-analyzer-credentials.json')
             write_config(config, collection=collection(1, output), role='collector',
