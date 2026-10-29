@@ -8,11 +8,10 @@
 namespace monitor {
 
 CollectAndStore::CollectAndStore(IResourceReader& reader, ISnapshotStore& store,
-    IThresholdConfigReader& config, ICollectCountMonitor* collect_count,
-    IJavaProcessMonitor* java_processes, ILogSilenceMonitor* log_silence,
+    IThresholdConfigReader& config, IJavaProcessMonitor* java_processes,
     IProcessingFileMonitor* processing_files, ILogVolumeMonitor* log_volume, IRelayLogMonitor* relay_log)
-    : reader_(reader), store_(store), config_(config), collect_count_(collect_count),
-      java_processes_(java_processes), log_silence_(log_silence), processing_files_(processing_files),
+    : reader_(reader), store_(store), config_(config),
+      java_processes_(java_processes), processing_files_(processing_files),
       log_volume_(log_volume), relay_log_(relay_log) {
 }
 
@@ -29,8 +28,6 @@ std::expected<void, Error> CollectAndStore::initialize() {
     auto sample = reader_.read();
     policy_ = *configured;
     policy_applied_at_ = sample.timestamp;
-    if (collect_count_) collect_count_->collect(sample.timestamp);
-    if (log_silence_) log_silence_->collect(sample.timestamp);
     if (processing_files_) processing_files_->settings_changed();
     if (log_volume_) log_volume_->tick(sample.timestamp);
     if (relay_log_) relay_log_->settings_changed();
@@ -41,9 +38,7 @@ std::expected<void, Error> CollectAndStore::initialize() {
     return {};
 }
 
-void CollectAndStore::settings_changed(std::chrono::system_clock::time_point timestamp) {
-    if (policy_ && collect_count_) collect_count_->settings_changed(timestamp);
-    if (policy_ && log_silence_) log_silence_->settings_changed(timestamp);
+void CollectAndStore::settings_changed(std::chrono::system_clock::time_point) {
     if (policy_ && processing_files_) processing_files_->settings_changed();
     if (policy_ && relay_log_) relay_log_->settings_changed();
 }
@@ -152,16 +147,6 @@ std::expected<ResourceSnapshot, Error> CollectAndStore::run(std::uint64_t missed
         }
     }
     summarize(snapshot, sample.filesystem_enumeration_error.has_value());
-    if (collect_count_) {
-        snapshot.collect_count = collect_count_->collect(snapshot.timestamp);
-        if (snapshot.collect_count.error) snapshot.errors.push_back(*snapshot.collect_count.error);
-        if (snapshot.collect_count.status == CollectCountStatus::warning) {
-            snapshot.status = MetricStatus::warning;
-        } else if (snapshot.collect_count.status != CollectCountStatus::ok &&
-            snapshot.collect_count.status != CollectCountStatus::disabled && snapshot.status == MetricStatus::ok) {
-            snapshot.status = MetricStatus::unknown;
-        }
-    }
     if (java_processes_) {
         snapshot.java_processes = java_processes_->collect();
         snapshot.errors.insert(snapshot.errors.end(), snapshot.java_processes.errors.begin(),
@@ -170,16 +155,6 @@ std::expected<ResourceSnapshot, Error> CollectAndStore::run(std::uint64_t missed
             snapshot.status = MetricStatus::warning;
         } else if (snapshot.java_processes.status == MetricStatus::unknown &&
             snapshot.status == MetricStatus::ok) {
-            snapshot.status = MetricStatus::unknown;
-        }
-    }
-    if (log_silence_) {
-        snapshot.log_silence = log_silence_->collect(snapshot.timestamp);
-        if (snapshot.log_silence.error) snapshot.errors.push_back(*snapshot.log_silence.error);
-        if (snapshot.log_silence.status == LogSilenceStatus::warning) {
-            snapshot.status = MetricStatus::warning;
-        } else if (snapshot.log_silence.status != LogSilenceStatus::ok &&
-            snapshot.log_silence.status != LogSilenceStatus::disabled && snapshot.status == MetricStatus::ok) {
             snapshot.status = MetricStatus::unknown;
         }
     }

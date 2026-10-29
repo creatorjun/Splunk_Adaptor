@@ -47,7 +47,7 @@ int main() {
         JavaProcessMonitor monitor{reader, settings};
         auto snapshot = monitor.collect();
         CHECK(reader.reads == 1);
-        CHECK(snapshot.role == ServerRole::collector);
+        CHECK(snapshot.role == ServerRole::col);
         CHECK(names(snapshot) == collector);
         CHECK(snapshot.status == MetricStatus::warning);
         for (const auto& [app, active] : snapshot.apps) {
@@ -67,9 +67,9 @@ int main() {
             CHECK(active == true);
         }
 
-        settings.value.role = ServerRole::analyzer;
+        settings.value.role = ServerRole::anal;
         snapshot = monitor.collect();
-        CHECK(snapshot.role == ServerRole::analyzer);
+        CHECK(snapshot.role == ServerRole::anal);
         CHECK(names(snapshot) == analyzer);
         CHECK(snapshot.status == MetricStatus::warning);
         CHECK(snapshot.apps.at("pmsServer") == true);
@@ -101,9 +101,9 @@ int main() {
         CHECK(!snapshot.apps.at("AnalyzeEngine").has_value());
         CHECK(names(snapshot) == analyzer);
 
-        settings.value.role = ServerRole::collector;
+        settings.value.role = ServerRole::col;
         snapshot = monitor.collect();
-        CHECK(snapshot.role == ServerRole::collector);
+        CHECK(snapshot.role == ServerRole::col);
         CHECK(names(snapshot) == collector);
         CHECK(snapshot.apps.at("SearchEngine") == true);
         CHECK(!snapshot.apps.at("Reducer").has_value());
@@ -118,8 +118,8 @@ int main() {
         CHECK(snapshot.errors.empty());
         CHECK(reader.reads == 8);
 
-        settings.value.process_monitor.collector = {"custom-collector", "case.Sensitive"};
-        settings.value.process_monitor.analyzer = {"custom-analyzer", "Analyzer2"};
+        settings.value.process_monitor.col = {"custom-collector", "case.Sensitive"};
+        settings.value.process_monitor.anal = {"custom-analyzer", "Analyzer2"};
         reader.next.running_apps = {"custom-collector", "case.sensitive", "custom-analyzer"};
         snapshot = monitor.collect();
         CHECK(names(snapshot) == (std::set<std::string>{"custom-collector", "case.Sensitive"}));
@@ -128,82 +128,82 @@ int main() {
         CHECK(snapshot.status == MetricStatus::warning);
         CHECK(!snapshot.apps.contains("SearchEngine"));
 
-        settings.value.process_monitor.collector = {"custom-collector"};
+        settings.value.process_monitor.col = {"custom-collector"};
         snapshot = monitor.collect();
         CHECK(names(snapshot) == (std::set<std::string>{"custom-collector"}));
         CHECK(snapshot.apps.at("custom-collector") == true);
         CHECK(snapshot.status == MetricStatus::ok);
         CHECK(!snapshot.apps.contains("case.Sensitive"));
 
-        settings.value.process_monitor.analyzer.push_back("InactiveNewApp");
+        settings.value.process_monitor.anal.push_back("InactiveNewApp");
         snapshot = monitor.collect();
         CHECK(names(snapshot) == (std::set<std::string>{"custom-collector"}));
         CHECK(snapshot.status == MetricStatus::ok);
 
-        settings.value.role = ServerRole::analyzer;
+        settings.value.role = ServerRole::anal;
         snapshot = monitor.collect();
-        CHECK(snapshot.role == ServerRole::analyzer);
+        CHECK(snapshot.role == ServerRole::anal);
         CHECK(names(snapshot) == (std::set<std::string>{"custom-analyzer", "Analyzer2", "InactiveNewApp"}));
         CHECK(snapshot.apps.at("custom-analyzer") == true);
         CHECK(snapshot.apps.at("Analyzer2") == false);
         CHECK(snapshot.apps.at("InactiveNewApp") == false);
         CHECK(snapshot.status == MetricStatus::warning);
 
-        settings.value.process_monitor.analyzer = {"custom-analyzer"};
+        settings.value.process_monitor.anal = {"custom-analyzer"};
         snapshot = monitor.collect();
         CHECK(names(snapshot) == (std::set<std::string>{"custom-analyzer"}));
         CHECK(snapshot.status == MetricStatus::ok);
         CHECK(!snapshot.apps.contains("Analyzer2"));
 
         reader.next.errors.push_back(Error{"java_processes", "/proc", "permission_denied", "Access denied"});
-        settings.value.process_monitor.analyzer.clear();
+        settings.value.process_monitor.anal.clear();
         const auto before_empty = reader.reads;
         snapshot = monitor.collect();
-        CHECK(snapshot.role == ServerRole::analyzer);
+        CHECK(snapshot.role == ServerRole::anal);
         CHECK(snapshot.apps.empty());
         CHECK(snapshot.status == MetricStatus::ok);
         CHECK(snapshot.errors.empty());
         CHECK(reader.reads == before_empty);
 
-        settings.value.role = ServerRole::collector;
-        settings.value.process_monitor.collector.clear();
+        settings.value.role = ServerRole::col;
+        settings.value.process_monitor.col.clear();
         snapshot = monitor.collect();
-        CHECK(snapshot.role == ServerRole::collector);
+        CHECK(snapshot.role == ServerRole::col);
         CHECK(snapshot.apps.empty());
         CHECK(snapshot.status == MetricStatus::ok);
         CHECK(snapshot.errors.empty());
         CHECK(reader.reads == before_empty);
 
-        settings.value.process_monitor.collector = {"RestoredApp"};
+        settings.value.process_monitor.col = {"RestoredApp"};
         snapshot = monitor.collect();
         CHECK(names(snapshot) == (std::set<std::string>{"RestoredApp"}));
         CHECK(!snapshot.apps.at("RestoredApp").has_value());
         CHECK(snapshot.status == MetricStatus::unknown);
         CHECK(snapshot.errors.size() == 1);
         CHECK(reader.reads == before_empty + 1);
-        settings.value.role = ServerRole::relay;
+        settings.value.role = ServerRole::prx;
         reader.next.errors.clear();
         reader.next.running_apps = {"CollectorForAgent", "RestoredApp"};
         snapshot = monitor.collect();
-        CHECK(snapshot.role == ServerRole::relay);
+        CHECK(snapshot.role == ServerRole::prx);
         CHECK(names(snapshot) == (std::set<std::string>{"CollectorForAgent"}));
         CHECK(snapshot.apps.at("CollectorForAgent") == true);
         CHECK(snapshot.status == MetricStatus::ok);
-        settings.value.process_monitor.relay = {"CustomRelay"};
+        settings.value.process_monitor.prx = {"CustomRelay"};
         snapshot = monitor.collect();
         CHECK(names(snapshot) == (std::set<std::string>{"CustomRelay"}));
         CHECK(snapshot.apps.at("CustomRelay") == false);
         CHECK(snapshot.status == MetricStatus::warning);
-        settings.value.process_monitor.relay.clear();
+        settings.value.process_monitor.prx.clear();
         const auto before_empty_relay = reader.reads;
         snapshot = monitor.collect();
-        CHECK(snapshot.role == ServerRole::relay);
+        CHECK(snapshot.role == ServerRole::prx);
         CHECK(snapshot.apps.empty() && snapshot.errors.empty());
         CHECK(snapshot.status == MetricStatus::ok);
         CHECK(reader.reads == before_empty_relay);
-        CHECK(to_string(ServerRole::collector) == "collector");
-        CHECK(to_string(ServerRole::analyzer) == "analyzer");
-        CHECK(to_string(ServerRole::relay) == "relay");
+        CHECK(to_string(ServerRole::col) == "col");
+        CHECK(to_string(ServerRole::anal) == "anal");
+        CHECK(to_string(ServerRole::prx) == "prx");
         CHECK(to_string(static_cast<ServerRole>(-1)) == "unknown");
     });
 }

@@ -1,7 +1,6 @@
 // src/application/SettingsController.cpp
 #include "application/SettingsController.hpp"
 
-#include <array>
 #include <stdexcept>
 #include <utility>
 
@@ -16,10 +15,8 @@ Error not_initialized() {
 }
 
 SettingsController::SettingsController(ISettingsReader& reader, IOutputDirectory& output,
-    SettingsOverrides overrides, IMySqlConfiguration* mysql, IMySqlConfiguration* log_silence_mysql,
-    IMySqlConfiguration* log_volume_mysql)
-    : reader_(reader), output_(output), overrides_(std::move(overrides)), mysql_(mysql),
-      log_silence_mysql_(log_silence_mysql), log_volume_mysql_(log_volume_mysql) {}
+    SettingsOverrides overrides, IMySqlConfiguration* mysql)
+    : reader_(reader), output_(output), overrides_(std::move(overrides)), mysql_(mysql) {}
 
 std::expected<void, Error> SettingsController::initialize() {
     if (settings_) {
@@ -74,7 +71,7 @@ std::expected<bool, Error> SettingsController::load_and_apply() {
     if (overrides_.output_directory) {
         next->output_directory = *overrides_.output_directory;
     }
-    next->mysql.enabled = next->role == ServerRole::analyzer;
+    next->mysql.enabled = next->role == ServerRole::anal;
     if (!mysql_ && next->mysql.enabled) {
         last_error_ = Error{"mysql", "connection", "unavailable", "Database adapter is unavailable"};
         return std::unexpected(*last_error_);
@@ -89,19 +86,15 @@ std::expected<bool, Error> SettingsController::load_and_apply() {
     }
     bool database_changed{};
     dependency_errors_.clear();
-    const std::array databases{mysql_, log_silence_mysql_, log_volume_mysql_};
-    const std::array targets{"collect_count.connection", "log_silence.connection", "log_volume.connection"};
-    for (std::size_t index = 0; index < databases.size(); ++index) {
-        auto* database = databases[index];
-        if (!database) continue;
-        const auto prepared = database->prepare(next->mysql);
+    if (mysql_) {
+        const auto prepared = mysql_->prepare(next->mysql);
         if (prepared && *prepared) {
-            database_changed = database->commit() || database_changed;
+            database_changed = mysql_->commit();
         } else {
             auto error = prepared ? Error{"mysql", "connection", "connection_pending",
                 "Database connection validation is pending"} : prepared.error();
-            if ((log_silence_mysql_ || log_volume_mysql_) && error.component == "mysql" && error.target == "connection") {
-                error.target = targets[index];
+            if (error.component == "mysql" && error.target == "connection") {
+                error.target = "log_volume.connection";
             }
             dependency_errors_.push_back(std::move(error));
         }

@@ -32,6 +32,9 @@ struct Stream {
     std::string line;
     bool truncated{false};
     bool skip_line{false};
+    bool ignored_line{false};
+    std::size_t connection_match{};
+    bool connection_found{false};
 };
 
 bool valid_path(const std::string& path) {
@@ -235,6 +238,9 @@ private:
         if (!stream.skip_line && (!stream.line.empty() || stream.truncated)) error("incomplete_line", reason);
         stream.line.clear();
         stream.truncated = false;
+        stream.ignored_line = false;
+        stream.connection_match = 0;
+        stream.connection_found = false;
     }
 
     void consume(Stream& stream, char value) {
@@ -243,12 +249,24 @@ private:
             return;
         }
         if (value != '\n') {
+            if (stream.ignored_line) return;
+            if (!stream.connection_found) {
+                constexpr std::string_view keyword{"connection"};
+                constexpr std::array<std::size_t, 10> prefix{0, 0, 0, 0, 0, 1, 0, 0, 0, 0};
+                const char lowered = value >= 'A' && value <= 'Z' ? static_cast<char>(value + ('a' - 'A')) : value;
+                while (stream.connection_match > 0 && lowered != keyword[stream.connection_match]) {
+                    stream.connection_match = prefix[stream.connection_match - 1];
+                }
+                if (lowered == keyword[stream.connection_match]) ++stream.connection_match;
+                stream.connection_found = stream.connection_match == keyword.size();
+            }
             if (stream.line.size() < maximum_line_bytes) stream.line.push_back(value);
             else stream.truncated = true;
+            if (stream.line.size() == 30 && !error_line(stream.line)) stream.ignored_line = true;
             return;
         }
         if (!stream.truncated && !stream.line.empty() && stream.line.back() == '\r') stream.line.pop_back();
-        if (error_line(stream.line)) {
+        if (stream.connection_found && error_line(stream.line)) {
             RelayLogEntry entry;
             entry.timestamp = stream.line.substr(0, 23);
             const auto separator = stream.line.find(" - ", 29);
@@ -259,6 +277,9 @@ private:
         }
         stream.line.clear();
         stream.truncated = false;
+        stream.ignored_line = false;
+        stream.connection_match = 0;
+        stream.connection_found = false;
     }
 
     RelayLogSnapshot snapshot(bool backlog) const {

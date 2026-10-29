@@ -45,27 +45,17 @@ std::string document_with_collection(const std::string& collection) {
 
 std::string document_with_mysql(const std::string& mysql, const std::string& analyzer = "true") {
     return R"({"schema_version":1,"thresholds":{"cpu_usage_percent":80,"memory_usage_percent":85.5,"storage_usage_percent":90},"mysql":)"
-        + mysql + (analyzer.empty() ? "" : ",\"is_analyzer\":" + analyzer) + "}";
-}
-
-std::string document_with_analyzer(const std::string& analyzer) {
-    return R"({"schema_version":1,"thresholds":{"cpu_usage_percent":80,"memory_usage_percent":85.5,"storage_usage_percent":90},"analyzer":)"
-        + analyzer + "}";
+        + mysql + (analyzer.empty() ? "" : ",\"role\":" + (analyzer == "true" ? "\"anal\"" : analyzer == "false" ? "\"col\"" : analyzer)) + "}";
 }
 
 std::string document_with_process_monitor(const std::string& processes, bool is_analyzer = false) {
     return R"({"schema_version":1,"thresholds":{"cpu_usage_percent":80,"memory_usage_percent":85.5,"storage_usage_percent":90},"mysql":{"database":"monitoring","tls_mode":"disabled"},"role":)"
-        + std::string{is_analyzer ? "\"analyzer\"" : "\"collector\""} + ",\"process_monitor\":" + processes + "}";
-}
-
-std::string document_with_log_silence(const std::string& silence, bool is_analyzer = false) {
-    return R"({"schema_version":1,"thresholds":{"cpu_usage_percent":80,"memory_usage_percent":85.5,"storage_usage_percent":90},"mysql":{"database":"monitoring","tls_mode":"disabled"},"role":)"
-        + std::string{is_analyzer ? "\"analyzer\"" : "\"collector\""} + ",\"log_silence\":" + silence + "}";
+        + std::string{is_analyzer ? "\"anal\"" : "\"col\""} + ",\"process_monitor\":" + processes + "}";
 }
 
 std::string document_with_processing_files(const std::string& processing, bool is_analyzer = false) {
     return R"({"schema_version":1,"thresholds":{"cpu_usage_percent":80,"memory_usage_percent":85.5,"storage_usage_percent":90},"mysql":{"database":"monitoring","tls_mode":"disabled"},"role":)"
-        + std::string{is_analyzer ? "\"analyzer\"" : "\"collector\""} + ",\"processing_files\":" + processing + "}";
+        + std::string{is_analyzer ? "\"anal\"" : "\"col\""} + ",\"processing_files\":" + processing + "}";
 }
 
 void check_failure(monitor::JsonSettingsReader& reader, const std::filesystem::path& path) {
@@ -86,17 +76,17 @@ void role_and_relay_settings_tests() {
     const auto path = directory.path / "settings.json";
     monitor::JsonSettingsReader reader(path);
     const auto base = nlohmann::json::parse(document_with_collection("{}"));
-    for (const auto role : {monitor::ServerRole::collector, monitor::ServerRole::analyzer, monitor::ServerRole::relay}) {
+    for (const auto role : {monitor::ServerRole::col, monitor::ServerRole::anal, monitor::ServerRole::prx}) {
         auto document = base;
         document["role"] = monitor::to_string(role);
         document["mysql"] = {{"database", "monitoring"}, {"tls_mode", "disabled"}};
-        document["process_monitor"] = {{"relay", {"RelayCustom", "CollectorForAgent"}}};
+        document["process_monitor"] = {{"prx", {"RelayCustom", "CollectorForAgent"}}};
         document["relay_log"] = {{"path", "/custom/missing-relay.log"}};
         write_file(path, document.dump());
         auto settings = reader.read_settings();
         CHECK(settings && settings->role == role);
         CHECK(settings->relay_log.path == "/custom/missing-relay.log");
-        CHECK(settings->process_monitor.relay == (std::vector<std::string>{"RelayCustom", "CollectorForAgent"}));
+        CHECK(settings->process_monitor.prx == (std::vector<std::string>{"RelayCustom", "CollectorForAgent"}));
         for (const bool legacy : {false, true}) {
             document["is_analyzer"] = legacy;
             write_file(path, document.dump());
@@ -107,11 +97,11 @@ void role_and_relay_settings_tests() {
         document.erase("mysql");
         write_file(path, document.dump());
         settings = reader.read_settings();
-        CHECK(settings.has_value() == (role != monitor::ServerRole::analyzer));
+        CHECK(settings.has_value() == (role != monitor::ServerRole::anal));
         if (!settings) CHECK(settings.error().code == "invalid_mysql");
     }
     for (const auto* invalid : {"null", "false", "true", "0", "1", "[]", "{}", "\"\"",
-        "\"Analyzer\"", "\"relay \"", "\"unknown\"", "\"redaction-marker\""}) {
+        "\"Analyzer\"", "\"collector\"", "\"analyzer\"", "\"relay\"", "\"relay \"", "\"unknown\"", "\"redaction-marker\""}) {
         auto document = base;
         document["role"] = nlohmann::json::parse(invalid);
         write_file(path, document.dump());
@@ -125,28 +115,35 @@ void role_and_relay_settings_tests() {
         R"({"path":"/logs/."})", R"({"path":"/logs/.."})", R"({"path":"/logs/redaction-marker\n.log"})",
         R"({"path":"/logs/redaction-marker\u0000.log"})", R"({"path":"/logs/redaction-marker\u0085.log"})"}) {
         auto document = base;
-        document["role"] = "relay";
+        document["role"] = "prx";
         document["relay_log"] = nlohmann::json::parse(invalid);
         write_file(path, document.dump());
         const auto rejected = reader.read_settings();
         CHECK(!rejected && rejected.error().code == "invalid_relay_log");
         CHECK(rejected.error().message.find("redaction-marker") == std::string::npos);
     }
+    for (const auto* legacy_profile : {"collector", "analyzer", "relay"}) {
+        auto legacy_document = base;
+        legacy_document["process_monitor"] = {{legacy_profile, nlohmann::json::array()}};
+        write_file(path, legacy_document.dump());
+        const auto rejected = reader.read_settings();
+        CHECK(!rejected && rejected.error().code == "invalid_process_monitor");
+    }
     auto document = base;
-    document["role"] = "relay";
+    document["role"] = "prx";
     document["relay_log"] = nlohmann::json::object();
-    document["process_monitor"] = {{"relay", nlohmann::json::array()}};
+    document["process_monitor"] = {{"prx", nlohmann::json::array()}};
     write_file(path, document.dump());
     auto settings = reader.read_settings();
     CHECK(settings && settings->relay_log == monitor::RelayLogSettings{});
-    CHECK(settings->process_monitor.relay.empty());
+    CHECK(settings->process_monitor.prx.empty());
     document.erase("process_monitor");
     write_file(path, document.dump());
     settings = reader.read_settings();
-    CHECK(settings && settings->process_monitor.relay == (std::vector<std::string>{"CollectorForAgent"}));
-    for (const auto* invalid : {R"({"role":"collector","role":"relay"})",
+    CHECK(settings && settings->process_monitor.prx == (std::vector<std::string>{"CollectorForAgent"}));
+    for (const auto* invalid : {R"({"role":"col","role":"prx"})",
         R"({"relay_log":{"path":"/a.log","path":"/b.log"}})",
-        R"({"process_monitor":{"relay":[],"relay":[]}})"}) {
+        R"({"process_monitor":{"prx":[],"prx":[]}})"}) {
         auto fragment = std::string{invalid};
         fragment.erase(0, 1);
         auto text = base.dump();
@@ -172,7 +169,7 @@ void processing_files_settings_tests() {
             R"({"thresholds":{"collector":{"tmp_count":0,"done_count":1000000000000},"normalize":{"tmp_count":101,"done_count":99}}})", analyzer));
         const auto settings = reader.read_settings();
         CHECK(settings);
-        CHECK(settings->role == (analyzer ? monitor::ServerRole::analyzer : monitor::ServerRole::collector));
+        CHECK(settings->role == (analyzer ? monitor::ServerRole::anal : monitor::ServerRole::col));
         CHECK(settings->processing_files.collector.tmp_count == 0);
         CHECK(settings->processing_files.collector.done_count == 1000000000000ULL);
         CHECK(settings->processing_files.normalize.tmp_count == 101);
@@ -222,68 +219,6 @@ void processing_files_settings_tests() {
     }
 }
 
-void log_volume_settings_tests() {
-    TemporaryDirectory directory;
-    const auto path = directory.path / "settings.json";
-    monitor::JsonSettingsReader reader(path);
-    const auto document = [](const std::string& volume, const std::string& analyzer = "false") {
-        return R"({"schema_version":1,"thresholds":{"cpu_usage_percent":80,"memory_usage_percent":85,"storage_usage_percent":90},"mysql":{"database":"monitoring","tls_mode":"disabled"},"is_analyzer":)"
-            + analyzer + ",\"log_volume\":" + volume + "}";
-    };
-    write_file(path, document("{}"));
-    auto settings = reader.read_settings();
-    CHECK(settings && settings->log_volume == monitor::LogVolumeSettings{});
-    CHECK(settings->log_volume.mode == monitor::LogVolumeMode::interval);
-    CHECK(settings->log_volume.interval_seconds == 300);
-    CHECK(settings->log_volume.daily_at_minutes == 10);
-    for (const auto* role : {"false", "true"}) {
-        for (const auto* mode : {"interval", "daily"}) {
-            for (const unsigned seconds : {60U, 300U, 3600U, 86400U}) {
-                write_file(path, document(nlohmann::json{
-                    {"mode", mode}, {"interval_seconds", seconds}, {"daily_at", "23:59"}}.dump(), role));
-                settings = reader.read_settings();
-                CHECK(settings);
-                CHECK(settings->log_volume.mode == (std::string_view{mode} == "daily"
-                    ? monitor::LogVolumeMode::daily : monitor::LogVolumeMode::interval));
-                CHECK(settings->log_volume.interval_seconds == seconds);
-                CHECK(settings->log_volume.daily_at_minutes == 1439);
-            }
-        }
-        for (const auto* invalid : {"null", "true", "[]", "300", "\"interval\"",
-            R"({"mode":"today"})", R"({"mode":"Interval"})", R"({"mode":1})", R"({"mode":null})",
-            R"({"interval_seconds":0})", R"({"interval_seconds":59})", R"({"interval_seconds":61})",
-            R"({"interval_seconds":86401})", R"({"interval_seconds":-60})", R"({"interval_seconds":300.0})",
-            R"({"interval_seconds":true})", R"({"interval_seconds":"300"})", R"({"interval_seconds":null})",
-            R"({"interval_seconds":18446744073709551615})", R"({"interval_seconds":-9223372036854775808})",
-            R"({"daily_at":"0:10"})", R"({"daily_at":"00:1"})", R"({"daily_at":"24:00"})",
-            R"({"daily_at":"00:60"})", R"({"daily_at":"00:10:00"})", R"({"daily_at":"00:10Z"})",
-            R"({"daily_at":"-1:10"})", R"({"daily_at":"12.10"})", R"({"daily_at":10})",
-            R"({"daily_at":null})", R"({"daily_at":" 00:10"})", R"({"daily_at":"00:10\n"})",
-            R"({"enabled":true})", R"({"redaction-marker":1})"}) {
-            write_file(path, document(invalid, role));
-            const auto rejected = reader.read_settings();
-            CHECK(!rejected && rejected.error().code == "invalid_log_volume");
-            CHECK(rejected.error().message.find("redaction-marker") == std::string::npos);
-        }
-    }
-    for (const auto* invalid : {
-        R"({"mode":"interval","mode":"daily"})",
-        R"({"interval_seconds":60,"interval_seconds":300})",
-        R"({"daily_at":"00:10","daily_at":"00:20"})",
-        R"({"interval_seconds":18446744073709551616})"}) {
-        write_file(path, document(invalid));
-        check_failure(reader, path);
-    }
-    write_file(path, document(R"({"mode":"daily","daily_at":"00:00"})"));
-    settings = reader.read_settings();
-    CHECK(settings && settings->log_volume.mode == monitor::LogVolumeMode::daily);
-    CHECK(settings->log_volume.daily_at_minutes == 0 && settings->log_volume.interval_seconds == 300);
-    write_file(path, document(R"({"mode":"interval","interval_seconds":120})"));
-    settings = reader.read_settings();
-    CHECK(settings && settings->log_volume.mode == monitor::LogVolumeMode::interval);
-    CHECK(settings->log_volume.interval_seconds == 120 && settings->log_volume.daily_at_minutes == 10);
-}
-
 void retention_settings_tests() {
     TemporaryDirectory directory;
     const auto path = directory.path / "settings.json";
@@ -325,6 +260,42 @@ void retention_settings_tests() {
     check_failure(reader, path);
 }
 
+void cached_settings_preserve_reload_and_file_checks() {
+    TemporaryDirectory directory;
+    const auto path = directory.path / "settings.json";
+    const auto original = document_with_collection(R"({"interval_seconds":60,"output_directory":"/Monitor"})");
+    write_file(path, original);
+    monitor::JsonSettingsReader reader(path);
+    auto first = reader.read_settings();
+    CHECK(first && first->thresholds.cpu_usage_percent == 80);
+    first->thresholds.cpu_usage_percent = 1;
+    CHECK(reader.read_settings()->thresholds.cpu_usage_percent == 80);
+    const auto modified_at = std::filesystem::last_write_time(path);
+    auto changed = original;
+    const auto value = changed.find("\"cpu_usage_percent\":80");
+    CHECK(value != std::string::npos);
+    changed.replace(value, std::string{"\"cpu_usage_percent\":80"}.size(), "\"cpu_usage_percent\":81");
+    CHECK(changed.size() == original.size());
+    write_file(path, changed);
+    std::filesystem::last_write_time(path, modified_at);
+    CHECK(reader.read_settings()->thresholds.cpu_usage_percent == 81);
+    write_file(path, "{");
+    CHECK(!reader.read_settings());
+    write_file(path, changed);
+    CHECK(reader.read_settings()->thresholds.cpu_usage_percent == 81);
+    const auto saved = directory.path / "saved.json";
+    std::filesystem::rename(path, saved);
+    CHECK(!reader.read_settings());
+    CHECK(::mkfifo(path.c_str(), 0600) == 0);
+    CHECK(!reader.read_settings());
+    std::filesystem::remove(path);
+    std::filesystem::create_symlink(saved, path);
+    CHECK(!reader.read_settings());
+    std::filesystem::remove(path);
+    std::filesystem::rename(saved, path);
+    CHECK(reader.read_settings()->thresholds.cpu_usage_percent == 81);
+}
+
 }
 
 int main() {
@@ -339,9 +310,7 @@ int main() {
         CHECK(settings->collection_interval == std::chrono::seconds{60});
         CHECK(settings->output_directory == "/Monitor");
         CHECK(settings->mysql == monitor::MySqlSettings{});
-        CHECK(settings->role == monitor::ServerRole::collector);
-        CHECK(settings->analyzer.collect_count_change_percent == 10.0);
-        CHECK(settings->analyzer.comparison_day == monitor::ComparisonDay::yesterday);
+        CHECK(settings->role == monitor::ServerRole::col);
         const std::vector<std::string> default_analyzer{
             "SearchEngine", "Normalizer", "CollectorForAgent", "CDMEngine", "ShovelServer",
             "AnalyzeEngine", "AnalyzeAssistantEngine", "SoarTicketMain", "SoarPlaybookManager",
@@ -349,10 +318,8 @@ int main() {
         const std::vector<std::string> default_collector{
             "SearchEngine", "Reducer", "Normalizer", "CloudESMCollector", "CollectorForAgent",
             "CDMEngine", "pmsClient", "ProcessMonitor"};
-        CHECK(settings->process_monitor.analyzer == default_analyzer);
-        CHECK(settings->process_monitor.collector == default_collector);
-        CHECK(settings->log_silence.default_timeout_seconds == 300);
-        CHECK(settings->log_silence.overrides.empty());
+        CHECK(settings->process_monitor.anal == default_analyzer);
+        CHECK(settings->process_monitor.col == default_collector);
         CHECK(settings->processing_files == monitor::ProcessingFileSettings{});
         CHECK(settings->retention == monitor::SnapshotRetentionSettings{});
         auto policy = reader.read();
@@ -365,63 +332,63 @@ int main() {
         write_file(path, document_with_process_monitor("{}"));
         settings = reader.read_settings();
         CHECK(settings);
-        CHECK(settings->process_monitor.analyzer == default_analyzer);
-        CHECK(settings->process_monitor.collector == default_collector);
+        CHECK(settings->process_monitor.anal == default_analyzer);
+        CHECK(settings->process_monitor.col == default_collector);
         const std::vector<std::string> custom_analyzer{"SearchEngine", "searchengine", "Custom App", "\uBD84\uC11D\uAE30"};
         const std::vector<std::string> custom_collector{"Reducer", "Collector v2"};
         write_file(path, document_with_process_monitor(nlohmann::json{
-            {"analyzer", custom_analyzer}, {"collector", custom_collector}}.dump(), true));
+            {"anal", custom_analyzer}, {"col", custom_collector}}.dump(), true));
         settings = reader.read_settings();
         CHECK(settings);
-        CHECK(settings->role == monitor::ServerRole::analyzer);
-        CHECK(settings->process_monitor.analyzer == custom_analyzer);
-        CHECK(settings->process_monitor.collector == custom_collector);
+        CHECK(settings->role == monitor::ServerRole::anal);
+        CHECK(settings->process_monitor.anal == custom_analyzer);
+        CHECK(settings->process_monitor.col == custom_collector);
         CHECK(settings->thresholds == *policy);
-        for (const auto* profile : {"analyzer", "collector"}) {
+        for (const auto* profile : {"anal", "col"}) {
             write_file(path, document_with_process_monitor(nlohmann::json{
                 {profile, std::vector<std::string>{"OnlyThisApp"}}}.dump()));
             settings = reader.read_settings();
             CHECK(settings);
-            const bool analyzer = std::string_view{profile} == "analyzer";
+            const bool analyzer = std::string_view{profile} == "anal";
             const auto& customized = analyzer
-                ? settings->process_monitor.analyzer : settings->process_monitor.collector;
+                ? settings->process_monitor.anal : settings->process_monitor.col;
             CHECK(customized.size() == 1);
             CHECK(customized.front() == "OnlyThisApp");
-            CHECK((analyzer ? settings->process_monitor.collector : settings->process_monitor.analyzer)
+            CHECK((analyzer ? settings->process_monitor.col : settings->process_monitor.anal)
                 == (analyzer ? default_collector : default_analyzer));
             write_file(path, document_with_process_monitor(nlohmann::json{
                 {profile, nlohmann::json::array()}}.dump()));
             settings = reader.read_settings();
             CHECK(settings);
-            CHECK((analyzer ? settings->process_monitor.analyzer : settings->process_monitor.collector).empty());
-            CHECK((analyzer ? settings->process_monitor.collector : settings->process_monitor.analyzer)
+            CHECK((analyzer ? settings->process_monitor.anal : settings->process_monitor.col).empty());
+            CHECK((analyzer ? settings->process_monitor.col : settings->process_monitor.anal)
                 == (analyzer ? default_collector : default_analyzer));
         }
-        write_file(path, document_with_process_monitor(R"({"analyzer":[],"collector":[]})"));
+        write_file(path, document_with_process_monitor(R"({"anal":[],"col":[]})"));
         settings = reader.read_settings();
         CHECK(settings);
-        CHECK(settings->process_monitor.analyzer.empty());
-        CHECK(settings->process_monitor.collector.empty());
+        CHECK(settings->process_monitor.anal.empty());
+        CHECK(settings->process_monitor.col.empty());
 
         std::string multibyte_limit;
         for (int index = 0; index < 64; ++index) multibyte_limit += "\xc3\xa9";
         const std::vector<std::string> length_boundaries{"A", std::string(128, 'X'), multibyte_limit};
         write_file(path, document_with_process_monitor(nlohmann::json{
-            {"analyzer", length_boundaries}, {"collector", length_boundaries}}.dump()));
+            {"anal", length_boundaries}, {"col", length_boundaries}}.dump()));
         settings = reader.read_settings();
         CHECK(settings);
-        CHECK(settings->process_monitor.analyzer == length_boundaries);
-        CHECK(settings->process_monitor.collector == length_boundaries);
+        CHECK(settings->process_monitor.anal == length_boundaries);
+        CHECK(settings->process_monitor.col == length_boundaries);
         nlohmann::json maximum_apps = nlohmann::json::array();
         for (int index = 0; index < 256; ++index) maximum_apps.push_back("App" + std::to_string(index));
         write_file(path, document_with_process_monitor(nlohmann::json{
-            {"analyzer", maximum_apps}, {"collector", maximum_apps}}.dump()));
+            {"anal", maximum_apps}, {"col", maximum_apps}}.dump()));
         settings = reader.read_settings();
         CHECK(settings);
-        CHECK(settings->process_monitor.analyzer.size() == 256);
-        CHECK(settings->process_monitor.collector.size() == 256);
-        CHECK(settings->process_monitor.analyzer.front() == "App0");
-        CHECK(settings->process_monitor.analyzer.back() == "App255");
+        CHECK(settings->process_monitor.anal.size() == 256);
+        CHECK(settings->process_monitor.col.size() == 256);
+        CHECK(settings->process_monitor.anal.front() == "App0");
+        CHECK(settings->process_monitor.anal.back() == "App255");
         maximum_apps.push_back("App256");
         const std::vector<std::string> invalid_process_lists{
             "null", "true", "1", "\"redaction-marker\"", "{}",
@@ -438,7 +405,7 @@ int main() {
             maximum_apps.dump()
         };
         for (const auto is_analyzer : {false, true}) {
-            for (const auto* profile : {"analyzer", "collector", "relay"}) {
+            for (const auto* profile : {"anal", "col", "prx"}) {
                 for (const auto& apps : invalid_process_lists) {
                     write_file(path, document_with_process_monitor(
                         "{\"" + std::string{profile} + "\":" + apps + "}", is_analyzer));
@@ -458,136 +425,13 @@ int main() {
             CHECK(result.error().code == "invalid_process_monitor");
             CHECK(result.error().message.find("redaction-marker") == std::string::npos);
         }
-        write_file(path, document_with_process_monitor(R"({"analyzer":[],"analyzer":["DuplicateKey"]})"));
+        write_file(path, document_with_process_monitor(R"({"anal":[],"anal":["DuplicateKey"]})"));
         check_failure(reader, path);
 
-        for (const auto& silence : {"{}", R"({"overrides":[]})"}) {
-            write_file(path, document_with_log_silence(silence));
-            settings = reader.read_settings();
-            CHECK(settings);
-            CHECK(settings->log_silence == monitor::LogSilenceSettings{});
-        }
-        const std::vector<std::string> valid_addresses{
-            "192.0.2.1", "2001:db8::1", "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "::1"};
-        for (const auto timeout : {60U, 300U, 604800U}) {
-            nlohmann::json overrides = nlohmann::json::array();
-            for (const auto& address : valid_addresses) {
-                overrides.push_back({{"eqp_ip", address}, {"timeout_seconds", timeout}});
-            }
-            write_file(path, document_with_log_silence(nlohmann::json{
-                {"default_timeout_seconds", timeout}, {"overrides", overrides}}.dump(), true));
-            settings = reader.read_settings();
-            CHECK(settings);
-            CHECK(settings->log_silence.default_timeout_seconds == timeout);
-            CHECK(settings->log_silence.overrides.size() == valid_addresses.size());
-            for (std::size_t index = 0; index < valid_addresses.size(); ++index) {
-                CHECK(settings->log_silence.overrides[index].eqp_ip == valid_addresses[index]);
-                CHECK(settings->log_silence.overrides[index].timeout_seconds == timeout);
-            }
-        }
-        nlohmann::json maximum_overrides = nlohmann::json::array();
-        for (int index = 0; index < 256; ++index) {
-            maximum_overrides.push_back({{"eqp_ip", "192.0.2." + std::to_string(index)},
-                {"timeout_seconds", 300}});
-        }
-        write_file(path, document_with_log_silence(nlohmann::json{{"overrides", maximum_overrides}}.dump()));
-        settings = reader.read_settings();
-        CHECK(settings);
-        CHECK(settings->log_silence.overrides.size() == 256);
-        maximum_overrides.push_back({{"eqp_ip", "198.51.100.1"}, {"timeout_seconds", 300}});
-        std::vector<std::string> invalid_silence{
-            "null", "true", "1", "[]", "\"redaction-marker\"",
-            R"({"redaction-marker":300})", R"({"devices":[]})",
-            R"({"overrides":null})", R"({"overrides":true})", R"({"overrides":{}})",
-            R"({"overrides":[null]})", R"({"overrides":[true]})", R"({"overrides":[{}]})",
-            R"({"overrides":[{"eqp_ip":"192.0.2.1"}]})",
-            R"({"overrides":[{"timeout_seconds":300}]})",
-            R"({"overrides":[{"eqp_ip":"192.0.2.1","timeout_seconds":300,"typo":0}]})",
-            R"({"overrides":[{"eqp_ip":"192.0.2.1","timeout_seconds":300},{"eqp_ip":"192.0.2.1","timeout_seconds":60}]})",
-            nlohmann::json{{"overrides", maximum_overrides}}.dump()
-        };
-        for (const auto& timeout : {"null", "true", "\"300\"", "[]", "{}", "-1", "0", "59", "60.0",
-            "604801", "18446744073709551615", "-9223372036854775808"}) {
-            invalid_silence.push_back("{\"default_timeout_seconds\":" + std::string{timeout} + "}");
-            invalid_silence.push_back("{\"overrides\":[{\"eqp_ip\":\"192.0.2.1\",\"timeout_seconds\":" +
-                std::string{timeout} + "}]}");
-        }
-        for (const auto& address : {"null", "true", "300", "[]", "{}", "\"\"", "\"redaction-marker\"",
-            "\"192.0.2.256\"", "\"192.0.2\"", "\" 192.0.2.1\"", "\"192.0.2.1 \"", "\"192.0.2.1:22\"",
-            "\"[2001:db8::1]\"", "\"fe80::1%eth0\"", "\"192.0.2.1\\u0000redaction-marker\"",
-            "\"ffff:ffff:ffff:ffff:ffff:ffff:ffff:fffff\""}) {
-            invalid_silence.push_back("{\"overrides\":[{\"eqp_ip\":" + std::string{address} +
-                ",\"timeout_seconds\":300}]}");
-        }
-        for (const auto is_analyzer : {false, true}) {
-            for (const auto& silence : invalid_silence) {
-                write_file(path, document_with_log_silence(silence, is_analyzer));
-                const auto result = reader.read_settings();
-                CHECK(!result);
-                CHECK(result.error().code == "invalid_log_silence");
-                CHECK(result.error().message.find("redaction-marker") == std::string::npos);
-            }
-        }
-        write_file(path, document_with_log_silence(R"({"default_timeout_seconds":300,"default_timeout_seconds":60})"));
-        check_failure(reader, path);
-        write_file(path, document_with_log_silence(R"({"overrides":[{"eqp_ip":"192.0.2.1","eqp_ip":"192.0.2.2","timeout_seconds":300}]})"));
-        check_failure(reader, path);
-
-        write_file(path, document_with_analyzer("{}"));
-        settings = reader.read_settings();
-        CHECK(settings);
-        CHECK(settings->analyzer == monitor::AnalyzerSettings{});
-        for (const auto& threshold : {"0.000001", "10", "101.5", "1000000"}) {
-            write_file(path, document_with_analyzer(
-                "{\"collect_count_change_percent\":" + std::string{threshold} + "}"));
-            settings = reader.read_settings();
-            CHECK(settings);
-            CHECK(settings->analyzer.collect_count_change_percent == std::stod(threshold));
-            CHECK(settings->analyzer.comparison_day == monitor::ComparisonDay::yesterday);
-            CHECK(settings->role == monitor::ServerRole::collector);
-        }
-        for (const auto& day : {"today", "yesterday"}) {
-            write_file(path, document_with_analyzer(
-                "{\"comparison_day\":\"" + std::string{day} + "\"}"));
-            settings = reader.read_settings();
-            CHECK(settings);
-            CHECK(settings->analyzer.collect_count_change_percent == 10.0);
-            CHECK(settings->analyzer.comparison_day == (std::string{day} == "today"
-                ? monitor::ComparisonDay::today : monitor::ComparisonDay::yesterday));
-        }
-        write_file(path, document_with_analyzer(
-            R"({"collect_count_change_percent":12.5,"comparison_day":"today"})"));
-        settings = reader.read_settings();
-        CHECK(settings);
-        CHECK(settings->analyzer.collect_count_change_percent == 12.5);
-        CHECK(settings->analyzer.comparison_day == monitor::ComparisonDay::today);
-        CHECK(settings->thresholds == *policy);
-        const std::vector<std::string> invalid_analyzer{
-            "null", "true", "1", "\"analyzer\"", "[]",
-            R"({"typo":10})",
-            R"({"collect_count_change_percent":0})",
-            R"({"collect_count_change_percent":-0.1})",
-            R"({"collect_count_change_percent":1000000.1})",
-            R"({"collect_count_change_percent":1e400})",
-            R"({"collect_count_change_percent":18446744073709551615})",
-            R"({"collect_count_change_percent":true})",
-            R"({"collect_count_change_percent":null})",
-            R"({"collect_count_change_percent":"10"})",
-            R"({"collect_count_change_percent":[]})",
-            R"({"collect_count_change_percent":{}})",
-            R"({"collect_count_change_percent":10,"collect_count_change_percent":20})",
-            R"({"comparison_day":"tomorrow"})",
-            R"({"comparison_day":"Today"})",
-            R"({"comparison_day":""})",
-            R"({"comparison_day":true})",
-            R"({"comparison_day":1})",
-            R"({"comparison_day":null})",
-            R"({"comparison_day":[]})",
-            R"({"comparison_day":{}})",
-            R"({"comparison_day":"today","comparison_day":"yesterday"})"
-        };
-        for (const auto& analyzer : invalid_analyzer) {
-            write_file(path, document_with_analyzer(analyzer));
+        for (const auto* obsolete : {"analyzer", "log_silence", "log_volume"}) {
+            auto document = nlohmann::json::parse(document_with_collection("{}"));
+            document[obsolete] = nlohmann::json::object();
+            write_file(path, document.dump());
             check_failure(reader, path);
         }
 
@@ -707,7 +551,7 @@ int main() {
         write_file(path, document_with_mysql(R"({"host":"db.internal","port":3307,"database":"monitoring","credentials_file":"/etc/resource-monitor/secrets/custom.json","connect_timeout_seconds":1,"read_timeout_seconds":5,"write_timeout_seconds":10,"tls_mode":"verify_identity","tls_ca_file":"/etc/pki/db-ca.pem"})"));
         settings = reader.read_settings();
         CHECK(settings);
-        CHECK(settings->role == monitor::ServerRole::analyzer);
+        CHECK(settings->role == monitor::ServerRole::anal);
         CHECK(settings->mysql.host == "db.internal");
         CHECK(settings->mysql.port == 3307);
         CHECK(settings->mysql.database == "monitoring");
@@ -726,7 +570,7 @@ int main() {
                 write_file(path, document_with_mysql(mysql, analyzer));
                 settings = reader.read_settings();
                 CHECK(settings);
-                CHECK(settings->role == monitor::ServerRole::collector);
+                CHECK(settings->role == monitor::ServerRole::col);
             }
         }
         for (const auto& analyzer : {"null", "1", "0", "1.0", "\"true\"", "\"false\"", "[]", "{}"}) {
@@ -822,8 +666,8 @@ int main() {
         monitor::JsonSettingsReader pipe_reader(pipe);
         check_failure(pipe_reader, pipe);
         processing_files_settings_tests();
-        log_volume_settings_tests();
         retention_settings_tests();
         role_and_relay_settings_tests();
+        cached_settings_preserve_reload_and_file_checks();
     });
 }

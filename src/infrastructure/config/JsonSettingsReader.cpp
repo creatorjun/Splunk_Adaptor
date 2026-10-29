@@ -4,7 +4,6 @@
 #include <nlohmann/json.hpp>
 
 #include <array>
-#include <arpa/inet.h>
 #include <cerrno>
 #include <cmath>
 #include <cstdint>
@@ -72,45 +71,6 @@ bool read_process_apps(const nlohmann::json& value, std::vector<std::string>& de
     return true;
 }
 
-bool valid_log_silence_timeout(const nlohmann::json& timeout) {
-    return timeout.is_number_integer() &&
-        (timeout.is_number_unsigned()
-            ? timeout.get<std::uint64_t>() >= 60 && timeout.get<std::uint64_t>() <= 604800
-            : timeout.get<std::int64_t>() >= 60 && timeout.get<std::int64_t>() <= 604800);
-}
-
-bool read_log_volume(const nlohmann::json& value, LogVolumeSettings& destination) {
-    if (!value.is_object()) return false;
-    for (const auto& [key, setting] : value.items()) {
-        if (key == "mode") {
-            if (!setting.is_string() || (setting != "interval" && setting != "daily")) return false;
-            destination.mode = setting == "interval" ? LogVolumeMode::interval : LogVolumeMode::daily;
-        } else if (key == "interval_seconds") {
-            if (!setting.is_number_integer()) return false;
-            if (setting.is_number_unsigned()) {
-                const auto seconds = setting.get<std::uint64_t>();
-                if (seconds < 60 || seconds > 86400 || seconds % 60 != 0) return false;
-            } else {
-                const auto seconds = setting.get<std::int64_t>();
-                if (seconds < 60 || seconds > 86400 || seconds % 60 != 0) return false;
-            }
-            destination.interval_seconds = setting.get<unsigned int>();
-        } else if (key == "daily_at") {
-            if (!setting.is_string()) return false;
-            const auto& time = setting.get_ref<const std::string&>();
-            if (time.size() != 5 || time[2] != ':' || time[0] < '0' || time[0] > '9' ||
-                time[1] < '0' || time[1] > '9' || time[3] < '0' || time[3] > '9' ||
-                time[4] < '0' || time[4] > '9') return false;
-            const auto hour = static_cast<unsigned int>((time[0] - '0') * 10 + time[1] - '0');
-            const auto minute = static_cast<unsigned int>((time[3] - '0') * 10 + time[4] - '0');
-            if (hour >= 24 || minute >= 60) return false;
-            destination.daily_at_minutes = hour * 60 + minute;
-        } else {
-            return false;
-        }
-    }
-    return true;
-}
 
 bool read_retention(const nlohmann::json& value, SnapshotRetentionSettings& destination) {
     if (!value.is_object()) return false;
@@ -164,28 +124,6 @@ bool read_processing_files(const nlohmann::json& value, ProcessingFileSettings& 
     return true;
 }
 
-bool read_log_silence_overrides(const nlohmann::json& value, std::vector<LogSilencePolicy>& destination) {
-    if (!value.is_array() || value.size() > 256) return false;
-    std::set<std::string> unique;
-    std::vector<LogSilencePolicy> overrides;
-    overrides.reserve(value.size());
-    for (const auto& item : value) {
-        if (!item.is_object() || item.size() != 2 || !item.contains("eqp_ip") ||
-            !item.contains("timeout_seconds") || !item["eqp_ip"].is_string()) return false;
-        const auto& address = item["eqp_ip"].get_ref<const std::string&>();
-        in6_addr parsed{};
-        if (address.empty() || address.size() > 39 || has_control_characters(address) ||
-            (::inet_pton(AF_INET, address.c_str(), &parsed) != 1 &&
-                ::inet_pton(AF_INET6, address.c_str(), &parsed) != 1) ||
-            !unique.insert(address).second) return false;
-        const auto& timeout = item["timeout_seconds"];
-        if (!valid_log_silence_timeout(timeout)) return false;
-        overrides.push_back({address, timeout.get<std::uint32_t>()});
-    }
-    destination = std::move(overrides);
-    return true;
-}
-
 }
 
 JsonSettingsReader::JsonSettingsReader(std::filesystem::path path)
@@ -214,6 +152,7 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::read_settings() {
         return std::unexpected(config_error(path_, "file_too_large", "Configuration exceeds 65536 bytes"));
     }
     std::string document;
+    document.reserve(static_cast<std::size_t>(metadata.st_size));
     std::array<char, 4096> buffer{};
     for (;;) {
         const auto count = ::read(file.get(), buffer.data(), buffer.size());
@@ -229,6 +168,16 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::read_settings() {
         document.append(buffer.data(), amount);
     }
 
+    if (cached_settings_ && document == cached_document_) return *cached_settings_;
+    auto settings = parse_document(document);
+    if (settings) {
+        cached_document_ = std::move(document);
+        cached_settings_ = *settings;
+    }
+    return settings;
+}
+
+std::expected<MonitorSettings, Error> JsonSettingsReader::parse_document(const std::string& document) const {
     try {
         std::vector<std::set<std::string>> object_keys;
         const auto callback = [&object_keys](int depth, nlohmann::json::parse_event_t event, nlohmann::json& value) {
@@ -247,10 +196,10 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::read_settings() {
         const auto json = nlohmann::json::parse(document, callback);
         if (!json.is_object() || !json.contains("schema_version") ||
             !json.contains("thresholds")) {
-            return std::unexpected(config_error(path_, "invalid_schema", "Expected schema_version, thresholds, and optional role, analyzer, process_monitor, processing_files, log_silence, log_volume, relay_log, collection, retention and mysql"));
+            return std::unexpected(config_error(path_, "invalid_schema", "Expected schema_version, thresholds, and optional role, process_monitor, processing_files, relay_log, collection, retention and mysql"));
         }
         for (const auto& [key, value] : json.items()) {
-            if (key != "schema_version" && key != "thresholds" && key != "collection" && key != "mysql" && key != "is_analyzer" && key != "role" && key != "analyzer" && key != "process_monitor" && key != "processing_files" && key != "log_silence" && key != "log_volume" && key != "relay_log" && key != "retention") {
+            if (key != "schema_version" && key != "thresholds" && key != "collection" && key != "mysql" && key != "is_analyzer" && key != "role" && key != "process_monitor" && key != "processing_files" && key != "relay_log" && key != "retention") {
                 return std::unexpected(config_error(path_, "invalid_schema", "Unknown configuration key"));
             }
         }
@@ -279,28 +228,20 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::read_settings() {
             return std::unexpected(std::move(error));
         }
         MonitorSettings settings{policy};
-        if (json.contains("log_volume") && !read_log_volume(json["log_volume"], settings.log_volume)) {
-            return std::unexpected(config_error(path_, "invalid_log_volume",
-                "Log volume requires mode interval or daily, interval_seconds between 60 and 86400 in multiples of 60, and daily_at in HH:MM format"));
-        }
         if (json.contains("retention") && !read_retention(json["retention"], settings.retention)) {
             return std::unexpected(config_error(path_, "invalid_retention",
                 "Retention must contain only enabled (boolean) and max_age_seconds (integer between 60 and 31536000)"));
         }
+        if (json.contains("is_analyzer")) {
+            return std::unexpected(config_error(path_, "invalid_role", "Replace is_analyzer with role col, anal or prx"));
+        }
         if (json.contains("role")) {
             const auto& role = json["role"];
-            if (json.contains("is_analyzer") || !role.is_string() ||
-                (role != "collector" && role != "analyzer" && role != "relay")) {
-                return std::unexpected(config_error(path_, "invalid_role",
-                    "role must be collector, analyzer or relay and must not be combined with is_analyzer"));
+            if (!role.is_string() || (role != "col" && role != "anal" && role != "prx")) {
+                return std::unexpected(config_error(path_, "invalid_role", "role must be col, anal or prx"));
             }
-            settings.role = role == "analyzer" ? ServerRole::analyzer
-                : role == "relay" ? ServerRole::relay : ServerRole::collector;
-        } else if (json.contains("is_analyzer")) {
-            if (!json["is_analyzer"].is_boolean()) {
-                return std::unexpected(config_error(path_, "invalid_schema", "is_analyzer must be a boolean"));
-            }
-            settings.role = json["is_analyzer"].get<bool>() ? ServerRole::analyzer : ServerRole::collector;
+            settings.role = role == "anal" ? ServerRole::anal
+                : role == "prx" ? ServerRole::prx : ServerRole::col;
         }
         if (json.contains("relay_log")) {
             const auto& relay_log = json["relay_log"];
@@ -322,46 +263,17 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::read_settings() {
                 settings.relay_log.path = path;
             }
         }
-        if (json.contains("analyzer")) {
-            const auto& analyzer = json["analyzer"];
-            if (!analyzer.is_object()) {
-                return std::unexpected(config_error(path_, "invalid_analyzer", "analyzer must be an object"));
-            }
-            for (const auto& [key, value] : analyzer.items()) {
-                if (key != "collect_count_change_percent" && key != "comparison_day") {
-                    return std::unexpected(config_error(path_, "invalid_analyzer", "Unknown analyzer setting"));
-                }
-            }
-            if (analyzer.contains("collect_count_change_percent")) {
-                const auto& value = analyzer["collect_count_change_percent"];
-                if (!value.is_number()) {
-                    return std::unexpected(config_error(path_, "invalid_analyzer", "collect_count_change_percent must be numeric"));
-                }
-                const double threshold = value.get<double>();
-                if (!std::isfinite(threshold) || threshold <= 0 || threshold > 1000000) {
-                    return std::unexpected(config_error(path_, "invalid_analyzer", "collect_count_change_percent must be greater than 0 and at most 1000000"));
-                }
-                settings.analyzer.collect_count_change_percent = threshold;
-            }
-            if (analyzer.contains("comparison_day")) {
-                const auto& value = analyzer["comparison_day"];
-                if (!value.is_string() || (value != "today" && value != "yesterday")) {
-                    return std::unexpected(config_error(path_, "invalid_analyzer", "comparison_day must be today or yesterday"));
-                }
-                settings.analyzer.comparison_day = value == "today" ? ComparisonDay::today : ComparisonDay::yesterday;
-            }
-        }
         if (json.contains("process_monitor")) {
             const auto& process_monitor = json["process_monitor"];
             if (!process_monitor.is_object()) {
                 return std::unexpected(config_error(path_, "invalid_process_monitor", "process_monitor must be an object"));
             }
             for (const auto& [key, value] : process_monitor.items()) {
-                if (key != "analyzer" && key != "collector" && key != "relay") {
+                if (key != "anal" && key != "col" && key != "prx") {
                     return std::unexpected(config_error(path_, "invalid_process_monitor", "Unknown process_monitor setting"));
                 }
-                auto& destination = key == "analyzer" ? settings.process_monitor.analyzer
-                    : key == "relay" ? settings.process_monitor.relay : settings.process_monitor.collector;
+                auto& destination = key == "anal" ? settings.process_monitor.anal
+                    : key == "prx" ? settings.process_monitor.prx : settings.process_monitor.col;
                 if (!read_process_apps(value, destination)) {
                     return std::unexpected(config_error(path_, "invalid_process_monitor", "Process lists must contain at most 256 unique names, each 1..128 UTF-8 bytes without control characters or leading or trailing ASCII whitespace"));
                 }
@@ -371,19 +283,6 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::read_settings() {
             !read_processing_files(json["processing_files"], settings.processing_files)) {
             return std::unexpected(config_error(path_, "invalid_processing_files",
                 "Processing file thresholds must be objects with collector and normalize integer counts between 0 and 1000000000000"));
-        }
-        if (json.contains("log_silence")) {
-            const auto& log_silence = json["log_silence"];
-            if (!log_silence.is_object()) {
-                return std::unexpected(config_error(path_, "invalid_log_silence", "log_silence must be an object"));
-            }
-            for (const auto& [key, value] : log_silence.items()) {
-                if (key == "default_timeout_seconds" && valid_log_silence_timeout(value)) {
-                    settings.log_silence.default_timeout_seconds = value.get<std::uint32_t>();
-                } else if (key != "overrides" || !read_log_silence_overrides(value, settings.log_silence.overrides)) {
-                    return std::unexpected(config_error(path_, "invalid_log_silence", "Log silence timeouts must be integers between 60 and 604800; overrides must contain at most 256 unique IP addresses and timeouts"));
-                }
-            }
         }
         if (json.contains("collection")) {
             const auto& collection = json["collection"];
@@ -475,7 +374,7 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::read_settings() {
                 }
                 *destination = number.get<unsigned int>();
             }
-            if (settings.mysql.host.empty() || (settings.role == ServerRole::analyzer && settings.mysql.database.empty())) {
+            if (settings.mysql.host.empty() || (settings.role == ServerRole::anal && settings.mysql.database.empty())) {
                 return std::unexpected(config_error(path_, "invalid_mysql", "MySQL host is required and database is required when enabled"));
             }
             if (settings.mysql.credentials_file.empty() || !std::filesystem::path(settings.mysql.credentials_file).is_absolute()) {
@@ -485,11 +384,11 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::read_settings() {
                 return std::unexpected(config_error(path_, "invalid_mysql", "MySQL tls_mode must be disabled or verify_identity"));
             }
             if ((!settings.mysql.tls_ca_file.empty() && !std::filesystem::path(settings.mysql.tls_ca_file).is_absolute()) ||
-                (settings.role == ServerRole::analyzer && settings.mysql.tls_mode == "verify_identity" && settings.mysql.tls_ca_file.empty())) {
+                (settings.role == ServerRole::anal && settings.mysql.tls_mode == "verify_identity" && settings.mysql.tls_ca_file.empty())) {
                 return std::unexpected(config_error(path_, "invalid_mysql", "MySQL tls_ca_file must be absolute and is required when enabled with verify_identity"));
             }
-        } else if (settings.role == ServerRole::analyzer) {
-            return std::unexpected(config_error(path_, "invalid_mysql", "mysql settings are required for the analyzer role"));
+        } else if (settings.role == ServerRole::anal) {
+            return std::unexpected(config_error(path_, "invalid_mysql", "mysql settings are required for the anal role"));
         }
         return settings;
     } catch (const nlohmann::json::exception&) {

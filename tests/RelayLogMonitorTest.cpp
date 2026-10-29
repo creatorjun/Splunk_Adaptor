@@ -34,7 +34,7 @@ int main() {
         monitor.settings_changed();
         CHECK(!reader.enabled);
         CHECK(reader.path == "/CloudESM/logs/CollectorForAgent.log");
-        settings.value.role = ServerRole::relay;
+        settings.value.role = ServerRole::prx;
         monitor.settings_changed();
         CHECK(reader.enabled);
         reader.next.status = RelayLogStatus::warning;
@@ -46,10 +46,10 @@ int main() {
         settings.value.relay_log.path = "/another/CollectorForAgent.log";
         monitor.settings_changed();
         CHECK(reader.path == settings.value.relay_log.path);
-        settings.value.role = ServerRole::analyzer;
+        settings.value.role = ServerRole::anal;
         monitor.collect();
         CHECK(!reader.enabled);
-        settings.value.role = ServerRole::collector;
+        settings.value.role = ServerRole::col;
         monitor.settings_changed();
         CHECK(!reader.enabled);
     });

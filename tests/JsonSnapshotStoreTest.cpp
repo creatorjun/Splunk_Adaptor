@@ -186,13 +186,13 @@ void check_process_snapshots() {
     TemporaryDirectory directory;
     monitor::JsonSnapshotStore store(directory.path);
     auto snapshot = make_snapshot();
-    snapshot.java_processes.role = monitor::ServerRole::analyzer;
+    snapshot.java_processes.role = monitor::ServerRole::anal;
     snapshot.java_processes.status = monitor::MetricStatus::warning;
     snapshot.java_processes.apps = {{"SearchEngine", true}, {"AnalyzeEngine", false},
         {"pmsServer", std::nullopt}};
     CHECK(store.save(snapshot));
     const auto analyzer = read_json(directory.path / "20261014T123400+0000.json");
-    CHECK(analyzer["process_profile"] == "analyzer");
+    CHECK(analyzer["process_profile"] == "anal");
     CHECK(analyzer["process_status"] == "warning");
     CHECK(analyzer["processes"].is_object());
     CHECK(analyzer["processes"].size() == 3);
@@ -203,12 +203,12 @@ void check_process_snapshots() {
     CHECK(analyzer["processes"]["pmsServer"].is_null());
 
     snapshot.timestamp += std::chrono::seconds(1);
-    snapshot.java_processes.role = monitor::ServerRole::collector;
+    snapshot.java_processes.role = monitor::ServerRole::col;
     snapshot.java_processes.status = monitor::MetricStatus::ok;
     snapshot.java_processes.apps = {{"Reducer", true}, {"CloudESMCollector", true}};
     CHECK(store.save(snapshot));
     const auto collector = read_json(directory.path / "20261014T123401+0000.json");
-    CHECK(collector["process_profile"] == "collector");
+    CHECK(collector["process_profile"] == "col");
     CHECK(collector["process_status"] == "ok");
     CHECK(collector["processes"].size() == 2);
     CHECK(collector["processes"]["Reducer"] == true);
@@ -222,7 +222,7 @@ void check_relay_log_snapshots() {
     TemporaryDirectory directory;
     monitor::JsonSnapshotStore store(directory.path);
     auto snapshot = make_snapshot();
-    snapshot.java_processes.role = monitor::ServerRole::relay;
+    snapshot.java_processes.role = monitor::ServerRole::prx;
     snapshot.relay_log.status = monitor::RelayLogStatus::warning;
     snapshot.relay_log.path = "/CloudESM/logs/CollectorForAgent.log";
     snapshot.relay_log.checked_at = snapshot.timestamp;
@@ -231,7 +231,7 @@ void check_relay_log_snapshots() {
     snapshot.relay_log.errors = {{"relay_log", snapshot.relay_log.path, "read_failed", "Cannot read more"}};
     CHECK(store.save(snapshot));
     const auto document = read_json(directory.path / "20261014T123400+0000.json");
-    CHECK(document["role"] == "relay" && document["process_profile"] == "relay");
+    CHECK(document["role"] == "prx" && document["process_profile"] == "prx");
     const auto& relay = document["relay_log"];
     CHECK(relay["status"] == "warning" && relay["source"] == snapshot.relay_log.path);
     CHECK(relay["error_count"] == 1 && relay["events"].size() == 1);
@@ -249,26 +249,30 @@ void check_relay_log_snapshots() {
 }
 
 void check_log_volume_snapshots() {
-    ScopedTimezone zone("KST-9");
+    ScopedTimezone scoped_zone("KST-9");
     TemporaryDirectory directory;
     monitor::JsonSnapshotStore store(directory.path);
     auto snapshot = make_snapshot();
     snapshot.log_volume.status = monitor::LogVolumeStatus::ok;
-    snapshot.log_volume.mode = monitor::LogVolumeMode::daily;
-    snapshot.log_volume.window = monitor::LogVolumeWindow{monitor::LogVolumeMode::daily, 20261013, 20261014,
-        std::chrono::sys_days{std::chrono::year{2026}/10/13} - std::chrono::hours{9},
-        std::chrono::sys_days{std::chrono::year{2026}/10/14} - std::chrono::hours{9}};
+    snapshot.log_volume.window = monitor::LogVolumeWindow{202610142125ULL, 202610142130ULL,
+        std::chrono::sys_days{std::chrono::year{2026}/10/14} + std::chrono::hours{12} + std::chrono::minutes{25},
+        std::chrono::sys_days{std::chrono::year{2026}/10/14} + std::chrono::hours{12} + std::chrono::minutes{30}};
     snapshot.log_volume.queried_at = snapshot.timestamp;
-    snapshot.log_volume.equipment = {{"192.0.2.1", 9007199254740993ULL}, {"192.0.2.2", 0}};
+    snapshot.log_volume.last_saved_hour = std::chrono::sys_days{std::chrono::year{2026}/10/14} + std::chrono::hours{11};
+    snapshot.log_volume.completed_intervals = 6;
+    snapshot.log_volume.backlog = true;
     CHECK(store.save(snapshot));
-    const auto volume = read_json(directory.path / "20261014T213400+0900.json")["log_volume"];
-    CHECK(volume["source"] == "CloudESM.SUM_COLLECT_INFO_1DAY");
-    CHECK(volume["mode"] == "daily" && volume["status"] == "ok");
-    CHECK(volume["window_start"] == "2026-10-13T00:00:00.000+09:00");
-    CHECK(volume["window_end_exclusive"] == "2026-10-14T00:00:00.000+09:00");
-    CHECK(volume["equipment_count"] == 2);
-    CHECK(volume["equipment"][0]["count"].get<std::uint64_t>() == 9007199254740993ULL);
-    CHECK(volume["equipment"][1]["count"] == 0);
+    const auto document = read_json(directory.path / "20261014T213400+0900.json");
+    CHECK(!document.contains("collect_count") && !document.contains("log_silence"));
+    const auto& volume = document["log_volume"];
+    CHECK(volume["source"] == "CloudESM.SUM_COLLECT_INFO");
+    CHECK(volume["status"] == "ok");
+    CHECK(volume["window_start"] == "2026-10-14T21:25:00.000+09:00");
+    CHECK(volume["window_end_exclusive"] == "2026-10-14T21:30:00.000+09:00");
+    CHECK(volume["queried_at"] == "2026-10-14T21:34:00.000+09:00");
+    CHECK(volume["last_saved_hour"] == "2026-10-14T20:00:00.000+09:00");
+    CHECK(volume["completed_intervals"] == 6 && volume["backlog"] == true);
+    CHECK(!volume.contains("mode") && !volume.contains("equipment") && !volume.contains("equipment_count"));
     CHECK(volume["error"].is_null());
     snapshot.log_volume = {};
     snapshot.log_volume.status = monitor::LogVolumeStatus::error;
@@ -276,89 +280,9 @@ void check_log_volume_snapshots() {
     CHECK(store.save(snapshot));
     const auto failure = read_json(directory.path / "20261014T213400+0900_1.json")["log_volume"];
     CHECK(failure["status"] == "error");
-    CHECK(failure["equipment"].empty() && failure["window_start"].is_null());
+    CHECK(failure["window_start"].is_null() && failure["window_end_exclusive"].is_null());
+    CHECK(failure["last_saved_hour"].is_null() && failure["completed_intervals"] == 0 && failure["backlog"] == false);
     CHECK(failure["queried_at"].is_null() && failure["error"]["code"] == "2013");
-}
-
-void check_log_silence_snapshots() {
-    ScopedTimezone scoped_zone("KST-9");
-    TemporaryDirectory directory;
-    monitor::JsonSnapshotStore store(directory.path);
-    auto snapshot = make_snapshot();
-    snapshot.log_silence.status = monitor::LogSilenceStatus::warning;
-    snapshot.log_silence.default_timeout_seconds = 600;
-    snapshot.log_silence.checked_at = snapshot.timestamp;
-    snapshot.log_silence.queried_at = snapshot.timestamp - std::chrono::milliseconds{123};
-    snapshot.log_silence.equipment = {
-        {"192.0.2.1", 300, snapshot.timestamp - std::chrono::seconds{360}, 360,
-            monitor::MetricStatus::warning, "timeout"},
-        {"192.0.2.2", 600, snapshot.timestamp - std::chrono::seconds{60}, 60,
-            monitor::MetricStatus::ok, "receiving"},
-        {"2001:db8::1", 600, std::nullopt, std::nullopt,
-            monitor::MetricStatus::warning, "no_history"}};
-    CHECK(store.save(snapshot));
-    const auto json = read_json(directory.path / "20261014T213400+0900.json");
-    const auto& silence = json["log_silence"];
-    CHECK(silence["source"] == "CloudESM.SUM_COLLECT_INFO");
-    CHECK(silence["status"] == "warning");
-    CHECK(!silence.contains("default_timeout_seconds"));
-    CHECK(silence["checked_at"] == "2026-10-14T21:34:00.000+09:00");
-    CHECK(silence["queried_at"] == "2026-10-14T21:33:59.877+09:00");
-    CHECK(silence["last_received_precision_seconds"] == 60);
-    CHECK(silence["equipment_count"] == 3);
-    CHECK(silence["equipment"].size() == 3);
-    CHECK(silence["error"].is_null());
-    const auto& first = silence["equipment"][0];
-    CHECK(first["eqp_ip"] == "192.0.2.1");
-    CHECK(!first.contains("timeout_seconds"));
-    CHECK(first["silent_for_seconds"].is_number_unsigned());
-    CHECK(first["silent_for_seconds"] == 360);
-    CHECK(first["last_received_at"] == "2026-10-14T21:28:00.000+09:00");
-    CHECK(first["status"] == "warning");
-    CHECK(first["reason"] == "timeout");
-    CHECK(silence["equipment"][1]["status"] == "ok");
-    CHECK(silence["equipment"][2]["last_received_at"].is_null());
-    CHECK(silence["equipment"][2]["silent_for_seconds"].is_null());
-
-    scoped_zone.set("NST3:30");
-    CHECK(store.save(snapshot));
-    const auto shifted = read_json(directory.path / "20261014T090400-0330.json");
-    CHECK(shifted["log_silence"]["checked_at"] == "2026-10-14T09:04:00.000-03:30");
-    CHECK(shifted["log_silence"]["queried_at"] == "2026-10-14T09:03:59.877-03:30");
-    CHECK(shifted["log_silence"]["equipment"][0]["last_received_at"] == "2026-10-14T08:58:00.000-03:30");
-    CHECK(shifted["log_silence"]["equipment"][0]["silent_for_seconds"] == 360);
-
-    snapshot.timestamp += std::chrono::seconds{1};
-    snapshot.log_silence = {};
-    snapshot.log_silence.status = monitor::LogSilenceStatus::error;
-    snapshot.log_silence.error = monitor::Error{"log_silence", "CloudESM.SUM_COLLECT_INFO",
-        "query_failed", "Database unavailable"};
-    CHECK(store.save(snapshot));
-    const auto failed = read_json(directory.path / "20261014T090401-0330.json");
-    CHECK(failed["log_silence"]["status"] == "error");
-    CHECK(failed["log_silence"]["equipment_count"] == 0);
-    CHECK(failed["log_silence"]["equipment"].is_array());
-    CHECK(failed["log_silence"]["equipment"].empty());
-    CHECK(failed["log_silence"]["checked_at"].is_null());
-    CHECK(failed["log_silence"]["queried_at"].is_null());
-    CHECK(failed["log_silence"]["error"]["component"] == "log_silence");
-    CHECK(failed["log_silence"]["error"]["target"] == "CloudESM.SUM_COLLECT_INFO");
-    CHECK(failed["log_silence"]["error"]["code"] == "query_failed");
-    CHECK(failed["log_silence"]["error"]["message"] == "Database unavailable");
-    CHECK(failed["cpu"]["usage_percent"] == *snapshot.cpu.usage_percent);
-    CHECK(failed["collection_status"] == "partial");
-
-    snapshot.log_silence.error.reset();
-    for (const auto state : {monitor::LogSilenceStatus::disabled, monitor::LogSilenceStatus::pending,
-        monitor::LogSilenceStatus::no_data, monitor::LogSilenceStatus::ok}) {
-        snapshot.log_silence.status = state;
-        CHECK(store.save(snapshot));
-    }
-    CHECK(read_json(directory.path / "20261014T090401-0330_1.json")["log_silence"]["status"] == "disabled");
-    CHECK(read_json(directory.path / "20261014T090401-0330_2.json")["log_silence"]["status"] == "pending");
-    CHECK(read_json(directory.path / "20261014T090401-0330_3.json")["log_silence"]["status"] == "no_data");
-    CHECK(read_json(directory.path / "20261014T090401-0330_4.json")["log_silence"]["status"] == "ok");
-    check_no_temporary_files(directory.path);
 }
 
 void check_processing_files_snapshots() {
@@ -432,74 +356,6 @@ void check_processing_files_snapshots() {
     check_no_temporary_files(directory.path);
 }
 
-void check_collect_count_snapshots() {
-    ScopedTimezone scoped_zone("KST-9");
-    TemporaryDirectory directory;
-    monitor::JsonSnapshotStore store(directory.path);
-    auto snapshot = make_snapshot();
-    const auto maximum = std::numeric_limits<std::uint64_t>::max();
-    snapshot.collect_count = *monitor::analyze_collect_counts({
-        {"10.1.0.1", maximum, 0, true, false},
-        {"10.1.0.2", 0, maximum, false, true},
-        {"10.1.0.3", 110, 100, true, true}}, 10.0);
-    snapshot.collect_count.window = {20261013, 20261012};
-    snapshot.collect_count.queried_at = snapshot.timestamp - std::chrono::milliseconds(123);
-    CHECK(store.save(snapshot));
-    const auto json = read_json(directory.path / "20261014T213400+0900.json");
-    const auto& analysis = json["collect_count"];
-    CHECK(analysis["source"] == "CloudESM.SUM_COLLECT_INFO_1DAY");
-    CHECK(analysis["status"] == "warning");
-    CHECK(analysis["current_day"] == 20261013);
-    CHECK(analysis["previous_day"] == 20261012);
-    CHECK(!analysis.contains("threshold_percent"));
-    CHECK(analysis["queried_at"] == "2026-10-14T21:33:59.877+09:00");
-    CHECK(analysis["equipment_count"] == 3);
-    CHECK(analysis["error"].is_null());
-    CHECK(analysis["alerts"].size() == 3);
-    const auto& first = analysis["alerts"][0];
-    CHECK(first["eqp_ip"] == "10.1.0.1");
-    CHECK(first["current_count"].is_number_unsigned());
-    CHECK(first["current_count"].get<std::uint64_t>() == maximum);
-    CHECK(first["previous_count"] == 0);
-    CHECK(first["current_present"] == true);
-    CHECK(first["previous_present"] == false);
-    CHECK(first["change_percent"].is_null());
-    CHECK(first["reason"] == "baseline_zero");
-    const auto& second = analysis["alerts"][1];
-    CHECK(second["current_count"] == 0);
-    CHECK(second["previous_count"].get<std::uint64_t>() == maximum);
-    CHECK(second["current_present"] == false);
-    CHECK(second["previous_present"] == true);
-    CHECK(second["change_percent"] == -100.0);
-    CHECK(second["reason"] == "decrease");
-    CHECK(analysis["alerts"][2]["change_percent"] == 10.0);
-    CHECK(analysis["alerts"][2]["reason"] == "increase");
-
-    scoped_zone.set("NST3:30");
-    CHECK(store.save(snapshot));
-    const auto shifted = read_json(directory.path / "20261014T090400-0330.json");
-    CHECK(shifted["collect_count"]["queried_at"] == "2026-10-14T09:03:59.877-03:30");
-    CHECK(shifted["collect_count"]["current_day"] == 20261013);
-    CHECK(shifted["collect_count"]["previous_day"] == 20261012);
-
-    snapshot.timestamp += std::chrono::seconds(1);
-    snapshot.collect_count.status = monitor::CollectCountStatus::error;
-    snapshot.collect_count.alerts.clear();
-    snapshot.collect_count.error = monitor::Error{"collect_count",
-        "CloudESM.SUM_COLLECT_INFO_1DAY", "query_failed", "Database unavailable"};
-    CHECK(store.save(snapshot));
-    const auto failed = read_json(directory.path / "20261014T090401-0330.json");
-    CHECK(failed["collect_count"]["status"] == "error");
-    CHECK(failed["collect_count"]["alerts"].empty());
-    const auto& error = failed["collect_count"]["error"];
-    CHECK(error["component"] == "collect_count");
-    CHECK(error["target"] == "CloudESM.SUM_COLLECT_INFO_1DAY");
-    CHECK(error["code"] == "query_failed");
-    CHECK(error["message"] == "Database unavailable");
-    CHECK(failed["cpu"]["usage_percent"] == *snapshot.cpu.usage_percent);
-    check_no_temporary_files(directory.path);
-}
-
 }
 
 int main() {
@@ -532,19 +388,11 @@ int main() {
         CHECK(json["filesystems"][1]["total_bytes"].is_null());
         CHECK(json["filesystems"][1]["usage_percent"].is_null());
         CHECK(json["errors"][0]["code"] == "statvfs_failed");
-        CHECK(json["collect_count"]["source"] == "CloudESM.SUM_COLLECT_INFO_1DAY");
-        CHECK(json["collect_count"]["status"] == "disabled");
-        CHECK(json["collect_count"]["current_day"].is_null());
-        CHECK(json["collect_count"]["previous_day"].is_null());
-        CHECK(json["collect_count"]["queried_at"].is_null());
-        CHECK(!json["collect_count"].contains("threshold_percent"));
-        CHECK(json["collect_count"]["equipment_count"] == 0);
-        CHECK(json["collect_count"]["alerts"].is_array());
-        CHECK(json["collect_count"]["alerts"].empty());
-        CHECK(json["collect_count"]["error"].is_null());
         CHECK(json["processes"].is_object());
         CHECK(json["processes"].empty());
-        CHECK(json["process_profile"] == "collector");
+        CHECK(!json.contains("collect_count"));
+        CHECK(!json.contains("log_silence"));
+        CHECK(json["process_profile"] == "col");
         CHECK(json["process_status"] == "unknown");
 
         snapshot.hostname = "second-host";
@@ -742,9 +590,7 @@ int main() {
         check_no_temporary_files(blocked_directory.path);
         check_no_temporary_files(invalid_directory.path);
         check_timezone_snapshots();
-        check_collect_count_snapshots();
         check_process_snapshots();
-        check_log_silence_snapshots();
         check_log_volume_snapshots();
         check_relay_log_snapshots();
         check_processing_files_snapshots();

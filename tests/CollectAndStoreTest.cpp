@@ -85,21 +85,6 @@ struct OutputDirectory final : IOutputDirectory {
     }
 };
 
-struct CountMonitor final : ICollectCountMonitor {
-    CollectCountAnalysis next;
-    std::vector<std::chrono::system_clock::time_point> observed;
-    std::vector<std::chrono::system_clock::time_point> settings_updates;
-
-    CollectCountAnalysis collect(std::chrono::system_clock::time_point timestamp) override {
-        observed.push_back(timestamp);
-        return next;
-    }
-
-    void settings_changed(std::chrono::system_clock::time_point timestamp) override {
-        settings_updates.push_back(timestamp);
-    }
-};
-
 struct ProcessMonitor final : IJavaProcessMonitor {
     JavaProcessSnapshot next;
     unsigned reads{};
@@ -107,21 +92,6 @@ struct ProcessMonitor final : IJavaProcessMonitor {
     JavaProcessSnapshot collect() override {
         ++reads;
         return next;
-    }
-};
-
-struct SilenceMonitor final : ILogSilenceMonitor {
-    LogSilenceAnalysis next;
-    std::vector<std::chrono::system_clock::time_point> observed;
-    std::vector<std::chrono::system_clock::time_point> settings_updates;
-
-    LogSilenceAnalysis collect(std::chrono::system_clock::time_point timestamp) override {
-        observed.push_back(timestamp);
-        return next;
-    }
-
-    void settings_changed(std::chrono::system_clock::time_point timestamp) override {
-        settings_updates.push_back(timestamp);
     }
 };
 
@@ -148,7 +118,7 @@ void database_dependency_error_test() {
     Reader reader;
     Store store;
     Config config;
-    config.dependencies = {{"mysql", "log_silence.connection", "1045", "Database connection failed"}};
+    config.dependencies = {{"mysql", "log_volume.connection", "1045", "Database connection failed"}};
     CollectAndStore use_case(reader, store, config);
     CHECK(use_case.initialize());
     reader.next = sample(1);
@@ -178,7 +148,7 @@ void processing_file_tests() {
     Store store;
     Config config;
     ProcessingMonitor processing;
-    CollectAndStore use_case(reader, store, config, nullptr, nullptr, nullptr, &processing);
+    CollectAndStore use_case(reader, store, config, nullptr, &processing);
     use_case.settings_changed(sample(0).timestamp);
     CHECK(processing.updates == 0);
     CHECK(use_case.initialize());
@@ -257,184 +227,16 @@ void initialization_tests() {
     CHECK(store.attempts.size() == 1);
     CHECK(store.attempts.front().status == MetricStatus::ok);
     CHECK(store.attempts.front().timestamp == sample(1).timestamp);
-    CHECK(result->collect_count.status == CollectCountStatus::disabled);
-    CHECK(result->log_silence.status == LogSilenceStatus::disabled);
-}
-
-void log_silence_tests() {
-    Reader reader;
-    Store store;
-    Config config;
-    CountMonitor counts;
-    ProcessMonitor processes;
-    processes.next.status = MetricStatus::ok;
-    SilenceMonitor silence;
-    CollectAndStore use_case(reader, store, config, &counts, &processes, &silence);
-    CHECK(!use_case.run());
-    CHECK(silence.observed.empty());
-    use_case.settings_changed(sample(0).timestamp);
-    CHECK(silence.settings_updates.empty());
-    CHECK(use_case.initialize());
-    CHECK(silence.observed == std::vector{sample(0).timestamp});
-    CHECK(counts.observed == silence.observed);
-    CHECK(store.attempts.empty());
-    const auto initial_reads = reader.reads;
-    use_case.settings_changed(sample(1).timestamp);
-    CHECK(silence.settings_updates == std::vector{sample(1).timestamp});
-    CHECK(counts.settings_updates == silence.settings_updates);
-    CHECK(reader.reads == initial_reads);
-    CHECK(store.attempts.empty());
-
-    silence.next.status = LogSilenceStatus::warning;
-    silence.next.default_timeout_seconds = 300;
-    silence.next.checked_at = sample(1).timestamp;
-    silence.next.queried_at = sample(1).timestamp - std::chrono::seconds{1};
-    silence.next.equipment = {{"192.0.2.1", 300,
-        sample(1).timestamp - std::chrono::seconds{360}, 360, MetricStatus::warning, "timeout"}};
-    reader.next = sample(1);
-    auto result = use_case.run();
-    CHECK(result);
-    CHECK(result->status == MetricStatus::warning);
-    CHECK(result->collection_status == CollectionStatus::ok);
-    CHECK(result->cpu.status == MetricStatus::ok);
-    CHECK(result->log_silence.status == LogSilenceStatus::warning);
-    CHECK(result->log_silence.checked_at == silence.next.checked_at);
-    CHECK(result->log_silence.queried_at == silence.next.queried_at);
-    CHECK(result->log_silence.equipment.front().silent_for_seconds == 360);
-    CHECK(store.attempts.back().log_silence.equipment.front().eqp_ip == "192.0.2.1");
-
-    silence.next.status = LogSilenceStatus::error;
-    silence.next.equipment.clear();
-    silence.next.error = Error{"log_silence", "CloudESM.SUM_COLLECT_INFO", "query_failed", "Database unavailable"};
-    reader.next = sample(2);
-    result = use_case.run();
-    CHECK(result);
-    CHECK(result->status == MetricStatus::unknown);
-    CHECK(result->collection_status == CollectionStatus::ok);
-    CHECK(result->memory.usage_percent == 60.0);
-    CHECK(has_error(*result, "query_failed"));
-    CHECK(has_error(store.attempts.back(), "query_failed"));
-    CHECK(store.attempts.back().log_silence.error->component == "log_silence");
-
-    reader.next = sample(3);
-    processes.next.status = MetricStatus::warning;
-    processes.next.apps = {{"UnavailableApp", false}};
-    result = use_case.run();
-    CHECK(result);
-    CHECK(result->status == MetricStatus::warning);
-    CHECK(result->collection_status == CollectionStatus::ok);
-    CHECK(result->log_silence.status == LogSilenceStatus::error);
-
-    processes.next.status = MetricStatus::ok;
-    processes.next.apps.clear();
-    silence.next = {};
-    std::uint64_t minute = 4;
-    for (const auto state : {LogSilenceStatus::pending, LogSilenceStatus::no_data,
-        LogSilenceStatus::ok, LogSilenceStatus::disabled}) {
-        silence.next.status = state;
-        reader.next = sample(minute++);
-        result = use_case.run();
-        CHECK(result);
-        CHECK(result->collection_status == CollectionStatus::ok);
-        CHECK(result->status == (state == LogSilenceStatus::ok || state == LogSilenceStatus::disabled
-            ? MetricStatus::ok : MetricStatus::unknown));
-        CHECK(result->log_silence.status == state);
-        CHECK(result->errors.empty());
-    }
-    CHECK(store.attempts.size() == 7);
-    CHECK(silence.observed.size() == 8);
-    CHECK(silence.observed.back() == sample(7).timestamp);
-}
-
-void count_analysis_tests() {
-    Reader reader;
-    Store store;
-    Config config;
-    CountMonitor monitor;
-    monitor.next.status = CollectCountStatus::pending;
-    CollectAndStore use_case(reader, store, config, &monitor);
-    CHECK(!use_case.run());
-    CHECK(monitor.observed.empty());
-    use_case.settings_changed(sample(0).timestamp);
-    CHECK(monitor.settings_updates.empty());
-    CHECK(use_case.initialize());
-    CHECK(monitor.observed == std::vector{sample(0).timestamp});
-    CHECK(store.attempts.empty());
-    const auto initial_reads = reader.reads;
-    use_case.settings_changed(sample(1).timestamp);
-    CHECK(monitor.settings_updates == std::vector{sample(1).timestamp});
-    CHECK(reader.reads == initial_reads && store.attempts.empty());
-
-    monitor.next = *analyze_collect_counts({{"10.1.0.1", 110, 100, true, true}}, 10.0);
-    monitor.next.window = {20261018, 20261017};
-    monitor.next.queried_at = sample(0).timestamp;
-    reader.next = sample(1);
-    auto result = use_case.run();
-    CHECK(result);
-    CHECK(result->status == MetricStatus::warning);
-    CHECK(result->collection_status == CollectionStatus::ok);
-    CHECK(result->cpu.status == MetricStatus::ok);
-    CHECK(result->memory.status == MetricStatus::ok);
-    CHECK(result->filesystems.front().status == MetricStatus::ok);
-    CHECK(result->collect_count.status == CollectCountStatus::warning);
-    CHECK(result->collect_count.window == monitor.next.window);
-    CHECK(result->collect_count.queried_at == monitor.next.queried_at);
-    CHECK(result->collect_count.alerts.size() == 1);
-    CHECK(result->collect_count.alerts.front().change_percent == 10.0);
-    CHECK(store.attempts.back().collect_count.alerts.front().eqp_ip == "10.1.0.1");
-
-    monitor.next.status = CollectCountStatus::error;
-    monitor.next.alerts.clear();
-    monitor.next.error = Error{"collect_count", "CloudESM.SUM_COLLECT_INFO_1DAY",
-        "query_failed", "Database unavailable"};
-    reader.next = sample(2);
-    result = use_case.run();
-    CHECK(result);
-    CHECK(result->status == MetricStatus::unknown);
-    CHECK(result->collection_status == CollectionStatus::ok);
-    CHECK(result->cpu.usage_percent == 50.0);
-    CHECK(result->memory.usage_percent == 60.0);
-    CHECK(result->collect_count.error->code == "query_failed");
-    CHECK(has_error(*result, "query_failed"));
-    CHECK(store.attempts.back().status == MetricStatus::unknown);
-    CHECK(has_error(store.attempts.back(), "query_failed"));
-
-    reader.next = sample(3);
-    reader.next.memory.value = MemoryCounters{1000, 100};
-    result = use_case.run();
-    CHECK(result);
-    CHECK(result->status == MetricStatus::warning);
-    CHECK(result->collection_status == CollectionStatus::ok);
-    CHECK(result->collect_count.status == CollectCountStatus::error);
-
-    monitor.next = {};
-    std::uint64_t minute = 4;
-    for (const auto state : {CollectCountStatus::pending, CollectCountStatus::no_data,
-        CollectCountStatus::ok, CollectCountStatus::disabled}) {
-        monitor.next.status = state;
-        reader.next = sample(minute++);
-        result = use_case.run();
-        CHECK(result);
-        CHECK(result->collection_status == CollectionStatus::ok);
-        CHECK(result->status == (state == CollectCountStatus::ok || state == CollectCountStatus::disabled
-            ? MetricStatus::ok : MetricStatus::unknown));
-        CHECK(result->collect_count.status == state);
-        CHECK(result->errors.empty());
-    }
-    CHECK(store.attempts.size() == 7);
-    CHECK(monitor.observed.size() == 8);
-    CHECK(monitor.observed.back() == sample(7).timestamp);
 }
 
 void process_monitor_tests() {
     Reader reader;
     Store store;
     Config config;
-    CountMonitor counts;
     ProcessMonitor processes;
     processes.next.status = MetricStatus::warning;
     processes.next.apps = {{"SearchEngine", true}, {"Reducer", false}};
-    CollectAndStore use_case(reader, store, config, &counts, &processes);
+    CollectAndStore use_case(reader, store, config, &processes);
     CHECK(!use_case.run());
     CHECK(processes.reads == 0);
     CHECK(use_case.initialize());
@@ -471,13 +273,12 @@ void process_monitor_tests() {
     CHECK(result->java_processes.status == MetricStatus::unknown);
 
     reader.next = sample(4);
-    counts.next.status = CollectCountStatus::warning;
+    reader.next.memory.value = MemoryCounters{1000, 100};
     result = use_case.run();
     CHECK(result);
     CHECK(result->status == MetricStatus::warning);
 
     reader.next = sample(5);
-    counts.next.status = CollectCountStatus::error;
     processes.next.status = MetricStatus::warning;
     processes.next.apps["Reducer"] = false;
     processes.next.errors.clear();
@@ -490,10 +291,9 @@ void process_monitor_tests() {
     processes.next.apps["Reducer"] = true;
     result = use_case.run();
     CHECK(result);
-    CHECK(result->status == MetricStatus::unknown);
+    CHECK(result->status == MetricStatus::ok);
 
     reader.next = sample(7);
-    counts.next.status = CollectCountStatus::disabled;
     result = use_case.run();
     CHECK(result);
     CHECK(result->status == MetricStatus::ok);
@@ -932,7 +732,7 @@ void relay_log_snapshot_test() {
     Reader reader;
     Store store;
     Config config;
-    CollectAndStore use_case{reader, store, config, nullptr, nullptr, nullptr, nullptr, nullptr, &relay};
+    CollectAndStore use_case{reader, store, config, nullptr, nullptr, nullptr, &relay};
     CHECK(use_case.initialize());
     CHECK(relay.changes == 1);
     use_case.settings_changed(sample(1).timestamp);
@@ -971,24 +771,43 @@ void log_volume_snapshot_test() {
     Reader reader;
     Store store;
     Config config;
-    CollectAndStore use_case{reader, store, config, nullptr, nullptr, nullptr, nullptr, &volume};
+    CollectAndStore use_case{reader, store, config, nullptr, nullptr, &volume};
     CHECK(use_case.initialize());
     CHECK(volume.ticks == 1);
     CHECK(use_case.tick(sample(1).timestamp));
     CHECK(volume.ticks == 2);
     volume.next.status = LogVolumeStatus::ok;
-    volume.next.equipment = {{"192.0.2.1", 1234}};
+    volume.next.completed_intervals = 6;
+    volume.next.last_saved_hour = sample(0).timestamp;
+    volume.next.backlog = true;
     reader.next = sample(1);
     const auto normal = use_case.run();
-    CHECK(normal && normal->log_volume.equipment.front().count == 1234);
+    CHECK(normal && normal->log_volume.completed_intervals == 6 && normal->log_volume.backlog);
+    CHECK(normal->log_volume.last_saved_hour == sample(0).timestamp);
     CHECK(normal->collection_status == CollectionStatus::ok && normal->status == MetricStatus::ok);
     volume.next = {};
     volume.next.status = LogVolumeStatus::error;
     volume.next.error = Error{"log_volume", "query", "2013", "Query failed"};
     reader.next = sample(2);
     const auto failed = use_case.run();
-    CHECK(failed && failed->log_volume.equipment.empty() && has_error(*failed, "2013"));
+    CHECK(failed && failed->log_volume.completed_intervals == 0 && has_error(*failed, "2013"));
     CHECK(failed->collection_status == CollectionStatus::ok && failed->status == MetricStatus::unknown);
+    unsigned minute = 3;
+    for (const auto status : {LogVolumeStatus::pending, LogVolumeStatus::no_data,
+        LogVolumeStatus::disabled, LogVolumeStatus::ok}) {
+        volume.next = {};
+        volume.next.status = status;
+        reader.next = sample(minute++);
+        const auto result = use_case.run();
+        CHECK(result && result->collection_status == CollectionStatus::ok);
+        CHECK(result->status == (status == LogVolumeStatus::pending || status == LogVolumeStatus::no_data
+            ? MetricStatus::unknown : MetricStatus::ok));
+    }
+    volume.next.status = LogVolumeStatus::error;
+    reader.next = sample(minute);
+    reader.next.memory.value = MemoryCounters{1000, 100};
+    const auto warning = use_case.run();
+    CHECK(warning && warning->status == MetricStatus::warning);
 }
 
 }
@@ -996,9 +815,7 @@ void log_volume_snapshot_test() {
 int main() {
     return test::run([] {
         initialization_tests();
-        count_analysis_tests();
         process_monitor_tests();
-        log_silence_tests();
         processing_file_tests();
         log_volume_snapshot_test();
         relay_log_snapshot_test();

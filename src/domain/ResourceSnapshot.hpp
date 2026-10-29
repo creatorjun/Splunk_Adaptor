@@ -3,9 +3,7 @@
 
 #include "domain/ResourceSample.hpp"
 #include "domain/ThresholdPolicy.hpp"
-#include "domain/CollectCountAnalysis.hpp"
 #include "domain/JavaProcessSnapshot.hpp"
-#include "domain/LogSilenceAnalysis.hpp"
 #include "domain/ProcessingFilesSnapshot.hpp"
 #include "domain/LogVolume.hpp"
 #include "domain/RelayLog.hpp"
@@ -54,9 +52,7 @@ struct ResourceSnapshot {
     MemoryMetrics memory;
     std::vector<FilesystemMetrics> filesystems;
     std::vector<Error> errors;
-    CollectCountAnalysis collect_count;
     JavaProcessSnapshot java_processes;
-    LogSilenceAnalysis log_silence;
     ProcessingFilesSnapshot processing_files;
     LogVolumeAnalysis log_volume;
     RelayLogSnapshot relay_log;

@@ -1,8 +1,6 @@
 // src/main.cpp
 #include "application/CollectAndStore.hpp"
-#include "application/CollectCountMonitor.hpp"
 #include "application/JavaProcessMonitor.hpp"
-#include "application/LogSilenceMonitor.hpp"
 #include "application/ProcessingFileMonitor.hpp"
 #include "application/LogVolumeMonitor.hpp"
 #include "application/RelayLogMonitor.hpp"
@@ -11,7 +9,6 @@
 #include "infrastructure/linux/ProcessingFileReader.hpp"
 #include "infrastructure/linux/RelayLogReader.hpp"
 #include "infrastructure/linux/ProcJavaProcessReader.hpp"
-#include "infrastructure/linux/LocalDayWindow.hpp"
 #include "infrastructure/linux/LocalLogVolumeCalendar.hpp"
 #include "application/SettingsController.hpp"
 #include "infrastructure/config/JsonSettingsReader.hpp"
@@ -20,6 +17,7 @@
 #include "infrastructure/database/MySqlConfiguration.hpp"
 #include "infrastructure/linux/ProcResourceReader.hpp"
 #include "infrastructure/persistence/JsonSnapshotStore.hpp"
+#include "infrastructure/persistence/JsonLogCountStore.hpp"
 #include "runtime/DaemonRunner.hpp"
 
 #include <charconv>
@@ -46,7 +44,7 @@ int main(int argc, char* argv[]) {
                 return 0;
             }
             if (argument == "--version") {
-                std::cout << "resource-monitor 1.12.0\n";
+                std::cout << "resource-monitor 0.9.0\n";
                 return 0;
             }
             if (argument == "--once") {
@@ -94,7 +92,7 @@ int main(int argc, char* argv[]) {
                 monitor::log_error(parsed.error());
                 return 78;
             }
-            if (parsed->role == monitor::ServerRole::analyzer) {
+            if (parsed->role == monitor::ServerRole::anal) {
                 const auto secret = credentials.read_credentials(parsed->mysql.credentials_file);
                 if (!secret) {
                     monitor::log_error(secret.error());
@@ -113,28 +111,24 @@ int main(int argc, char* argv[]) {
         }
         monitor::JsonSnapshotStore store{options.output_directory};
         monitor::MariaDbConnectionFactory database_factory;
-        monitor::MySqlConfiguration database{credentials, database_factory};
-        monitor::MySqlConfiguration silence_database{credentials, database_factory};
         monitor::MySqlConfiguration volume_database{credentials, database_factory};
-        monitor::SettingsController settings{config, store, overrides, &database, &silence_database, &volume_database};
+        monitor::SettingsController settings{config, store, overrides, &volume_database};
         if (const auto initialized = settings.initialize(); !initialized) {
             monitor::log_error(initialized.error());
             return initialized.error().component == "settings_config" ? 78 : 1;
         }
         monitor::ProcResourceReader reader;
-        monitor::LocalDayWindow calendar;
-        monitor::CollectCountMonitor collect_count{database, settings, calendar};
         monitor::ProcJavaProcessReader process_reader;
         monitor::JavaProcessMonitor processes{process_reader, settings};
-        monitor::LogSilenceMonitor log_silence{silence_database, settings};
         monitor::DirectoryProcessingFileScanner file_scanner;
         monitor::ProcessingFileReader file_reader{file_scanner};
         monitor::ProcessingFileMonitor processing_files{file_reader, settings};
         monitor::LocalLogVolumeCalendar volume_calendar;
-        monitor::LogVolumeMonitor log_volume{volume_database, settings, volume_calendar};
+        monitor::JsonLogCountStore log_count_store;
+        monitor::LogVolumeMonitor log_volume{volume_database, settings, volume_calendar, log_count_store};
         monitor::RelayLogReader relay_reader;
         monitor::RelayLogMonitor relay_log{relay_reader, settings};
-        monitor::CollectAndStore use_case{reader, store, settings, &collect_count, &processes, &log_silence,
+        monitor::CollectAndStore use_case{reader, store, settings, &processes,
             &processing_files, &log_volume, &relay_log};
         monitor::SnapshotRetention retention{store};
         return monitor::run_daemon(use_case, options, &settings, &retention);

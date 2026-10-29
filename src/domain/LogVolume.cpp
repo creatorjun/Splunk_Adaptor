@@ -3,14 +3,6 @@
 
 namespace monitor {
 
-const char* to_string(LogVolumeMode mode) noexcept {
-    switch (mode) {
-    case LogVolumeMode::interval: return "interval";
-    case LogVolumeMode::daily: return "daily";
-    }
-    return "interval";
-}
-
 const char* to_string(LogVolumeStatus status) noexcept {
     switch (status) {
     case LogVolumeStatus::disabled: return "disabled";

@@ -15,7 +15,7 @@ struct JavaProcessReading {
 };
 
 struct JavaProcessSnapshot {
-    ServerRole role{ServerRole::collector};
+    ServerRole role{ServerRole::col};
     MetricStatus status{MetricStatus::unknown};
     std::map<std::string, std::optional<bool>> apps;
     std::vector<Error> errors;

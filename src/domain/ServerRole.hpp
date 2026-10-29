@@ -5,13 +5,13 @@
 
 namespace monitor {
 
-enum class ServerRole { collector, analyzer, relay };
+enum class ServerRole { col, anal, prx };
 
 inline std::string_view to_string(ServerRole role) {
     switch (role) {
-    case ServerRole::collector: return "collector";
-    case ServerRole::analyzer: return "analyzer";
-    case ServerRole::relay: return "relay";
+    case ServerRole::col: return "col";
+    case ServerRole::anal: return "anal";
+    case ServerRole::prx: return "prx";
     }
     return "unknown";
 }

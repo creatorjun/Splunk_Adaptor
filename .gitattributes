@@ -1,0 +1,2 @@
+# .gitattributes
+packaging/rpm/*.spec text eol=lf

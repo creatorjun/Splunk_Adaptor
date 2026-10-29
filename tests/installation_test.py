@@ -8,8 +8,29 @@ import sys
 import tempfile
 
 
+def account_creation_failure_test(shell='/bin/sh'):
+    specification = pathlib.Path(__file__).resolve().parents[1] / 'packaging/rpm/resource-monitor.spec'
+    section = specification.read_text(encoding='utf-8').split('\n%pre\n', 1)[1].split('\n%post\n', 1)[0]
+    commands = [line for line in section.splitlines() if line.startswith('getent ')]
+    assert len(commands) == 2
+    for lookup, group, user, expected, called in (
+            (1, 47, 0, 1, ['group']),
+            (1, 0, 47, 1, ['group', 'user']),
+            (1, 0, 0, 0, ['group', 'user', 'completed']),
+            (0, 47, 47, 0, ['completed'])):
+        script = ('getent() { return %d; }\n'
+                  'groupadd() { printf "group\\n"; return %d; }\n'
+                  'useradd() { printf "user\\n"; return %d; }\n') % (lookup, group, user)
+        script += '\n'.join(commands) + '\nprintf "completed\\n"\n'
+        result = subprocess.run([shell, '-c', script], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                universal_newlines=True, timeout=5)
+        assert result.returncode == expected, (result.returncode, result.stdout, result.stderr)
+        assert result.stdout.splitlines() == called, (result.stdout, result.stderr)
+
+
 def main():
     cmake, build_directory = sys.argv[1:]
+    account_creation_failure_test()
     with tempfile.TemporaryDirectory(prefix='resource-monitor-install-') as temporary:
         root = pathlib.Path(temporary)
         command = [cmake, '--install', build_directory, '--prefix', '/usr']
@@ -30,27 +51,26 @@ def main():
         original = json.loads(config.read_text())
         assert original['collection'] == {'interval_seconds': 60, 'output_directory': '/Monitor'}
         assert original['retention'] == {'enabled': True, 'max_age_seconds': 3600}
-        index_sql = fresh / 'usr/share/resource-monitor/sql/log_silence_index.sql'
-        assert 'ON CloudESM.SUM_COLLECT_INFO (eqp_ip, recv_time, `count`)' in index_sql.read_text()
+        assert not (fresh / 'usr/share/resource-monitor/sql').exists()
         assert original['thresholds']['cpu_usage_percent'] == 80
-        assert original['role'] == 'collector'
-        assert original['log_silence'] == {'default_timeout_seconds': 300, 'overrides': []}
+        assert original['role'] == 'col'
+        assert not {'analyzer', 'log_silence', 'is_analyzer'} & set(original)
         assert original['processing_files'] == {'thresholds': {
             'collector': {'tmp_count': 100, 'done_count': 100},
             'normalize': {'tmp_count': 100, 'done_count': 100},
         }}
         default_profiles = {
-            'analyzer': [
+            'anal': [
                 'SearchEngine', 'Normalizer', 'CollectorForAgent', 'CDMEngine', 'ShovelServer',
                 'AnalyzeEngine', 'AnalyzeAssistantEngine', 'SoarTicketMain', 'SoarPlaybookManager',
                 'pmsServer', 'pmsClient', 'ProcessMonitor',
             ],
-            'collector': [
+            'col': [
                 'SearchEngine', 'Reducer', 'Normalizer', 'CloudESMCollector', 'CollectorForAgent',
                 'CDMEngine', 'pmsClient', 'ProcessMonitor',
             ],
         }
-        default_profiles['relay'] = ['CollectorForAgent']
+        default_profiles['prx'] = ['CollectorForAgent']
         assert original['relay_log'] == {'path': '/CloudESM/logs/CollectorForAgent.log'}
         assert 'is_analyzer' not in original
         assert original['process_monitor'] == default_profiles
@@ -72,10 +92,9 @@ def main():
         assert not list(fresh.rglob('thresholds.json'))
         assert len(list(fresh.rglob('settings.json'))) == 2
         original['thresholds']['cpu_usage_percent'] = 42
-        original['role'] = 'analyzer'
-        original['log_silence'] = {'default_timeout_seconds': 600, 'overrides': []}
+        original['role'] = 'anal'
         original['processing_files']['thresholds']['collector']['tmp_count'] = 250
-        original['process_monitor'] = {'analyzer': ['CustomAnalyzer'], 'collector': []}
+        original['process_monitor'] = {'anal': ['CustomAnalyzer'], 'col': []}
         original['collection'] = {'interval_seconds': 17, 'output_directory': '/custom-monitor'}
         existing_settings = (json.dumps(original, indent=4) + '\n').encode('utf-8')
         config.write_bytes(existing_settings)
@@ -90,8 +109,8 @@ def main():
         assert (fresh / 'usr/lib/systemd/system/resource-monitor.service').is_file()
         assert (fresh / 'usr/share/doc/resource-monitor/THIRD_PARTY_NOTICES.txt').is_file()
         assert json.loads(shared.read_text())['thresholds']['cpu_usage_percent'] == 80
-        assert json.loads(shared.read_text())['role'] == 'collector'
-        assert json.loads(shared.read_text())['log_silence'] == {'default_timeout_seconds': 300, 'overrides': []}
+        assert json.loads(shared.read_text())['role'] == 'col'
+        assert 'log_silence' not in json.loads(shared.read_text())
         assert json.loads(shared.read_text())['process_monitor'] == default_profiles
         assert 'enabled' not in json.loads(shared.read_text())['mysql']
         assert not list(fresh.rglob('thresholds.json'))

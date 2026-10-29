@@ -3,6 +3,7 @@ import contextlib
 import datetime
 import fcntl
 import json
+import math
 import os
 import pathlib
 import re
@@ -91,7 +92,7 @@ def assert_snapshot_timezone(path, payload):
     assert re.fullmatch(re.escape(basename) + r'(?:_[1-9]\d*)?\.json', path.name), path.name
 
 
-def wait_snapshot(output, seen, predicate, process, seconds=7, expected_apps=COLLECTOR_APPS, expected_profile='collector', previous_apps=None, expected_silence_statuses=('disabled',)):
+def wait_snapshot(output, seen, predicate, process, seconds=7, expected_apps=COLLECTOR_APPS, expected_profile='col', previous_apps=None, expected_volume_statuses=('disabled',)):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         assert process.poll() is None, 'daemon exited unexpectedly'
@@ -102,8 +103,8 @@ def wait_snapshot(output, seen, predicate, process, seconds=7, expected_apps=COL
             seen.add(path.name)
             assert payload['schema_version'] == 1
             assert payload['status'] in ('ok', 'warning', 'unknown')
-            assert payload['log_silence']['status'] in expected_silence_statuses
-            assert payload['log_silence']['equipment'] == []
+            assert 'collect_count' not in payload and 'log_silence' not in payload
+            assert payload['log_volume']['status'] in expected_volume_statuses
             assert payload['process_profile'] == expected_profile
             expected_names = [set(expected_apps)]
             if previous_apps is not None:
@@ -174,35 +175,7 @@ def validate_settings(executable, config, output):
         result = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
         assert result.returncode == 78, result.stderr
         assert 'component=settings_config' in result.stderr
-    for is_analyzer in (None, False, True):
-        database = {
-            'database': 'monitoring',
-            'tls_mode': 'disabled',
-            'credentials_file': str(config.parent / 'missing-mysql.json'),
-        }
-        write_config(config, is_analyzer=is_analyzer, mysql=database)
-        result = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
-        requires_credentials = is_analyzer is True
-        assert result.returncode == (78 if requires_credentials else 0), result.stderr
-        if requires_credentials:
-            assert 'component=mysql_credentials' in result.stderr
-        for enabled in (False, True):
-            database['enabled'] = enabled
-            write_config(config, is_analyzer=is_analyzer, mysql=database)
-            result = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
-            assert result.returncode == 78, result.stderr
-            assert 'component=settings_config' in result.stderr
-    for database in (None, {}, {'database': '', 'tls_mode': 'disabled'}, {'database': 'monitoring'}):
-        write_config(config, role='analyzer', mysql=database)
-        result = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
-        assert result.returncode == 78, result.stderr
-        assert 'component=settings_config' in result.stderr
-    for is_analyzer in ('true', 'false', 1, 0, [], {}):
-        write_config(config, is_analyzer=is_analyzer)
-        result = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
-        assert result.returncode == 78, result.stderr
-        assert 'component=settings_config' in result.stderr
-    for role in ('collector', 'analyzer', 'relay'):
+    for role in (None, 'col', 'anal', 'prx'):
         database = {
             'database': 'monitoring',
             'tls_mode': 'disabled',
@@ -210,20 +183,48 @@ def validate_settings(executable, config, output):
         }
         write_config(config, role=role, mysql=database)
         result = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
-        assert result.returncode == (78 if role == 'analyzer' else 0), result.stderr
+        requires_credentials = role == 'anal'
+        assert result.returncode == (78 if requires_credentials else 0), result.stderr
+        if requires_credentials:
+            assert 'component=mysql_credentials' in result.stderr
+        for enabled in (False, True):
+            database['enabled'] = enabled
+            write_config(config, role=role, mysql=database)
+            result = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
+            assert result.returncode == 78, result.stderr
+            assert 'component=settings_config' in result.stderr
+    for database in (None, {}, {'database': '', 'tls_mode': 'disabled'}, {'database': 'monitoring'}):
+        write_config(config, role='anal', mysql=database)
+        result = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
+        assert result.returncode == 78, result.stderr
+        assert 'component=settings_config' in result.stderr
+    for is_analyzer in (False, True, 'true', 'false', 1, 0, [], {}):
+        write_config(config, is_analyzer=is_analyzer)
+        result = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
+        assert result.returncode == 78, result.stderr
+        assert 'component=settings_config' in result.stderr
+    for role in ('col', 'anal', 'prx'):
+        database = {
+            'database': 'monitoring',
+            'tls_mode': 'disabled',
+            'credentials_file': str(config.parent / 'missing-mysql.json'),
+        }
+        write_config(config, role=role, mysql=database)
+        result = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
+        assert result.returncode == (78 if role == 'anal' else 0), result.stderr
         for legacy in (False, True):
             write_config(config, role=role, is_analyzer=legacy, mysql=database)
             result = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
             assert result.returncode == 78 and 'code=invalid_role' in result.stderr, result.stderr
-    for role in ('invalid', 'Relay', False, True, 0, [], {}):
+    for role in ('invalid', 'collector', 'analyzer', 'relay', 'Relay', False, True, 0, [], {}):
         write_config(config, role=role)
         result = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
         assert result.returncode == 78 and 'code=invalid_role' in result.stderr, result.stderr
-    for profiles in ({}, {'analyzer': [], 'collector': []}, {'collector': ['custom.App-1']}):
+    for profiles in ({}, {'anal': [], 'col': []}, {'col': ['custom.App-1']}):
         write_config(config, process_monitor=profiles)
         result = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
         assert result.returncode == 0, result.stderr
-    for profiles in ({'collector': ['Duplicate', 'Duplicate']}, {'analyzer': ['']}, {'collector': 'App'}):
+    for profiles in ({'col': ['Duplicate', 'Duplicate']}, {'anal': ['']}, {'col': 'App'}):
         write_config(config, process_monitor=profiles)
         result = subprocess.run(base + ['--check-config'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
         assert result.returncode == 78, result.stderr
@@ -276,7 +277,7 @@ def analyzer_reload_test(executable, root, config):
                     return
                 connection.close()
 
-        profiles = {'analyzer': [], 'collector': []}
+        profiles = {'anal': [], 'col': []}
         write_config(config, 100, 100, 100, collection=collection(1, output),
                      mysql=database, process_monitor=profiles)
         with running_daemon([executable, '--config', str(config)], log_path) as process:
@@ -287,16 +288,16 @@ def analyzer_reload_test(executable, root, config):
             assert_no_connection()
             database['enabled'] = True
             write_config(config, 100, 100, 100, collection=collection(1, output),
-                         role='analyzer', mysql=database, process_monitor=profiles)
+                         role='anal', mysql=database, process_monitor=profiles)
             wait_snapshot(output, seen, lambda value: value['config_status'] == 'using_last_valid',
                           process, expected_apps=[])
             assert_no_connection()
             del database['enabled']
             write_config(config, 100, 100, 100, collection=collection(1, active_output),
-                         role='analyzer', mysql=database, process_monitor=profiles)
+                         role='anal', mysql=database, process_monitor=profiles)
             deadline = time.monotonic() + 5
             connections = 0
-            while time.monotonic() < deadline and connections < 2:
+            while time.monotonic() < deadline and connections < 1:
                 assert process.poll() is None
                 try:
                     connection, _ = listener.accept()
@@ -304,48 +305,47 @@ def analyzer_reload_test(executable, root, config):
                     continue
                 connection.close()
                 connections += 1
-            assert connections == 2, 'enabling analyzer did not start both independent database connections'
+            assert connections == 1, 'enabling anal did not start the database connection'
             failed = wait_snapshot(active_output, set(),
-                lambda value: value['config_status'] == 'ok' and value['log_silence']['status'] == 'error'
-                    and value['collect_count']['status'] == 'error',
-                process, expected_apps=[], expected_profile='analyzer',
-                expected_silence_statuses=('pending', 'error'))
+                lambda value: value['config_status'] == 'ok' and value['log_volume']['status'] == 'error',
+                process, expected_apps=[], expected_profile='anal',
+                expected_volume_statuses=('pending', 'error'))
             assert_resource_threshold_statuses(failed, 100, 100, 100)
-            failure_code = failed['log_silence']['error']['code']
-            assert failure_code.isdigit(), failed['log_silence']['error']
-            assert failed['log_silence']['equipment'] == []
+            failure_code = failed['log_volume']['error']['code']
+            assert failure_code.isdigit(), failed['log_volume']['error']
+            assert 'equipment' not in failed['log_volume']
             assert any(error['component'] == 'mysql' for error in failed['errors'])
             changed_at = time.monotonic()
-            write_config(config, collection=collection(2, reloaded_output), role='analyzer',
+            write_config(config, collection=collection(2, reloaded_output), role='anal',
                          mysql=database, process_monitor=profiles,
                          retention={'enabled': False, 'max_age_seconds': 86400})
             reloaded_seen = set()
             reloaded = wait_snapshot(reloaded_output, reloaded_seen,
-                lambda value: value['config_status'] == 'ok' and value['log_silence']['status'] == 'error',
-                process, seconds=5, expected_apps=[], expected_profile='analyzer',
-                expected_silence_statuses=('pending', 'error'))
+                lambda value: value['config_status'] == 'ok' and value['log_volume']['status'] == 'error',
+                process, seconds=5, expected_apps=[], expected_profile='anal',
+                expected_volume_statuses=('pending', 'error'))
             assert time.monotonic() - changed_at < 5, 'DB failure blocked valid general settings'
             assert_resource_threshold_statuses(reloaded, 0, 0, 0)
             assert reloaded['thresholds_applied_at'] != failed['thresholds_applied_at']
             assert reloaded['cpu']['window_seconds'] > 0, reloaded
-            assert reloaded['log_silence']['error']['code'] == failure_code
+            assert reloaded['log_volume']['error']['code'] == failure_code
             if reloaded['cpu']['window_seconds'] < 1.7:
                 periodic = wait_snapshot(reloaded_output, reloaded_seen,
                     lambda value: value['config_status'] == 'ok'
                         and value['cpu']['window_seconds'] is not None
                         and value['cpu']['window_seconds'] >= 1.7,
-                    process, seconds=7, expected_apps=[], expected_profile='analyzer',
-                    expected_silence_statuses=('pending', 'error'))
+                    process, seconds=7, expected_apps=[], expected_profile='anal',
+                    expected_volume_statuses=('pending', 'error'))
                 assert_resource_threshold_statuses(periodic, 0, 0, 0)
             log_offset = len(log_path.read_text(encoding='utf-8'))
             database['credentials_file'] = str(root / 'missing-analyzer-credentials.json')
-            write_config(config, collection=collection(1, output), role='collector',
+            write_config(config, collection=collection(1, output), role='col',
                          mysql=database, process_monitor=profiles)
             wait_log(log_path, 'settings_reloaded', process, offset=log_offset)
             drain_connections()
             wait_snapshot(output, seen, lambda value: value['config_status'] == 'ok', process, expected_apps=[])
             disabled = wait_snapshot(output, seen, lambda value: value['config_status'] == 'ok', process, expected_apps=[])
-            assert disabled['collect_count']['status'] == 'disabled'
+            assert disabled['log_volume']['status'] == 'disabled'
             assert not any(error['component'].startswith('mysql') for error in disabled['errors'])
             assert_no_connection()
             assert process.pid == original_pid and process.poll() is None
@@ -446,7 +446,13 @@ def hot_reload_test(executable, root, config, output):
         wait_log(log_path, 'output=' + str(locked) + '/.', process, offset=log_offset)
         alias = wait_snapshot(locked, locked_seen, lambda value: value['config_status'] == 'ok', process)
         assert alias['thresholds_applied_at'] == unlocked['thresholds_applied_at']
-        assert 0.7 <= alias['cpu']['window_seconds'] < 1.8
+        assert_resource_threshold_statuses(alias, 0, 0, 0)
+        assert math.isfinite(alias['cpu']['window_seconds']) and alias['cpu']['window_seconds'] > 0, json.dumps({
+            'stage': 'output_alias_interval',
+            'previous_snapshot': unlocked,
+            'alias_snapshot': alias,
+            'daemon_log': log_path.read_text(encoding='utf-8'),
+        }, indent=2)
         write_config(config, collection=collection(1, output))
         returned = wait_snapshot(output, seen, lambda value: value['config_status'] == 'ok' and value['thresholds_applied_at'] == unlocked['thresholds_applied_at'], process)
         assert_resource_threshold_statuses(returned, 0, 0, 0)
@@ -474,7 +480,7 @@ def process_list_reload_test(executable, root, config):
     output = root / 'process-list-snapshots'
     output.mkdir()
     log_path = root / 'process-list.log'
-    profiles = {'analyzer': ['InactiveAnalyzer'], 'collector': ['IntegrationAlpha']}
+    profiles = {'anal': ['InactiveAnalyzer'], 'col': ['IntegrationAlpha']}
     write_config(config, 100, 100, 100, collection=collection(1, output), process_monitor=profiles)
     with running_daemon([executable, '--config', str(config)], log_path) as process:
         original_pid = process.pid
@@ -493,35 +499,35 @@ def process_list_reload_test(executable, root, config):
             return payload
 
         wait_apps(['IntegrationAlpha'])
-        profiles['collector'].append('IntegrationBeta')
+        profiles['col'].append('IntegrationBeta')
         write_config(config, 100, 100, 100, collection=collection(1, output), process_monitor=profiles)
         wait_apps(['IntegrationAlpha', 'IntegrationBeta'])
 
-        profiles['collector'] = ['IntegrationBeta']
+        profiles['col'] = ['IntegrationBeta']
         write_config(config, 100, 100, 100, collection=collection(1, output), process_monitor=profiles)
         removed = wait_apps(['IntegrationBeta'])
         assert 'IntegrationAlpha' not in removed['processes']
 
-        profiles['analyzer'] = ['ChangedInactiveAnalyzer']
+        profiles['anal'] = ['ChangedInactiveAnalyzer']
         log_offset = len(log_path.read_text(encoding='utf-8'))
         write_config(config, 100, 100, 100, collection=collection(1, output), process_monitor=profiles)
         wait_log(log_path, 'settings_reloaded', process, offset=log_offset)
         inactive = wait_apps(['IntegrationBeta'])
         assert 'ChangedInactiveAnalyzer' not in inactive['processes']
 
-        profiles['collector'] = ['Duplicate', 'Duplicate']
+        profiles['col'] = ['Duplicate', 'Duplicate']
         write_config(config, 100, 100, 100, collection=collection(1, output), process_monitor=profiles)
         rejected = wait_apps(['IntegrationBeta'], config_status='using_last_valid')
         assert any(error['component'] == 'settings_config' for error in rejected['errors'])
 
-        profiles['collector'] = []
+        profiles['col'] = []
         write_config(config, 100, 100, 100, collection=collection(1, output), process_monitor=profiles)
         empty = wait_apps([])
-        assert empty['collect_count']['status'] == 'disabled'
+        assert empty['log_volume']['status'] == 'disabled'
         assert empty['processes'] == {}
         assert not any(error['component'] == 'java_processes' for error in empty['errors'])
 
-        profiles['collector'] = ['IntegrationRestored']
+        profiles['col'] = ['IntegrationRestored']
         write_config(config, 100, 100, 100, collection=collection(1, output), process_monitor=profiles)
         wait_apps(['IntegrationRestored'])
         process.send_signal(signal.SIGTERM)

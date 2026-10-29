@@ -166,9 +166,10 @@ bool same_regular_file(const struct stat& left, const struct stat& right) {
 }
 
 std::expected<std::optional<std::string>, Error> read_retention_document(int file,
-    const std::filesystem::path& path) {
+    const std::filesystem::path& path, std::size_t expected_bytes) {
     constexpr std::size_t maximum_bytes = 16 * 1024 * 1024;
     std::string content;
+    content.reserve(expected_bytes);
     std::array<char, 8192> buffer{};
     for (;;) {
         const auto count = ::read(file, buffer.data(), buffer.size());
@@ -278,41 +279,6 @@ nlohmann::json serialize(const ResourceSnapshot& snapshot, const std::string& ti
     for (const auto& [app, active] : snapshot.java_processes.apps) {
         processes[app] = nullable(active);
     }
-    auto alerts = nlohmann::json::array();
-    for (const auto& alert : snapshot.collect_count.alerts) {
-        alerts.push_back({{"eqp_ip", alert.eqp_ip}, {"current_count", alert.current_count},
-            {"previous_count", alert.previous_count}, {"current_present", alert.current_present},
-            {"previous_present", alert.previous_present}, {"change_percent", nullable(alert.change_percent)},
-            {"reason", alert.reason}});
-    }
-    nlohmann::json queried_at = nullptr;
-    if (snapshot.collect_count.queried_at) {
-        const auto formatted = format_time(*snapshot.collect_count.queried_at, true, {});
-        if (formatted) queried_at = formatted->timestamp;
-    }
-    nlohmann::json analysis_error = nullptr;
-    if (snapshot.collect_count.error) {
-        const auto& error = *snapshot.collect_count.error;
-        analysis_error = {{"component", error.component}, {"target", error.target},
-            {"code", error.code}, {"message", error.message}};
-    }
-    auto silent_equipment = nlohmann::json::array();
-    for (const auto& equipment : snapshot.log_silence.equipment) {
-        silent_equipment.push_back({{"eqp_ip", equipment.eqp_ip},
-            {"last_received_at", nullable_time(equipment.last_received_at)},
-            {"silent_for_seconds", nullable(equipment.silent_for_seconds)},
-            {"status", to_string(equipment.status)}, {"reason", equipment.reason}});
-    }
-    nlohmann::json silence_error = nullptr;
-    if (snapshot.log_silence.error) {
-        const auto& error = *snapshot.log_silence.error;
-        silence_error = {{"component", error.component}, {"target", error.target},
-            {"code", error.code}, {"message", error.message}};
-    }
-    auto volume_equipment = nlohmann::json::array();
-    for (const auto& equipment : snapshot.log_volume.equipment) {
-        volume_equipment.push_back({{"eqp_ip", equipment.eqp_ip}, {"count", equipment.count}});
-    }
     nlohmann::json volume_error = nullptr;
     if (snapshot.log_volume.error) {
         const auto& error = *snapshot.log_volume.error;
@@ -377,36 +343,15 @@ nlohmann::json serialize(const ResourceSnapshot& snapshot, const std::string& ti
             {"usage_percent", nullable(snapshot.memory.usage_percent)}
         }},
         {"filesystems", std::move(filesystems)},
-        {"collect_count", {
-            {"source", "CloudESM.SUM_COLLECT_INFO_1DAY"},
-            {"status", to_string(snapshot.collect_count.status)},
-            {"current_day", snapshot.collect_count.window.current_day == 0 ? nlohmann::json(nullptr) : nlohmann::json(snapshot.collect_count.window.current_day)},
-            {"previous_day", snapshot.collect_count.window.previous_day == 0 ? nlohmann::json(nullptr) : nlohmann::json(snapshot.collect_count.window.previous_day)},
-            {"queried_at", std::move(queried_at)},
-            {"equipment_count", snapshot.collect_count.equipment_count},
-            {"alerts", std::move(alerts)},
-            {"error", std::move(analysis_error)}
-        }},
-        {"log_silence", {
-            {"source", "CloudESM.SUM_COLLECT_INFO"},
-            {"status", to_string(snapshot.log_silence.status)},
-            {"checked_at", nullable_time(snapshot.log_silence.checked_at)},
-            {"queried_at", nullable_time(snapshot.log_silence.queried_at)},
-            {"last_received_precision_seconds", 60},
-            {"equipment_count", snapshot.log_silence.equipment.size()},
-            {"equipment", std::move(silent_equipment)},
-            {"error", std::move(silence_error)}
-        }},
         {"log_volume", {
-            {"source", snapshot.log_volume.mode == LogVolumeMode::daily
-                ? "CloudESM.SUM_COLLECT_INFO_1DAY" : "CloudESM.SUM_COLLECT_INFO"},
+            {"source", "CloudESM.SUM_COLLECT_INFO"},
             {"status", to_string(snapshot.log_volume.status)},
-            {"mode", to_string(snapshot.log_volume.mode)},
             {"window_start", snapshot.log_volume.window ? nullable_time(snapshot.log_volume.window->start) : nlohmann::json(nullptr)},
             {"window_end_exclusive", snapshot.log_volume.window ? nullable_time(snapshot.log_volume.window->end) : nlohmann::json(nullptr)},
             {"queried_at", nullable_time(snapshot.log_volume.queried_at)},
-            {"equipment_count", snapshot.log_volume.equipment.size()},
-            {"equipment", std::move(volume_equipment)},
+            {"last_saved_hour", nullable_time(snapshot.log_volume.last_saved_hour)},
+            {"completed_intervals", snapshot.log_volume.completed_intervals},
+            {"backlog", snapshot.log_volume.backlog},
             {"error", std::move(volume_error)}
         }},
         {"relay_log", {
@@ -614,7 +559,7 @@ std::expected<std::size_t, Error> JsonSnapshotStore::prune(std::chrono::system_c
         struct stat opened{};
         if (::fstat(file.get(), &opened) < 0) return finish(retention_io_error(path, "stat opened snapshot", errno));
         if (!same_regular_file(named, opened)) continue;
-        const auto content = read_retention_document(file.get(), path);
+        const auto content = read_retention_document(file.get(), path, static_cast<std::size_t>(opened.st_size));
         if (!content) return finish(content.error());
         if (!*content || !monitor_document(**content, *timestamp)) continue;
         struct stat current{};

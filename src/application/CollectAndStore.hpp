@@ -4,9 +4,7 @@
 #include "application/ports/IResourceReader.hpp"
 #include "application/ports/ISnapshotStore.hpp"
 #include "application/ports/IThresholdConfigReader.hpp"
-#include "application/ports/ICollectCountMonitor.hpp"
 #include "application/ports/IJavaProcessMonitor.hpp"
-#include "application/ports/ILogSilenceMonitor.hpp"
 #include "application/ports/IProcessingFileMonitor.hpp"
 #include "application/ports/ILogVolumeMonitor.hpp"
 #include "application/ports/IRelayLogMonitor.hpp"
@@ -16,9 +14,8 @@ namespace monitor {
 class CollectAndStore {
 public:
     CollectAndStore(IResourceReader& reader, ISnapshotStore& store,
-        IThresholdConfigReader& config, ICollectCountMonitor* collect_count = nullptr,
+        IThresholdConfigReader& config,
         IJavaProcessMonitor* java_processes = nullptr,
-        ILogSilenceMonitor* log_silence = nullptr,
         IProcessingFileMonitor* processing_files = nullptr,
         ILogVolumeMonitor* log_volume = nullptr,
         IRelayLogMonitor* relay_log = nullptr);
@@ -31,9 +28,7 @@ private:
     IResourceReader& reader_;
     ISnapshotStore& store_;
     IThresholdConfigReader& config_;
-    ICollectCountMonitor* collect_count_;
     IJavaProcessMonitor* java_processes_;
-    ILogSilenceMonitor* log_silence_;
     IProcessingFileMonitor* processing_files_;
     ILogVolumeMonitor* log_volume_;
     IRelayLogMonitor* relay_log_;

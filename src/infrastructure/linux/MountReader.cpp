@@ -16,6 +16,7 @@
 #include <sys/statvfs.h>
 #include <sys/sysmacros.h>
 #include <system_error>
+#include <unordered_set>
 #include <unistd.h>
 #include <utility>
 
@@ -230,20 +231,32 @@ MountReadResult MountReader::read() const {
         std::optional<Error> error;
     };
     std::map<std::pair<std::string, std::string>, std::vector<Candidate>> groups;
+    std::map<std::string, std::expected<bool, Error>> devices;
+    const auto block_device_exists = [&](const std::string& device) -> const std::expected<bool, Error>& {
+        auto [position, inserted] = devices.try_emplace(device);
+        if (inserted) {
+            const auto path = block_inventory / device;
+            std::error_code error;
+            const bool present = std::filesystem::exists(path, error);
+            position->second = error ? std::expected<bool, Error>{std::unexpected(
+                Error{"filesystems", path.string(), "device_lookup_error", error.message()})}
+                : std::expected<bool, Error>{present};
+        }
+        return position->second;
+    };
+    std::map<std::string, std::expected<std::string, Error>> source_devices;
     for (const auto& mount : *mounts) {
         if (excluded_type(mount.filesystem_type)) {
             continue;
         }
-        const auto device_path = sys_root_ / "dev" / "block" / mount.device_id();
-        std::error_code error;
-        const bool block_device = std::filesystem::exists(device_path, error);
-        if (block_device) {
-            groups[{mount.device_id(), mount.filesystem_type}].push_back({&mount, {}});
+        const auto device_id = mount.device_id();
+        const auto& block_device = block_device_exists(device_id);
+        if (block_device && *block_device) {
+            groups[{device_id, mount.filesystem_type}].push_back({&mount, {}});
             continue;
         }
-        if (error) {
-            groups[{mount.device_id(), mount.filesystem_type}].push_back({&mount,
-                Error{"filesystems", device_path.string(), "device_lookup_error", error.message()}});
+        if (!block_device) {
+            groups[{device_id, mount.filesystem_type}].push_back({&mount, block_device.error()});
             continue;
         }
         if (!native_block_type(mount.filesystem_type)) {
@@ -253,18 +266,22 @@ MountReadResult MountReader::read() const {
         if (mount.source.empty() || mount.source.front() != '/') {
             source_error = Error{"filesystems", mount.source, "device_lookup_error", "Local filesystem source is not an absolute device path"};
         } else {
-            const auto physical_device = source_probe_(mount.source);
+            auto [position, inserted] = source_devices.try_emplace(mount.source);
+            if (inserted) position->second = source_probe_(mount.source);
+            const auto& physical_device = position->second;
             if (!physical_device) {
                 source_error = physical_device.error();
             } else {
-                const auto physical_path = block_inventory / *physical_device;
-                if (!std::filesystem::exists(physical_path, error)) {
-                    source_error = Error{"filesystems", physical_path.string(), "device_lookup_error",
-                                         error ? error.message() : "Source block device is absent from the device inventory"};
+                const auto& physical_exists = block_device_exists(*physical_device);
+                if (!physical_exists) {
+                    source_error = physical_exists.error();
+                } else if (!*physical_exists) {
+                    source_error = Error{"filesystems", (block_inventory / *physical_device).string(),
+                        "device_lookup_error", "Source block device is absent from the device inventory"};
                 }
             }
         }
-        groups[{mount.device_id(), mount.filesystem_type}].push_back({&mount, std::move(source_error)});
+        groups[{device_id, mount.filesystem_type}].push_back({&mount, std::move(source_error)});
     }
     for (const auto& [key, candidates] : groups) {
         const auto& first = *candidates.front().mount;
@@ -272,9 +289,11 @@ MountReadResult MountReader::read() const {
         sample.device = first.source;
         sample.device_id = key.first;
         sample.filesystem_type = key.second;
+        std::unordered_set<std::string_view> mount_points;
+        mount_points.reserve(candidates.size());
         for (const auto& candidate : candidates) {
             const auto* mount = candidate.mount;
-            if (std::ranges::find(sample.mount_points, mount->mount_point) == sample.mount_points.end()) {
+            if (mount_points.insert(mount->mount_point).second) {
                 sample.mount_points.push_back(mount->mount_point);
             }
             if (!sample.counters.value) {

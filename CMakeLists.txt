@@ -1,6 +1,6 @@
 # CMakeLists.txt
 cmake_minimum_required(VERSION 3.20)
-project(resource-monitor VERSION 1.12.0 LANGUAGES CXX)
+project(resource-monitor VERSION 0.9.0 LANGUAGES CXX)
 
 if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
     set(CMAKE_INSTALL_PREFIX "/usr" CACHE PATH "Installation prefix" FORCE)
@@ -49,8 +49,6 @@ if(MONITOR_SANITIZERS)
 endif()
 
 add_library(monitor_domain
-    src/domain/CollectCountAnalysis.cpp
-    src/domain/LogSilenceAnalysis.cpp
     src/domain/LogVolume.cpp
     src/domain/RelayLog.cpp
     src/domain/MetricCalculators.cpp
@@ -59,7 +57,7 @@ add_library(monitor_domain
 target_include_directories(monitor_domain PUBLIC src)
 target_link_libraries(monitor_domain PRIVATE monitor_options)
 
-add_library(monitor_application src/application/CollectAndStore.cpp src/application/SettingsController.cpp src/application/CollectCountMonitor.cpp src/application/JavaProcessMonitor.cpp src/application/LogSilenceMonitor.cpp src/application/ProcessingFileMonitor.cpp src/application/SnapshotRetention.cpp src/application/LogVolumeMonitor.cpp src/application/RelayLogMonitor.cpp)
+add_library(monitor_application src/application/CollectAndStore.cpp src/application/SettingsController.cpp src/application/JavaProcessMonitor.cpp src/application/ProcessingFileMonitor.cpp src/application/SnapshotRetention.cpp src/application/LogVolumeMonitor.cpp src/application/RelayLogMonitor.cpp)
 target_link_libraries(monitor_application PUBLIC monitor_domain PRIVATE monitor_options)
 
 find_package(Threads REQUIRED)
@@ -70,10 +68,7 @@ add_library(monitor_infrastructure
     src/infrastructure/linux/ProcessingFileReader.cpp
     src/infrastructure/linux/RelayLogReader.cpp
     src/infrastructure/linux/ProcJavaProcessReader.cpp
-    src/infrastructure/linux/LocalDayWindow.cpp
     src/infrastructure/linux/LocalLogVolumeCalendar.cpp
-    src/infrastructure/database/CollectCountQuery.cpp
-    src/infrastructure/database/LogSilenceQuery.cpp
     src/infrastructure/database/LogVolumeQuery.cpp
     src/infrastructure/linux/ProcResourceReader.cpp
     src/infrastructure/linux/MountReader.cpp
@@ -82,6 +77,7 @@ add_library(monitor_infrastructure
     src/infrastructure/database/MariaDbConnectionFactory.cpp
     src/infrastructure/database/MySqlConfiguration.cpp
     src/infrastructure/persistence/JsonSnapshotStore.cpp
+    src/infrastructure/persistence/JsonLogCountStore.cpp
 )
 target_link_libraries(monitor_infrastructure PUBLIC monitor_application PRIVATE nlohmann_json::nlohmann_json monitor_options Threads::Threads PkgConfig::MARIADB)
 
@@ -93,12 +89,12 @@ target_link_libraries(resource-monitor PRIVATE monitor_runtime monitor_infrastru
 
 include(CTest)
 if(BUILD_TESTING)
-    foreach(test_name MetricCalculators CollectCountAnalysis LogSilenceAnalysis CollectCountMonitor LogSilenceMonitor LogVolumeMonitor RelayLogMonitor RelayLogReader ProcessingFileMonitor DirectoryProcessingFileScanner ProcessingFileReader JavaProcessMonitor ProcJavaProcessReader LocalDayWindow LocalLogVolumeCalendar CollectCountQuery LogSilenceQuery LogVolumeQuery CollectAndStore SettingsController LinuxCollectors JsonSnapshotStore SnapshotRetention JsonSettingsReader JsonMySqlCredentialsReader MySqlConfiguration)
+    foreach(test_name MetricCalculators LogVolumeMonitor RelayLogMonitor RelayLogReader ProcessingFileMonitor DirectoryProcessingFileScanner ProcessingFileReader JavaProcessMonitor ProcJavaProcessReader LocalLogVolumeCalendar LogVolumeQuery CollectAndStore SettingsController LinuxCollectors JsonSnapshotStore JsonLogCountStore SnapshotRetention JsonSettingsReader JsonMySqlCredentialsReader MySqlConfiguration)
         add_executable(${test_name}Test tests/${test_name}Test.cpp)
         target_include_directories(${test_name}Test PRIVATE tests)
-        if(test_name STREQUAL "MetricCalculators" OR test_name STREQUAL "CollectCountAnalysis" OR test_name STREQUAL "LogSilenceAnalysis")
+        if(test_name STREQUAL "MetricCalculators")
             target_link_libraries(${test_name}Test PRIVATE monitor_domain monitor_options)
-        elseif(test_name STREQUAL "CollectAndStore" OR test_name STREQUAL "SettingsController" OR test_name STREQUAL "CollectCountMonitor" OR test_name STREQUAL "JavaProcessMonitor" OR test_name STREQUAL "LogSilenceMonitor" OR test_name STREQUAL "ProcessingFileMonitor" OR test_name STREQUAL "LogVolumeMonitor" OR test_name STREQUAL "RelayLogMonitor")
+        elseif(test_name STREQUAL "CollectAndStore" OR test_name STREQUAL "SettingsController" OR test_name STREQUAL "JavaProcessMonitor" OR test_name STREQUAL "ProcessingFileMonitor" OR test_name STREQUAL "LogVolumeMonitor" OR test_name STREQUAL "RelayLogMonitor")
             target_link_libraries(${test_name}Test PRIVATE monitor_application monitor_options)
         else()
             target_link_libraries(${test_name}Test PRIVATE monitor_infrastructure nlohmann_json::nlohmann_json monitor_options Threads::Threads)
@@ -126,7 +122,6 @@ install(TARGETS resource-monitor RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR})
 install(FILES packaging/systemd/resource-monitor.service DESTINATION lib/systemd/system)
 install(FILES config/settings.json DESTINATION share/resource-monitor)
 install(FILES config/mysql.example.json DESTINATION share/resource-monitor)
-install(FILES packaging/sql/log_silence_index.sql DESTINATION share/resource-monitor/sql)
 install(FILES README.md DESTINATION share/doc/resource-monitor)
 install(FILES packaging/THIRD_PARTY_NOTICES.txt DESTINATION share/doc/resource-monitor)
 install(CODE "

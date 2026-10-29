@@ -34,11 +34,6 @@ struct Attempt {
     std::chrono::steady_clock::time_point started{std::chrono::steady_clock::now()};
 };
 
-struct QueryAttempt {
-    std::size_t session;
-    DailyCountWindow window;
-};
-
 struct Control {
     std::mutex mutex;
     std::condition_variable wake;
@@ -46,23 +41,13 @@ struct Control {
     bool fail_connect{};
     bool throw_connect{};
     bool signals_masked{};
-    bool query_blocked{};
-    bool fail_query{};
-    bool throw_query{};
-    bool silence_blocked{};
-    bool fail_silence{};
-    bool throw_silence{};
     bool volume_blocked{};
     bool fail_volume{};
     bool throw_volume{};
-    std::string silence_error_code{"query_failed"};
-    std::chrono::system_clock::time_point last_receipt{std::chrono::seconds{1792380600}};
     std::uint64_t current_count{110};
     std::vector<Attempt> attempts;
-    std::vector<QueryAttempt> queries;
-    std::vector<std::size_t> silence_queries;
     std::vector<LogVolumeWindow> volume_queries;
-    std::vector<std::chrono::steady_clock::time_point> silence_query_times;
+    std::vector<std::chrono::steady_clock::time_point> volume_times;
     std::set<std::size_t> live;
     std::set<std::size_t> closed;
     std::set<std::size_t> fail_probe;
@@ -90,43 +75,15 @@ struct Session final : IMySqlSession {
         return {};
     }
 
-    std::expected<std::vector<DailyCountPair>, Error> read_daily_counts(
-        const DailyCountWindow& window) override {
-        std::unique_lock lock(state.mutex);
-        state.queries.push_back({id, window});
-        const auto current_count = state.current_count;
-        state.wake.wait_for(lock, 15s, [&] { return !state.query_blocked; });
-        if (state.throw_query) {
-            throw std::runtime_error("sensitive query exception");
-        }
-        if (state.fail_query) {
-            return std::unexpected(Error{"collect_count", "table", "query_failed", "Query failed"});
-        }
-        return std::vector<DailyCountPair>{{"192.0.2.1", current_count, 100, true, true}};
-    }
-
-    std::expected<LogReceiptBatch, Error> read_last_received() override {
-        std::unique_lock lock(state.mutex);
-        state.silence_queries.push_back(id);
-        state.silence_query_times.push_back(std::chrono::steady_clock::now());
-        const auto received = state.last_receipt;
-        state.wake.wait_for(lock, 15s, [&] { return !state.silence_blocked; });
-        if (state.throw_silence) throw std::runtime_error("sensitive last receipt exception");
-        if (state.fail_silence) {
-            return std::unexpected(Error{"log_silence", "CloudESM.SUM_COLLECT_INFO",
-                state.silence_error_code, "Last log receipt query failed"});
-        }
-        return LogReceiptBatch{received + 300s, {{"192.0.2.1", received}}};
-    }
-
     std::expected<std::vector<EquipmentLogVolume>, Error> read_log_volume(const LogVolumeWindow& window) override {
         std::unique_lock lock(state.mutex);
         state.volume_queries.push_back(window);
+        state.volume_times.push_back(std::chrono::steady_clock::now());
         const auto count = state.current_count;
         state.wake.wait_for(lock, 15s, [&] { return !state.volume_blocked; });
         if (state.throw_volume) throw std::runtime_error("sensitive volume exception");
         if (state.fail_volume) return std::unexpected(Error{"log_volume", "table", "2013", "Query failed"});
-        return std::vector<EquipmentLogVolume>{{"192.0.2.1", count}};
+        return std::vector<EquipmentLogVolume>{{"192.0.2.1", count, window.start_bucket}};
     }
 
     Control& state;
@@ -164,22 +121,6 @@ struct Factory final : IMySqlConnectionFactory {
         {
             std::lock_guard lock(state.mutex);
             state.blocked = false;
-        }
-        state.wake.notify_all();
-    }
-
-    void release_query() {
-        {
-            std::lock_guard lock(state.mutex);
-            state.query_blocked = false;
-        }
-        state.wake.notify_all();
-    }
-
-    void release_silence() {
-        {
-            std::lock_guard lock(state.mutex);
-            state.silence_blocked = false;
         }
         state.wake.notify_all();
     }
@@ -408,336 +349,6 @@ void exception_redaction_tests() {
     CHECK(result.error().message.find("sensitive") == std::string::npos);
 }
 
-void query_initialization_and_refresh_tests() {
-    Reader reader;
-    Factory factory;
-    factory.state.blocked = true;
-    MySqlConfiguration configuration(reader, factory, 20ms, 5s);
-    const auto settings = enabled_settings();
-    const DailyCountWindow window{20261018, 20261017};
-    CHECK(configuration.read_daily_counts(window, 1s).status == CollectCountReadStatus::pending);
-    CHECK(factory.inspect([](const Control& state) { return state.queries.empty(); }));
-    CHECK(!configuration.prepare(settings).value());
-    CHECK(configuration.read_daily_counts(window, 1s).status == CollectCountReadStatus::pending);
-    factory.release();
-    wait_ready(configuration, settings);
-    CHECK(configuration.commit());
-    wait_for([&] {
-        return configuration.read_daily_counts(window, 1s).status == CollectCountReadStatus::ready;
-    });
-    const auto first = configuration.read_daily_counts(window, 1s);
-    CHECK(first.queried_at.has_value());
-    CHECK(first.counts.size() == 1 && first.counts.front().current_count == 110);
-    factory.inspect([](Control& state) { state.current_count = 125; });
-    wait_for([&] {
-        const auto current = configuration.read_daily_counts(window, 1s);
-        return current.status == CollectCountReadStatus::ready
-            && current.counts.front().current_count == 125;
-    });
-    CHECK(factory.inspect([](const Control& state) {
-        return state.attempts.size() == 1 && state.queries.size() >= 2;
-    }));
-    CHECK(configuration.read_daily_counts(window, 0s).status == CollectCountReadStatus::error);
-}
-
-void query_disable_and_window_change_tests() {
-    Reader reader;
-    Factory factory;
-    MySqlConfiguration configuration(reader, factory, 20ms, 5s);
-    auto settings = enabled_settings();
-    wait_ready(configuration, settings);
-    CHECK(configuration.commit());
-    const DailyCountWindow first_window{20261018, 20261017};
-    const DailyCountWindow second_window{20261019, 20261018};
-    factory.inspect([](Control& state) { state.query_blocked = true; });
-    CHECK(configuration.read_daily_counts(first_window, 1s).status == CollectCountReadStatus::pending);
-    wait_for([&] { return factory.inspect([](const Control& state) { return state.queries.size() == 1; }); });
-    factory.inspect([](Control& state) { state.current_count = 140; });
-    CHECK(configuration.read_daily_counts(second_window, 1s).status == CollectCountReadStatus::pending);
-    factory.release_query();
-    wait_for([&] {
-        const auto result = configuration.read_daily_counts(second_window, 1s);
-        return result.status == CollectCountReadStatus::ready
-            && result.counts.front().current_count == 140;
-    });
-    CHECK(factory.inspect([&](const Control& state) {
-        return state.queries.size() == 2 && state.queries.back().window == second_window;
-    }));
-    factory.inspect([](Control& state) { state.query_blocked = true; });
-    CHECK(configuration.read_daily_counts(first_window, 1s).status == CollectCountReadStatus::pending);
-    wait_for([&] { return factory.inspect([](const Control& state) { return state.queries.size() == 3; }); });
-    const auto started = std::chrono::steady_clock::now();
-    settings.enabled = false;
-    CHECK(configuration.prepare(settings).value());
-    CHECK(configuration.commit());
-    CHECK(std::chrono::steady_clock::now() - started < 100ms);
-    CHECK(configuration.read_daily_counts(first_window, 1s).status == CollectCountReadStatus::pending);
-    factory.release_query();
-    wait_for([&] { return factory.inspect([](const Control& state) { return state.live.empty(); }); });
-    CHECK(configuration.read_daily_counts(first_window, 1s).counts.empty());
-    std::this_thread::sleep_for(30ms);
-    CHECK(factory.inspect([](const Control& state) { return state.queries.size() == 3; }));
-}
-
-void query_connection_rotation_tests() {
-    Reader reader;
-    Factory factory;
-    MySqlConfiguration configuration(reader, factory, 20ms, 5s);
-    auto settings = enabled_settings();
-    wait_ready(configuration, settings);
-    CHECK(configuration.commit());
-    settings.host = "new-query-host";
-    wait_ready(configuration, settings);
-    const DailyCountWindow window{20261018, 20261017};
-    factory.inspect([](Control& state) { state.query_blocked = true; });
-    CHECK(configuration.read_daily_counts(window, 1s).status == CollectCountReadStatus::pending);
-    wait_for([&] { return factory.inspect([](const Control& state) { return state.queries.size() == 1; }); });
-    CHECK(configuration.commit());
-    CHECK(configuration.read_daily_counts(window, 1s).status == CollectCountReadStatus::pending);
-    factory.inspect([](Control& state) { state.current_count = 160; });
-    factory.release_query();
-    wait_for([&] {
-        const auto result = configuration.read_daily_counts(window, 1s);
-        return result.status == CollectCountReadStatus::ready
-            && result.counts.front().current_count == 160;
-    });
-    CHECK(factory.inspect([](const Control& state) {
-        return state.queries.size() == 2 && state.queries[0].session == 1
-            && state.queries[1].session == 2;
-    }));
-}
-
-void query_error_and_recovery_tests() {
-    Reader reader;
-    Factory factory;
-    MySqlConfiguration configuration(reader, factory, 1200ms, 5s);
-    const auto settings = enabled_settings();
-    wait_ready(configuration, settings);
-    CHECK(configuration.commit());
-    const DailyCountWindow window{20261018, 20261017};
-    factory.inspect([](Control& state) { state.throw_query = true; });
-    wait_for([&] {
-        return configuration.read_daily_counts(window, 1s).status == CollectCountReadStatus::error;
-    });
-    const auto failed = configuration.read_daily_counts(window, 1s);
-    CHECK(failed.counts.empty() && failed.error.has_value());
-    CHECK(failed.error->message.find("sensitive") == std::string::npos);
-    std::this_thread::sleep_for(100ms);
-    CHECK(factory.inspect([](const Control& state) { return state.queries.size() == 1; }));
-    factory.inspect([](Control& state) { state.throw_query = false; });
-    wait_for([&] {
-        return configuration.read_daily_counts(window, 1s).status == CollectCountReadStatus::ready;
-    });
-    CHECK(!configuration.read_daily_counts(window, 1s).error.has_value());
-    CHECK(factory.inspect([](const Control& state) { return state.attempts.size() == 1; }));
-}
-
-void query_stale_cache_tests() {
-    Reader reader;
-    Factory factory;
-    MySqlConfiguration configuration(reader, factory, 20ms, 20s);
-    const auto settings = enabled_settings();
-    wait_ready(configuration, settings);
-    CHECK(configuration.commit());
-    const DailyCountWindow window{20261018, 20261017};
-    wait_for([&] {
-        return configuration.read_daily_counts(window, 1s).status == CollectCountReadStatus::ready;
-    });
-    factory.inspect([](Control& state) { state.query_blocked = true; });
-    wait_for([&] { return factory.inspect([](const Control& state) { return state.queries.size() == 2; }); });
-    std::this_thread::sleep_for(10s);
-    const auto started = std::chrono::steady_clock::now();
-    const auto stale = configuration.read_daily_counts(window, 1s);
-    CHECK(std::chrono::steady_clock::now() - started < 100ms);
-    CHECK(stale.status == CollectCountReadStatus::pending && stale.counts.empty());
-    CHECK(stale.queried_at.has_value());
-    factory.release_query();
-    wait_for([&] {
-        return configuration.read_daily_counts(window, 1s).status == CollectCountReadStatus::ready;
-    });
-}
-
-void query_interval_reload_tests() {
-    Reader reader;
-    Factory factory;
-    MySqlConfiguration configuration(reader, factory, 20ms, 20s);
-    const auto settings = enabled_settings();
-    wait_ready(configuration, settings);
-    CHECK(configuration.commit());
-    const DailyCountWindow window{20261018, 20261017};
-    wait_for([&] {
-        return configuration.read_daily_counts(window, 1s).status == CollectCountReadStatus::ready;
-    });
-    CHECK(configuration.read_daily_counts(window, 86400s).status == CollectCountReadStatus::ready);
-    std::this_thread::sleep_for(1200ms);
-    CHECK(factory.inspect([](const Control& state) { return state.queries.size() == 1; }));
-    configuration.read_daily_counts(window, 1s);
-    wait_for([&] { return factory.inspect([](const Control& state) { return state.queries.size() == 2; }); });
-    CHECK(factory.inspect([](const Control& state) { return state.attempts.size() == 1; }));
-}
-
-void silence_refresh_and_cancel_tests() {
-    Reader reader;
-    Factory factory;
-    MySqlConfiguration configuration(reader, factory, 20ms, 20s);
-    auto settings = enabled_settings();
-    CHECK(configuration.read_last_received(true, 1s).status == LogSilenceReadStatus::pending);
-    CHECK(factory.inspect([](const Control& state) { return state.silence_queries.empty(); }));
-    wait_ready(configuration, settings);
-    CHECK(configuration.commit());
-    wait_for([&] { return configuration.read_last_received(true, 1s).status == LogSilenceReadStatus::ready; });
-    const auto initial = configuration.read_last_received(true, 86400s);
-    CHECK(initial.batch && initial.queried_at);
-    CHECK(initial.batch->records.size() == 1);
-    std::this_thread::sleep_for(1100ms);
-    CHECK(factory.inspect([](const Control& state) { return state.silence_queries.size() == 1; }));
-    factory.inspect([](Control& state) { state.last_receipt += 60s; });
-    configuration.read_last_received(true, 1s);
-    wait_for([&] {
-        const auto current = configuration.read_last_received(true, 1s);
-        return current.batch && current.batch->observed_at == initial.batch->observed_at + 60s;
-    });
-    CHECK(factory.inspect([](const Control& state) { return state.attempts.size() == 1; }));
-    CHECK(configuration.read_last_received(true, 0s).status == LogSilenceReadStatus::error);
-    CHECK(configuration.read_last_received(false, 0s).status == LogSilenceReadStatus::pending);
-    factory.inspect([](Control& state) { state.silence_blocked = true; });
-    configuration.read_last_received(true, 1s);
-    wait_for([&] { return factory.inspect([](const Control& state) { return state.silence_queries.size() == 3; }); });
-    const auto started = std::chrono::steady_clock::now();
-    CHECK(!configuration.read_last_received(false, 1s).batch);
-    CHECK(std::chrono::steady_clock::now() - started < 100ms);
-    factory.release_silence();
-    std::this_thread::sleep_for(1100ms);
-    CHECK(factory.inspect([](const Control& state) { return state.silence_queries.size() == 3; }));
-    CHECK(!configuration.read_last_received(false, 1s).batch);
-    factory.inspect([](Control& state) { state.last_receipt += 60s; });
-    wait_for([&] {
-        const auto current = configuration.read_last_received(true, 1s);
-        return current.batch && current.batch->observed_at == initial.batch->observed_at + 120s;
-    });
-    settings.enabled = false;
-    CHECK(configuration.prepare(settings).value());
-    CHECK(configuration.commit());
-    CHECK(!configuration.read_last_received(true, 1s).batch);
-    std::this_thread::sleep_for(1100ms);
-    CHECK(factory.inspect([](const Control& state) { return state.silence_queries.size() == 4; }));
-}
-
-void silence_rotation_tests() {
-    Reader reader;
-    Factory factory;
-    MySqlConfiguration configuration(reader, factory, 20ms, 20s);
-    auto settings = enabled_settings();
-    wait_ready(configuration, settings);
-    CHECK(configuration.commit());
-    settings.host = "new-last-receipt-host";
-    wait_ready(configuration, settings);
-    factory.inspect([](Control& state) { state.silence_blocked = true; });
-    configuration.read_last_received(true, 1s);
-    wait_for([&] { return factory.inspect([](const Control& state) { return state.silence_queries.size() == 1; }); });
-    CHECK(configuration.commit());
-    CHECK(configuration.read_last_received(true, 1s).status == LogSilenceReadStatus::pending);
-    const auto expected = factory.inspect([](Control& state) { state.last_receipt += 60s; return state.last_receipt; });
-    factory.release_silence();
-    wait_for([&] {
-        const auto current = configuration.read_last_received(true, 1s);
-        return current.batch && current.batch->records.front().last_received_at == expected;
-    });
-    CHECK(factory.inspect([](const Control& state) { return state.silence_queries == std::vector<std::size_t>{1, 2}; }));
-}
-
-void silence_error_isolation_tests() {
-    Reader reader;
-    Factory factory;
-    MySqlConfiguration configuration(reader, factory, 1100ms, 20s);
-    const auto settings = enabled_settings();
-    wait_ready(configuration, settings);
-    CHECK(configuration.commit());
-    const DailyCountWindow window{20261018, 20261017};
-    wait_for([&] { return configuration.read_daily_counts(window, 60s).status == CollectCountReadStatus::ready; });
-    factory.inspect([](Control& state) { state.throw_silence = true; });
-    wait_for([&] { return configuration.read_last_received(true, 1s).status == LogSilenceReadStatus::error; });
-    const auto failed = configuration.read_last_received(true, 1s);
-    CHECK(!failed.batch && failed.error && failed.queried_at);
-    CHECK(failed.error->message.find("sensitive") == std::string::npos);
-    CHECK(configuration.read_daily_counts(window, 60s).status == CollectCountReadStatus::ready);
-    std::this_thread::sleep_for(100ms);
-    CHECK(factory.inspect([](const Control& state) { return state.silence_queries.size() == 1; }));
-    factory.inspect([](Control& state) { state.throw_silence = false; });
-    wait_for([&] { return configuration.read_last_received(true, 1s).status == LogSilenceReadStatus::ready; });
-    CHECK(!configuration.read_last_received(true, 1s).error);
-    factory.inspect([](Control& state) { state.fail_query = true; });
-    wait_for([&] { return configuration.read_daily_counts(window, 1s).status == CollectCountReadStatus::error; });
-    CHECK(configuration.read_last_received(true, 1s).status == LogSilenceReadStatus::ready);
-    CHECK(factory.inspect([](const Control& state) { return state.attempts.size() == 1; }));
-}
-
-void silence_stale_cache_tests() {
-    Reader reader;
-    Factory factory;
-    MySqlConfiguration configuration(reader, factory, 20ms, 20s);
-    const auto settings = enabled_settings();
-    wait_ready(configuration, settings);
-    CHECK(configuration.commit());
-    wait_for([&] { return configuration.read_last_received(true, 1s).status == LogSilenceReadStatus::ready; });
-    factory.inspect([](Control& state) { state.silence_blocked = true; });
-    wait_for([&] { return factory.inspect([](const Control& state) { return state.silence_queries.size() == 2; }); });
-    std::this_thread::sleep_for(10s);
-    const auto started = std::chrono::steady_clock::now();
-    const auto stale = configuration.read_last_received(true, 1s);
-    CHECK(std::chrono::steady_clock::now() - started < 100ms);
-    CHECK(stale.status == LogSilenceReadStatus::pending && !stale.batch && stale.queried_at);
-    factory.release_silence();
-    wait_for([&] { return configuration.read_last_received(true, 1s).status == LogSilenceReadStatus::ready; });
-}
-
-void silence_health_invalidation_tests() {
-    Reader reader;
-    Factory factory;
-    MySqlConfiguration configuration(reader, factory, 20ms, 40ms);
-    const auto settings = enabled_settings();
-    wait_ready(configuration, settings);
-    CHECK(configuration.commit());
-    wait_for([&] { return configuration.read_last_received(true, 60s).status == LogSilenceReadStatus::ready; });
-    factory.inspect([](Control& state) { state.fail_probe.insert(1); });
-    wait_for([&] { return configuration.read_last_received(true, 60s).status == LogSilenceReadStatus::error; });
-    CHECK(!configuration.read_last_received(true, 60s).batch);
-    wait_ready(configuration, settings);
-    CHECK(configuration.commit());
-    wait_for([&] { return configuration.read_last_received(true, 60s).status == LogSilenceReadStatus::ready; });
-    CHECK(factory.inspect([](const Control& state) { return state.silence_queries == std::vector<std::size_t>{1, 2}; }));
-}
-
-void connection_error_survives_retry_tests() {
-    Reader reader;
-    Factory factory;
-    factory.state.fail_connect = true;
-    MySqlConfiguration configuration(reader, factory, 150ms, 5s);
-    const auto settings = enabled_settings();
-    CHECK(!configuration.prepare(settings).value());
-    wait_for([&] { return !configuration.prepare(settings); });
-    const auto failed = configuration.read_last_received(true, 1s);
-    CHECK(failed.status == LogSilenceReadStatus::error);
-    CHECK(failed.error && failed.error->code == "1045" && !failed.batch);
-    CHECK(!failed.queried_at);
-    factory.inspect([](Control& state) { state.fail_connect = false; state.blocked = true; });
-    wait_for([&] {
-        const auto prepared = configuration.prepare(settings);
-        CHECK(!prepared && prepared.error().code == "1045");
-        return factory.inspect([](const Control& state) { return state.attempts.size() == 2; });
-    });
-    CHECK(configuration.read_last_received(true, 1s).error->code == "1045");
-    const auto daily = configuration.read_daily_counts({20261018, 20261017}, 60s);
-    CHECK(daily.status == CollectCountReadStatus::error && daily.error->code == "1045");
-    factory.release();
-    wait_ready(configuration, settings);
-    CHECK(configuration.commit());
-    wait_for([&] {
-        const auto result = configuration.read_last_received(true, 1s);
-        return result.status == LogSilenceReadStatus::ready && !result.error;
-    });
-}
-
 void reconnect_backoff_tests() {
     Reader reader;
     Factory factory;
@@ -765,132 +376,6 @@ void reconnect_backoff_tests() {
     CHECK(factory.inspect([](const Control& state) { return state.attempts.size() == 6; }));
 }
 
-void silence_original_error_recovery_tests() {
-    Reader reader;
-    Factory factory;
-    MySqlConfiguration configuration(reader, factory, 50ms, 5s);
-    auto settings = enabled_settings();
-    wait_ready(configuration, settings);
-    CHECK(configuration.commit());
-    factory.inspect([](Control& state) {
-        state.fail_silence = true;
-        state.silence_error_code = "2013";
-        state.fail_probe.insert(1);
-    });
-    wait_for([&] { return configuration.read_last_received(true, 1s).status == LogSilenceReadStatus::error; });
-    wait_for([&] { return factory.inspect([](const Control& state) { return state.probes.at(1) >= 2; }); });
-    const auto failed = configuration.read_last_received(true, 1s);
-    CHECK(failed.error && failed.error->code == "2013" && failed.queried_at && !failed.batch);
-    factory.inspect([](Control& state) { state.blocked = true; });
-    const auto reconnecting = configuration.prepare(settings);
-    CHECK(!reconnecting && reconnecting.error().code == "2013");
-    wait_for([&] { return factory.inspect([](const Control& state) { return state.attempts.size() == 2; }); });
-    const auto retrying = configuration.read_last_received(true, 1s);
-    CHECK(retrying.error->code == "2013" && retrying.queried_at == failed.queried_at);
-    factory.inspect([](Control& state) {
-        state.fail_silence = false;
-        state.silence_blocked = true;
-    });
-    factory.release();
-    wait_ready(configuration, settings);
-    CHECK(configuration.commit());
-    wait_for([&] { return factory.inspect([](const Control& state) { return state.silence_queries.size() == 2; }); });
-    CHECK(factory.inspect([](const Control& state) {
-        return state.silence_query_times[1] - state.silence_query_times[0] >= 1s;
-    }));
-    const auto awaiting_query = configuration.read_last_received(true, 1s);
-    CHECK(awaiting_query.status == LogSilenceReadStatus::error && !awaiting_query.batch);
-    CHECK(awaiting_query.error->code == "2013" && awaiting_query.queried_at == failed.queried_at);
-    factory.release_silence();
-    wait_for([&] { return configuration.read_last_received(true, 1s).status == LogSilenceReadStatus::ready; });
-    const auto recovered = configuration.read_last_received(true, 1s);
-    CHECK(recovered.batch && !recovered.error && recovered.queried_at > failed.queried_at);
-    factory.inspect([](Control& state) {
-        state.fail_silence = true;
-        state.silence_error_code = "1142";
-    });
-    wait_for([&] { return configuration.read_last_received(true, 1s).status == LogSilenceReadStatus::error; });
-    settings.enabled = false;
-    CHECK(configuration.prepare(settings).value());
-    CHECK(configuration.commit());
-    const auto disabled = configuration.read_last_received(false, 1s);
-    CHECK(!disabled.error && !disabled.batch && !disabled.queried_at);
-}
-
-void silence_changed_identity_clears_error_tests() {
-    Reader reader;
-    Factory factory;
-    MySqlConfiguration configuration(reader, factory, 20ms, 5s);
-    auto settings = enabled_settings();
-    wait_ready(configuration, settings);
-    CHECK(configuration.commit());
-    factory.inspect([](Control& state) { state.fail_silence = true; state.silence_error_code = "1142"; });
-    wait_for([&] { return configuration.read_last_received(true, 60s).status == LogSilenceReadStatus::error; });
-    settings.database = "replacement";
-    wait_ready(configuration, settings);
-    factory.inspect([](Control& state) { state.fail_silence = false; state.silence_blocked = true; });
-    CHECK(configuration.commit());
-    wait_for([&] { return factory.inspect([](const Control& state) { return state.silence_queries.size() == 2; }); });
-    const auto pending = configuration.read_last_received(true, 60s);
-    CHECK(pending.status == LogSilenceReadStatus::pending);
-    CHECK(!pending.error && !pending.batch && !pending.queried_at);
-    factory.release_silence();
-    wait_for([&] { return configuration.read_last_received(true, 60s).status == LogSilenceReadStatus::ready; });
-}
-
-void initial_credentials_failure_tests() {
-    Reader reader;
-    reader.next = std::unexpected(Error{"mysql_credentials", "credentials", "invalid_json", "Invalid credentials"});
-    Factory factory;
-    MySqlConfiguration configuration(reader, factory, 20ms, 5s);
-    const auto settings = enabled_settings();
-    CHECK(!configuration.prepare(settings));
-    const auto failed = configuration.read_last_received(true, 60s);
-    CHECK(failed.status == LogSilenceReadStatus::error && failed.error->code == "invalid_json");
-    CHECK(!failed.batch && !failed.queried_at);
-    CHECK(factory.inspect([](const Control& state) { return state.attempts.empty(); }));
-    reader.next = MySqlCredentials{"monitor", "fixed-password"};
-    wait_ready(configuration, settings);
-    CHECK(configuration.commit());
-    wait_for([&] { return configuration.read_last_received(true, 60s).status == LogSilenceReadStatus::ready; });
-    CHECK(!configuration.read_last_received(true, 60s).error);
-}
-
-void independent_channels_isolation_tests() {
-    Reader daily_reader;
-    Reader silence_reader;
-    Factory daily_factory;
-    Factory silence_factory;
-    MySqlConfiguration daily(daily_reader, daily_factory, 20ms, 5s);
-    MySqlConfiguration silence(silence_reader, silence_factory, 20ms, 5s);
-    const auto settings = enabled_settings();
-    wait_ready(daily, settings);
-    CHECK(daily.commit());
-    wait_ready(silence, settings);
-    CHECK(silence.commit());
-    silence_factory.inspect([](Control& state) {
-        state.silence_blocked = true;
-        state.fail_silence = true;
-        state.silence_error_code = "2013";
-        state.fail_probe.insert(1);
-    });
-    silence.read_last_received(true, 1s);
-    wait_for([&] { return silence_factory.inspect([](const Control& state) { return state.silence_queries.size() == 1; }); });
-    const DailyCountWindow window{20261018, 20261017};
-    wait_for([&] { return daily.read_daily_counts(window, 1s).status == CollectCountReadStatus::ready; });
-    daily_factory.inspect([](Control& state) { state.current_count = 150; });
-    wait_for([&] {
-        const auto current = daily.read_daily_counts(window, 1s);
-        return current.status == CollectCountReadStatus::ready && current.counts.front().current_count == 150;
-    });
-    silence_factory.release_silence();
-    wait_for([&] { return silence.read_last_received(true, 1s).status == LogSilenceReadStatus::error; });
-    CHECK(!silence.read_last_received(true, 1s).batch);
-    CHECK(daily.read_daily_counts(window, 1s).status == CollectCountReadStatus::ready);
-    CHECK(daily.prepare(settings).value());
-    CHECK(daily_factory.inspect([](const Control& state) { return state.attempts.size() == 1; }));
-}
-
 void volume_window_cache_tests() {
     Reader credentials;
     Factory factory;
@@ -898,7 +383,7 @@ void volume_window_cache_tests() {
     const auto settings = enabled_settings();
     wait_ready(configuration, settings);
     CHECK(configuration.commit());
-    LogVolumeWindow window{LogVolumeMode::interval, 202610291000ULL, 202610291005ULL,
+    LogVolumeWindow window{202610291000ULL, 202610291005ULL,
         std::chrono::sys_days{std::chrono::year{2026}/10/29} + 10h,
         std::chrono::sys_days{std::chrono::year{2026}/10/29} + 10h + 5min};
     wait_for([&] { return configuration.read_log_volume(window).status == LogVolumeReadStatus::ready; });
@@ -935,21 +420,21 @@ void volume_window_cache_tests() {
 void volume_error_and_stale_request_tests() {
     Reader credentials;
     Factory factory;
-    MySqlConfiguration configuration(credentials, factory, 40ms, 5s);
+    MySqlConfiguration configuration(credentials, factory, 40ms, 5s, 150ms);
     const auto settings = enabled_settings();
     wait_ready(configuration, settings);
     CHECK(configuration.commit());
-    LogVolumeWindow first{LogVolumeMode::daily, 20261028, 20261029,
-        std::chrono::sys_days{std::chrono::year{2026}/10/28},
-        std::chrono::sys_days{std::chrono::year{2026}/10/29}};
+    LogVolumeWindow first{202610291000ULL, 202610291005ULL,
+        std::chrono::sys_days{std::chrono::year{2026}/10/29} + 10h,
+        std::chrono::sys_days{std::chrono::year{2026}/10/29} + 10h + 5min};
     factory.inspect([](Control& state) { state.volume_blocked = true; });
     configuration.read_log_volume(first);
     wait_for([&] { return factory.inspect([](const Control& state) { return state.volume_queries.size() == 1; }); });
     auto second = first;
-    ++second.start_bucket;
-    ++second.end_bucket;
-    second.start += 24h;
-    second.end += 24h;
+    second.start_bucket += 5;
+    second.end_bucket += 5;
+    second.start += 5min;
+    second.end += 5min;
     CHECK(configuration.read_log_volume(second).status == LogVolumeReadStatus::pending);
     factory.inspect([](Control& state) { state.fail_volume = true; state.volume_blocked = false; });
     factory.state.wake.notify_all();
@@ -965,6 +450,107 @@ void volume_error_and_stale_request_tests() {
     CHECK(configuration.read_log_volume(first).error->message.find("sensitive") == std::string::npos);
 }
 
+LogVolumeWindow first_window() {
+    return {202610291000ULL, 202610291005ULL,
+        std::chrono::sys_days{std::chrono::year{2026}/10/29} + 10h,
+        std::chrono::sys_days{std::chrono::year{2026}/10/29} + 10h + 5min};
+}
+
+void failed_query_cadence_survives_reconnect_test() {
+    Reader credentials;
+    Factory factory;
+    MySqlConfiguration configuration(credentials, factory, 5ms, 5s, 180ms);
+    const auto settings = enabled_settings();
+    wait_ready(configuration, settings);
+    CHECK(configuration.commit());
+    factory.inspect([](Control& state) { state.fail_volume = true; state.fail_probe.insert(1); });
+    const auto window = first_window();
+    wait_for([&] { return configuration.read_log_volume(window).status == LogVolumeReadStatus::error; });
+    wait_for([&] { return factory.inspect([](const Control& state) { return state.probes.at(1) >= 2; }); });
+    const auto original = configuration.read_log_volume(window);
+    CHECK(original.error && original.error->code == "2013");
+    factory.inspect([](Control& state) { state.fail_volume = false; });
+    wait_ready(configuration, settings);
+    CHECK(configuration.commit());
+    const auto retrying = configuration.read_log_volume(window);
+    CHECK(retrying.error && retrying.error->code == "2013");
+    wait_for([&] { return configuration.read_log_volume(window).status == LogVolumeReadStatus::ready; });
+    const auto attempts = factory.inspect([](const Control& state) { return state.volume_times; });
+    CHECK(attempts.size() == 2);
+    CHECK(attempts[1] - attempts[0] >= 180ms);
+    CHECK(!configuration.read_log_volume(window).error);
+}
+
+void pending_identity_does_not_query_old_connection_test() {
+    Reader credentials;
+    Factory factory;
+    MySqlConfiguration configuration(credentials, factory, 5ms, 5s);
+    auto settings = enabled_settings();
+    wait_ready(configuration, settings);
+    CHECK(configuration.commit());
+    auto window = first_window();
+    wait_for([&] { return configuration.read_log_volume(window).status == LogVolumeReadStatus::ready; });
+    factory.inspect([](Control& state) { state.blocked = true; });
+    settings.host = "replacement-host";
+    CHECK(!configuration.prepare(settings).value());
+    CHECK(configuration.read_log_volume(window).status == LogVolumeReadStatus::pending);
+    CHECK(configuration.read_log_volume(window).equipment.empty());
+    std::this_thread::sleep_for(30ms);
+    CHECK(factory.inspect([](const Control& state) { return state.volume_queries.size() == 1; }));
+    factory.release();
+    wait_ready(configuration, settings);
+    CHECK(configuration.commit());
+    wait_for([&] { return configuration.read_log_volume(window).status == LogVolumeReadStatus::ready; });
+    credentials.next = std::unexpected(Error{"mysql_credentials", "credentials", "invalid_json", "Invalid credentials"});
+    CHECK(!configuration.prepare(settings));
+    window.start_bucket += 5;
+    window.end_bucket += 5;
+    window.start += 5min;
+    window.end += 5min;
+    const auto invalid = configuration.read_log_volume(window);
+    CHECK(invalid.status == LogVolumeReadStatus::error && invalid.error->code == "invalid_json");
+    std::this_thread::sleep_for(30ms);
+    CHECK(factory.inspect([](const Control& state) { return state.volume_queries.size() == 2; }));
+}
+
+void invalid_credentials_pause_old_health_queries_test() {
+    Reader credentials;
+    Factory factory;
+    MySqlConfiguration configuration(credentials, factory, 5ms, 40ms);
+    const auto settings = enabled_settings();
+    wait_ready(configuration, settings);
+    CHECK(configuration.commit());
+    wait_for([&] { return factory.inspect([](const Control& state) { return state.probes.at(1) >= 2; }); });
+    credentials.next = std::unexpected(Error{"mysql_credentials", "credentials", "invalid_json", "Invalid credentials"});
+    CHECK(!configuration.prepare(settings));
+    std::this_thread::sleep_for(10ms);
+    const auto before = factory.inspect([](const Control& state) { return state.probes.at(1); });
+    std::this_thread::sleep_for(100ms);
+    CHECK(factory.inspect([&](const Control& state) { return state.probes.at(1) == before; }));
+}
+
+void failed_query_retries_without_poll_notifications_test() {
+    Reader credentials;
+    Factory factory;
+    MySqlConfiguration configuration(credentials, factory, 10ms, 5s, 100ms);
+    const auto settings = enabled_settings();
+    wait_ready(configuration, settings);
+    CHECK(configuration.commit());
+    factory.inspect([](Control& state) { state.fail_volume = true; });
+    const auto window = first_window();
+    configuration.read_log_volume(window);
+    wait_for([&] { return configuration.read_log_volume(window).status == LogVolumeReadStatus::error; });
+    factory.inspect([](Control& state) { state.fail_volume = false; });
+    wait_for([&] { return factory.inspect([](const Control& state) { return state.volume_queries.size() == 2; }); });
+    wait_for([&] { return configuration.read_log_volume(window).status == LogVolumeReadStatus::ready; });
+    const auto attempts = factory.inspect([](const Control& state) { return state.volume_times; });
+    CHECK(attempts.size() == 2 && attempts[1] - attempts[0] >= 100ms);
+    for (int index = 0; index < 20; ++index) {
+        CHECK(configuration.read_log_volume(window).status == LogVolumeReadStatus::ready);
+    }
+    CHECK(factory.inspect([](const Control& state) { return state.volume_queries.size() == 2; }));
+}
+
 }
 
 int main() {
@@ -977,24 +563,12 @@ int main() {
         disabled_health_and_retry_tests();
         expired_candidate_tests();
         exception_redaction_tests();
-        query_initialization_and_refresh_tests();
-        query_disable_and_window_change_tests();
-        query_connection_rotation_tests();
-        query_error_and_recovery_tests();
-        query_stale_cache_tests();
-        query_interval_reload_tests();
-        silence_refresh_and_cancel_tests();
-        silence_rotation_tests();
-        silence_error_isolation_tests();
-        silence_stale_cache_tests();
-        silence_health_invalidation_tests();
-        connection_error_survives_retry_tests();
         reconnect_backoff_tests();
-        silence_original_error_recovery_tests();
-        silence_changed_identity_clears_error_tests();
-        initial_credentials_failure_tests();
-        independent_channels_isolation_tests();
         volume_window_cache_tests();
         volume_error_and_stale_request_tests();
+        failed_query_cadence_survives_reconnect_test();
+        pending_identity_does_not_query_old_connection_test();
+        invalid_credentials_pause_old_health_queries_test();
+        failed_query_retries_without_poll_notifications_test();
     });
 }

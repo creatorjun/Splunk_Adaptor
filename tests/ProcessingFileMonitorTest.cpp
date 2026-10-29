@@ -108,7 +108,7 @@ int main() {
             CHECK(alert.threshold == 0);
         }
 
-        settings.value.role = ServerRole::analyzer;
+        settings.value.role = ServerRole::anal;
         monitor.settings_changed();
         CHECK(!reader.requests.back());
         snapshot = monitor.collect();
@@ -119,7 +119,7 @@ int main() {
         CHECK(!snapshot.scanned_at);
         CHECK(snapshot.alerts.empty());
 
-        settings.value.role = ServerRole::collector;
+        settings.value.role = ServerRole::col;
         monitor.settings_changed();
         CHECK(reader.requests.back());
         snapshot = monitor.collect();
@@ -173,7 +173,7 @@ int main() {
         CHECK(snapshot.directories.back().errors.front().code == "permission_denied");
         CHECK(snapshot.alerts.empty());
 
-        settings.value.role = ServerRole::analyzer;
+        settings.value.role = ServerRole::anal;
         snapshot = monitor.collect();
         CHECK(!reader.requests.back());
         CHECK(snapshot.status == ProcessingFilesStatus::disabled);
@@ -181,14 +181,14 @@ int main() {
         CHECK(!snapshot.scanned_at);
 
         Settings analyzer_settings;
-        analyzer_settings.value.role = ServerRole::analyzer;
+        analyzer_settings.value.role = ServerRole::anal;
         Reader analyzer_reader;
         ProcessingFileMonitor analyzer{analyzer_reader, analyzer_settings};
         analyzer.settings_changed();
         CHECK(analyzer_reader.requests == std::vector<bool>{false});
         CHECK(analyzer.collect().status == ProcessingFilesStatus::disabled);
         CHECK(!analyzer_reader.was_enabled);
-        analyzer_settings.value.role = ServerRole::relay;
+        analyzer_settings.value.role = ServerRole::prx;
         analyzer.settings_changed();
         CHECK(analyzer.collect().status == ProcessingFilesStatus::disabled);
         CHECK(!analyzer_reader.requests.back());

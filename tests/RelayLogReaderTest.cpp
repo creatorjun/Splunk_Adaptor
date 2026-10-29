@@ -41,7 +41,7 @@ public:
 };
 
 std::string line(const std::string& message, const std::string& level = "ERROR") {
-    return "2026-10-29 10:42:07.413 " + level + " " + message + "\n";
+    return "2026-10-29 10:42:07.413 " + level + " [connection] - " + message + "\n";
 }
 
 bool has_error(const RelayLogSnapshot& snapshot, std::string_view code) {
@@ -61,19 +61,19 @@ void baseline_levels_and_acknowledgement() {
     CHECK(result.path == fixture.path.string());
     fixture.append(line("error inside INFO body", "INFO") + line("warning", "WARN") +
         line("wrong level", "ERRORS") + line("lower case", "error") +
-        "2026-02-30 10:42:07.413 ERROR invalid date\n" +
-        "2026-10-29 25:42:07.413 ERROR invalid hour\n" +
-        "2026-10-29 10:42:07,413 ERROR wrong separator\n" +
-        "prefix 2026-10-29 10:42:07.413 ERROR embedded\n" +
+        "2026-02-30 10:42:07.413 ERROR connection invalid date\n" +
+        "2026-10-29 25:42:07.413 ERROR connection invalid hour\n" +
+        "2026-10-29 10:42:07,413 ERROR connection wrong separator\n" +
+        "prefix 2026-10-29 10:42:07.413 ERROR connection embedded\n" +
         "    at example.Class.method(Class.java:10)\n" +
-        line("[thread] example.Sender:425 - first message") +
-        "2026-10-29 10:42:07.413 ERROR second message\r\n" + line("- direct message"));
+        line("first message") +
+        "2026-10-29 10:42:07.413 ERROR [CONNECTION] - second message\r\n" + line("direct message"));
     result = reader.read(true, fixture.path.string());
     CHECK(result.status == RelayLogStatus::warning && result.errors.empty());
     CHECK(result.events.size() == 3 && !result.backlog);
     CHECK(result.events[0].timestamp == "2026-10-29 10:42:07.413");
     CHECK(result.events[0].message == "first message");
-    CHECK(result.events[0].line == "2026-10-29 10:42:07.413 ERROR [thread] example.Sender:425 - first message");
+    CHECK(result.events[0].line == "2026-10-29 10:42:07.413 ERROR [connection] - first message");
     CHECK(!result.events[0].truncated);
     CHECK(result.events[1].message == "second message" && result.events[1].line.back() == 'e');
     CHECK(result.events[2].message == "direct message");
@@ -85,6 +85,45 @@ void baseline_levels_and_acknowledgement() {
     reader.acknowledge();
     result = reader.read(true, fixture.path.string());
     CHECK(result.status == RelayLogStatus::ok && result.events.empty());
+}
+
+void connection_filter_and_stream_boundaries() {
+    Fixture fixture;
+    fixture.write(fixture.path, "");
+    RelayLogReader reader;
+    CHECK(reader.read(true, fixture.path.string()).events.empty());
+    const auto raw = [](const std::string& message, const std::string& level = "ERROR") {
+        return "2026-10-29 10:42:07.413 " + level + " " + message + "\n";
+    };
+    fixture.append(raw("disk full") + raw("connect only") + raw("connec") + raw("tion") +
+        raw("Connection refused", "INFO") + raw("CONNECTION refused", "WARN") +
+        raw("connection refused", "error") + raw("connection refused", "ERRORS") +
+        raw("Connection refused") + raw("CONNECTION reset") + raw("cOnNeCtIoN closed") +
+        raw("[ConnectionPool] source - disk full") + raw("conneconnection overlap"));
+    auto result = reader.read(true, fixture.path.string());
+    CHECK(result.events.size() == 5 && result.errors.empty() && !result.backlog);
+    CHECK(result.events[0].message == "Connection refused");
+    CHECK(result.events[1].message == "CONNECTION reset");
+    CHECK(result.events[2].message == "cOnNeCtIoN closed");
+    CHECK(result.events[3].message == "disk full");
+    CHECK(result.events[4].message == "conneconnection overlap");
+    reader.acknowledge();
+    fixture.append("2026-10-29 10:42:07.413 ERROR " + std::string(8170, 'x') + "CoNn");
+    result = reader.read(true, fixture.path.string());
+    CHECK(result.events.empty() && result.backlog);
+    fixture.append("EcTiOn split keyword\n");
+    result = reader.read(true, fixture.path.string());
+    CHECK(result.events.size() == 1 && !result.backlog);
+    CHECK(result.events[0].message.ends_with("CoNnEcTiOn split keyword"));
+    reader.acknowledge();
+    fixture.append(raw(std::string(20000, 'x') + " CONNECTION beyond retained prefix"));
+    result = reader.read(true, fixture.path.string());
+    CHECK(result.events.size() == 1 && result.events[0].truncated);
+    CHECK(result.events[0].line.size() == 16 * 1024 && result.events[0].line.find("CONNECTION") == std::string::npos);
+    reader.acknowledge();
+    fixture.append(raw(std::string(20000, 'x')) + raw("no keyword after long matching line"));
+    result = reader.read(true, fixture.path.string());
+    CHECK(result.status == RelayLogStatus::ok && result.events.empty() && !result.backlog);
 }
 
 void partial_lines_and_utf8() {
@@ -112,6 +151,32 @@ void partial_lines_and_utf8() {
     CHECK(result.events.size() == 2);
     CHECK(result.events[0].truncated && result.events[0].line.size() == 16 * 1024);
     CHECK(!result.events[1].truncated && result.events[1].message == "after long line");
+}
+
+void ignored_line_boundaries() {
+    Fixture fixture;
+    fixture.write(fixture.path, "");
+    RelayLogReader reader;
+    CHECK(reader.read(true, fixture.path.string()).events.empty());
+    fixture.append("2026-10-29 10:42:07.413 WARN " + std::string(20000, 'x') + " connection");
+    auto result = reader.read(true, fixture.path.string());
+    CHECK(result.status == RelayLogStatus::partial && result.backlog && result.events.empty());
+    fixture.append(" still ignored\n2026-10-29 10:42:07.413 ER");
+    result = reader.read(true, fixture.path.string());
+    CHECK(result.status == RelayLogStatus::partial && result.events.empty());
+    fixture.append("ROR Connection after ignored line\n");
+    result = reader.read(true, fixture.path.string());
+    CHECK(result.events.size() == 1 && !result.backlog && result.errors.empty());
+    CHECK(result.events[0].message == "Connection after ignored line");
+    reader.acknowledge();
+    fixture.append("2026-10-29 10:42:07.413 INFO " + std::string(20000, 'x'));
+    CHECK(reader.read(true, fixture.path.string()).status == RelayLogStatus::partial);
+    std::filesystem::rename(fixture.path, fixture.root / "CollectorForAgent.log.1");
+    fixture.write(fixture.path, line("after incomplete ignored line"));
+    result = reader.read(true, fixture.path.string());
+    CHECK(result.events.size() == 1 && !result.backlog);
+    CHECK(result.events[0].message == "after incomplete ignored line");
+    CHECK(has_error(result, "incomplete_line"));
 }
 
 void path_role_and_missing_file() {
@@ -276,7 +341,9 @@ void invalid_files_and_permissions() {
 int main() {
     return test::run([] {
         baseline_levels_and_acknowledgement();
+        connection_filter_and_stream_boundaries();
         partial_lines_and_utf8();
+        ignored_line_boundaries();
         path_role_and_missing_file();
         rotation_and_truncation();
         event_and_byte_limits();

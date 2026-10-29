@@ -14,8 +14,8 @@ JavaProcessSnapshot JavaProcessMonitor::collect() {
     JavaProcessSnapshot result;
     const auto& settings = settings_.current();
     result.role = settings.role;
-    const auto& expected = settings.role == ServerRole::analyzer ? settings.process_monitor.analyzer
-        : settings.role == ServerRole::relay ? settings.process_monitor.relay : settings.process_monitor.collector;
+    const auto& expected = settings.role == ServerRole::anal ? settings.process_monitor.anal
+        : settings.role == ServerRole::prx ? settings.process_monitor.prx : settings.process_monitor.col;
     if (expected.empty()) {
         result.status = MetricStatus::ok;
         return result;

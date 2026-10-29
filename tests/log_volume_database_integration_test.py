@@ -61,7 +61,6 @@ def reset_tables(admin):
     verify_database(admin)
     sql(admin, '''
 DROP TABLE IF EXISTS CloudESM.SUM_COLLECT_INFO;
-DROP TABLE IF EXISTS CloudESM.SUM_COLLECT_INFO_1DAY;
 CREATE TABLE CloudESM.SUM_COLLECT_INFO (
     agent_ip VARCHAR(39) NULL,
     connect_ip VARCHAR(39) NULL,
@@ -76,14 +75,6 @@ CREATE TABLE CloudESM.SUM_COLLECT_INFO (
     KEY recv_time (recv_time),
     KEY reg_time (reg_time)
 );
-CREATE TABLE CloudESM.SUM_COLLECT_INFO_1DAY (
-    recv_time BIGINT NOT NULL DEFAULT 0,
-    eqp_ip VARCHAR(39) NOT NULL DEFAULT '',
-    log_cate_cd VARCHAR(20) NOT NULL DEFAULT '',
-    `count` BIGINT NULL,
-    length BIGINT NULL,
-    PRIMARY KEY (recv_time, eqp_ip, log_cate_cd)
-);
 ''')
 
 
@@ -91,17 +82,13 @@ def bucket(timestamp):
     return time.strftime('%Y%m%d%H%M', time.localtime(timestamp))
 
 
-def seed_tables(admin):
-    while 300 - time.time() % 300 < 15:
-        time.sleep(0.2)
-    end = int(time.time()) // 300 * 300
-    start = end - 300
+def seed_interval(admin, start, end):
     values = [
         (start - 60, '192.0.2.10', 'outside-before', 10000),
         (start, '192.0.2.10', 'category-a', 7),
         (start + 60, '192.0.2.10', 'category-b', 11),
         (end - 60, '192.0.2.10', 'category-a', 13),
-        (end, '192.0.2.10', 'outside-after', 20000),
+        (end, '192.0.2.10', 'next-interval', 20000),
         (start + 60, '192.0.2.20', 'category-a', 5),
         (end - 60, '192.0.2.20', 'category-b', 8),
         (start, '2001:db8::1', 'category-zero', 0),
@@ -109,25 +96,11 @@ def seed_tables(admin):
     rows = ','.join("(%s,'%s','%s',%d)" % (bucket(stamp), address, category, count)
                     for stamp, address, category, count in values)
     sql(admin, 'INSERT INTO CloudESM.SUM_COLLECT_INFO (recv_time,eqp_ip,log_cate_cd,`count`) VALUES ' + rows + ';')
-    today = datetime.date.today()
-    yesterday = today - datetime.timedelta(days=1)
-    older = today - datetime.timedelta(days=2)
-    days = [
-        (older, '192.0.2.10', 'older', 30000),
-        (yesterday, '192.0.2.10', 'category-a', 100),
-        (yesterday, '192.0.2.10', 'category-b', 200),
-        (yesterday, '192.0.2.20', 'category-a', 40),
-        (today, '192.0.2.10', 'today', 40000),
-    ]
-    rows = ','.join("(%s,'%s','%s',%d)" % (day.strftime('%Y%m%d'), address, category, count)
-                    for day, address, category, count in days)
-    sql(admin, 'INSERT INTO CloudESM.SUM_COLLECT_INFO_1DAY (recv_time,eqp_ip,log_cate_cd,`count`) VALUES ' + rows + ';')
-    return start, end, yesterday, today
 
 
-def write_settings(path, settings):
+def write_json(path, value):
     replacement = path.with_suffix('.new')
-    replacement.write_text(json.dumps(settings), encoding='utf-8')
+    replacement.write_text(json.dumps(value), encoding='utf-8')
     replacement.replace(path)
 
 
@@ -149,7 +122,7 @@ def daemon(binary, settings, log):
                 raise AssertionError(log.read_text(encoding='utf-8'))
 
 
-def wait_snapshot(output, seen, predicate, process, log, timeout=10):
+def wait_snapshot(output, seen, predicate, process, log, timeout=12):
     deadline = time.monotonic() + timeout
     last = None
     while time.monotonic() < deadline:
@@ -162,25 +135,30 @@ def wait_snapshot(output, seen, predicate, process, log, timeout=10):
             seen.add(path.name)
             last = payload
             assert payload['config_status'] == 'ok', payload
+            assert 'collect_count' not in payload and 'log_silence' not in payload, payload
+            assert 'equipment' not in payload['log_volume'], payload
+            assert payload['memory']['total_bytes'] > 0 and payload['cpu']['usage_percent'] is not None, payload
             if predicate(payload):
                 return payload
         time.sleep(0.05)
     raise AssertionError('Expected snapshot not observed: %r\n%s' % (last, log.read_text(encoding='utf-8')))
 
 
-def local_stamp(epoch):
-    return datetime.datetime.fromtimestamp(epoch).astimezone().isoformat(timespec='milliseconds')
+def wait_file(path, process, log, timeout=12):
+    deadline = time.monotonic() + timeout
+    while not path.is_file():
+        assert process.poll() is None, log.read_text(encoding='utf-8')
+        assert time.monotonic() < deadline, log.read_text(encoding='utf-8')
+        time.sleep(0.05)
+    return json.loads(path.read_text(encoding='utf-8'))
 
 
-def assert_volume(payload, mode, expected):
-    volume = payload['log_volume']
-    assert volume['mode'] == mode, volume
-    assert volume['status'] == ('ok' if expected else 'no_data'), volume
-    assert {item['eqp_ip']: item['count'] for item in volume['equipment']} == expected, volume
-    assert volume['equipment_count'] == len(expected), volume
-    assert volume['error'] is None and volume['queried_at'], volume
-    assert volume['source'] == 'CloudESM.SUM_COLLECT_INFO' + ('_1DAY' if mode == 'daily' else ''), volume
-    assert payload['memory']['total_bytes'] > 0 and payload['cpu']['usage_percent'] is not None, payload
+def counts(equipment):
+    return {item['eqp_ip']: item['count'] for item in equipment}
+
+
+def report_name(start):
+    return 'log_cnt_' + time.strftime('%Y%m%dT%H%M%S%z', time.localtime(start)) + '.json'
 
 
 def main():
@@ -193,10 +171,14 @@ def main():
     os.environ['TZ'] = 'Asia/Seoul'
     time.tzset()
     version = verify_database(admin)
+    while 300 - time.time() % 300 < 45:
+        time.sleep(0.2)
+    end = int(time.time()) // 300 * 300
+    start = end - 300
     reset_tables(admin)
-    start, end, yesterday, today = seed_tables(admin)
-    evidence = {'database_version': version, 'scope': 'isolated guarded MariaDB fixtures only', 'checks': []}
-    with tempfile.TemporaryDirectory(prefix='resource-monitor-log-volume-db-') as temporary:
+    seed_interval(admin, start, end)
+    evidence = {'database_version': version, 'scope': 'isolated guarded MariaDB fixtures; simulated persisted cursor for hourly boundary, real daemon and SQL', 'checks': []}
+    with tempfile.TemporaryDirectory(prefix='resource-monitor-hourly-db-') as temporary:
         root = pathlib.Path(temporary)
         output = root / 'monitor'
         output.mkdir()
@@ -204,75 +186,100 @@ def main():
         log = root / 'daemon.log'
         settings = {
             'schema_version': 1,
-            'role': 'analyzer',
-            'collection': {'interval_seconds': 600, 'output_directory': str(output)},
+            'role': 'anal',
+            'collection': {'interval_seconds': 1, 'output_directory': str(output)},
             'retention': {'enabled': False, 'max_age_seconds': 3600},
-            'process_monitor': {'analyzer': [], 'collector': []},
+            'process_monitor': {'anal': [], 'col': [], 'prx': []},
             'thresholds': {'cpu_usage_percent': 100, 'memory_usage_percent': 100, 'storage_usage_percent': 100},
-            'log_volume': {'mode': 'interval', 'interval_seconds': 300, 'daily_at': '00:10'},
             'mysql': {'host': 'window-db', 'port': 3306, 'database': 'CloudESM',
                       'credentials_file': str(credentials), 'tls_mode': 'disabled',
                       'connect_timeout_seconds': 1, 'read_timeout_seconds': 1, 'write_timeout_seconds': 1},
         }
-        write_settings(config, settings)
+        write_json(config, settings)
+        checkpoint = output / 'log_counts/.checkpoint.json'
         seen = set()
-        started = time.monotonic()
         with daemon(binary, config, log) as process:
             payload = wait_snapshot(output, seen, lambda item: item['log_volume']['status'] == 'ok', process, log)
-            elapsed = time.monotonic() - started
-            assert elapsed < 10, elapsed
-            assert_volume(payload, 'interval', {'192.0.2.10': 31, '192.0.2.20': 13, '2001:db8::1': 0})
-            assert payload['log_volume']['window_start'] == local_stamp(start), payload['log_volume']
-            assert payload['log_volume']['window_end_exclusive'] == local_stamp(end), payload['log_volume']
-            evidence['checks'].append({'name': 'interval_bounds_category_sum_independent_600s_collection', 'elapsed_seconds': elapsed, 'snapshot': payload})
-            local = datetime.datetime.now()
-            daily_at = (local - datetime.timedelta(minutes=1)).strftime('%H:%M') if local.hour or local.minute else '00:00'
-            settings['log_volume']['mode'] = 'daily'
-            settings['log_volume']['daily_at'] = daily_at
-            write_settings(config, settings)
-            payload = wait_snapshot(output, seen, lambda item: item['log_volume']['mode'] == 'daily' and item['log_volume']['status'] == 'ok', process, log)
-            assert_volume(payload, 'daily', {'192.0.2.10': 300, '192.0.2.20': 40})
-            assert payload['log_volume']['window_start'][:10] == yesterday.isoformat(), payload['log_volume']
-            assert payload['log_volume']['window_end_exclusive'][:10] == today.isoformat(), payload['log_volume']
-            evidence['checks'].append({'name': 'daily_previous_complete_day_reload', 'snapshot': payload})
-            sql(admin, 'TRUNCATE TABLE CloudESM.SUM_COLLECT_INFO;')
-            settings['log_volume']['mode'] = 'interval'
-            settings['log_volume']['interval_seconds'] = 60
-            write_settings(config, settings)
-            payload = wait_snapshot(output, seen, lambda item: item['log_volume']['mode'] == 'interval' and item['log_volume']['status'] == 'no_data', process, log)
-            assert_volume(payload, 'interval', {})
-            evidence['checks'].append({'name': 'empty_interval_no_data', 'snapshot': payload})
-            settings['role'] = 'collector'
-            settings['collection']['interval_seconds'] = 1
-            write_settings(config, settings)
-            wait_snapshot(output, seen, lambda item: item['log_volume']['status'] == 'disabled', process, log)
-            settings['mysql']['port'] = 1
-            settings['role'] = 'analyzer'
-            write_settings(config, settings)
-            payload = wait_snapshot(output, seen, lambda item: item['log_volume']['status'] == 'error', process, log)
-            assert payload['log_volume']['error'], payload
-            assert payload['memory']['total_bytes'] > 0 and payload['cpu']['usage_percent'] is not None, payload
-            followup = wait_snapshot(output, seen, lambda item: item['log_volume']['status'] == 'error', process, log)
-            evidence['checks'].append({'name': 'connection_failure_preserves_repeated_resource_snapshots', 'snapshot': followup})
-            settings['mysql']['port'] = 3306
-            write_settings(config, settings)
-            payload = wait_snapshot(output, seen, lambda item: item['log_volume']['status'] == 'no_data', process, log)
-            assert_volume(payload, 'interval', {})
-            evidence['checks'].append({'name': 'connection_settings_recovery_without_restart', 'snapshot': payload})
-        settings['role'] = 'collector'
-        settings['mysql']['port'] = 1
-        settings['mysql']['credentials_file'] = str(root / 'deliberately-missing.json')
-        write_settings(config, settings)
+            state = wait_file(checkpoint, process, log)
+            assert state['next_start_epoch'] == end, state
+            if state['hour']:
+                equipment = state['hour']['equipment']
+                assert state['hour']['completed_intervals'] == 1, state
+            else:
+                equipment = wait_file(output / 'log_counts' / report_name(start - 3300), process, log)['equipment']
+            assert counts(equipment) == {'192.0.2.10': 31, '192.0.2.20': 13, '2001:db8::1': 0}, state
+            original_checkpoint = checkpoint.read_bytes()
+            wait_snapshot(output, seen, lambda item: item['log_volume']['status'] == 'ok', process, log)
+            assert checkpoint.read_bytes() == original_checkpoint
+            evidence['checks'].append({'name': 'five_minute_bounds_category_sum_and_no_repeat', 'snapshot': payload, 'checkpoint': state})
+
+        hour_end = end - int(time.localtime(end).tm_min) * 60
+        hour_start = hour_end - 3600
+        reset_tables(admin)
+        seed_interval(admin, hour_end - 300, hour_end)
+        state['next_start_epoch'] = hour_end - 300
+        state['last_saved_hour_epoch'] = None
+        state['hour'] = {'start_epoch': hour_start, 'end_epoch': hour_end,
+                         'coverage_start_epoch': hour_start, 'completed_intervals': 11,
+                         'equipment': [{'eqp_ip': '192.0.2.10', 'count': 100},
+                                       {'eqp_ip': '192.0.2.20', 'count': 200}]}
+        report = output / 'log_counts' / report_name(hour_start)
+        if report.exists():
+            report.unlink()
+        write_json(checkpoint, state)
         with daemon(binary, config, log) as process:
-            payload = wait_snapshot(output, seen, lambda item: item['log_volume']['status'] == 'disabled', process, log)
-            assert payload['collect_count']['status'] == 'disabled', payload
-            assert payload['log_silence']['status'] == 'disabled', payload
-            assert payload['log_volume']['equipment'] == [] and payload['log_volume']['error'] is None, payload
+            hourly = wait_file(report, process, log)
+            assert hourly['kind'] == 'resource-monitor-log-counts', hourly
+            assert hourly['source'] == 'CloudESM.SUM_COLLECT_INFO', hourly
+            assert hourly['window']['start_epoch'] == hour_start and hourly['window']['end_epoch'] == hour_end, hourly
+            assert hourly['coverage']['completed_intervals'] == 12 and hourly['coverage']['complete'] is True, hourly
+            assert counts(hourly['equipment']) == {'192.0.2.10': 131, '192.0.2.20': 213, '2001:db8::1': 0}, hourly
+            payload = wait_snapshot(output, seen, lambda item: item['log_volume']['status'] == 'ok', process, log)
+            saved_state = json.loads(checkpoint.read_text(encoding='utf-8'))
+            assert saved_state['next_start_epoch'] == end, saved_state
+            if end > hour_end:
+                assert counts(saved_state['hour']['equipment']) == {'192.0.2.10': 20000}, saved_state
+            evidence['checks'].append({'name': 'hourly_sum_with_checkpoint_recovery_and_next_hour_separation', 'snapshot': payload, 'hourly': hourly, 'checkpoint': saved_state})
+        saved_report = report.read_bytes()
+        saved_checkpoint = checkpoint.read_bytes()
+        sql(admin, 'UPDATE CloudESM.SUM_COLLECT_INFO SET `count`=`count`+1;')
+        with daemon(binary, config, log) as process:
+            wait_snapshot(output, seen, lambda item: True, process, log)
+            wait_snapshot(output, seen, lambda item: True, process, log)
+            assert checkpoint.read_bytes() == saved_checkpoint
+            assert report.read_bytes() == saved_report
+            evidence['checks'].append({'name': 'restart_no_double_count_and_no_requery_of_completed_window'})
+            new_output = root / 'new-output'
+            new_output.mkdir()
+            settings['collection']['output_directory'] = str(new_output)
+            write_json(config, settings)
+            wait_snapshot(new_output, set(), lambda item: True, process, log)
+            copied = wait_file(new_output / 'log_counts/.checkpoint.json', process, log)
+            assert copied['next_start_epoch'] == end and copied['hour'] == saved_state['hour'], copied
+            evidence['checks'].append({'name': 'output_path_reload_preserves_cursor_and_accumulator'})
+            settings['role'] = 'col'
+            settings['mysql']['port'] = 1
+            settings['mysql']['credentials_file'] = str(root / 'deliberately-missing.json')
+            write_json(config, settings)
+            payload = wait_snapshot(new_output, set(), lambda item: item['role'] == 'col', process, log)
+            assert payload['log_volume']['status'] == 'disabled', payload
             assert not any(error['component'].startswith('mysql') for error in payload['errors']), payload
             evidence['checks'].append({'name': 'collector_disabled_with_unavailable_database_and_missing_credentials', 'snapshot': payload})
+        error_output = root / 'error-output'
+        error_output.mkdir()
+        settings['role'] = 'anal'
+        settings['collection']['output_directory'] = str(error_output)
+        settings['mysql']['credentials_file'] = str(credentials)
+        write_json(config, settings)
+        with daemon(binary, config, log) as process:
+            payload = wait_snapshot(error_output, set(), lambda item: item['log_volume']['status'] == 'error', process, log)
+            assert payload['log_volume']['error'], payload
+            evidence['checks'].append({'name': 'connection_failure_keeps_resource_snapshots_and_does_not_advance_cursor', 'snapshot': payload})
+            failed_state = json.loads((error_output / 'log_counts/.checkpoint.json').read_text(encoding='utf-8'))
+            assert failed_state['next_start_epoch'] == start and failed_state['hour'] is None, failed_state
     if arguments.evidence:
         pathlib.Path(arguments.evidence).write_text(json.dumps(evidence, indent=2) + '\n', encoding='utf-8')
-    print('Log volume database integration passed: interval boundaries and category SUM, independent output, daily reload, no_data, connection failure/recovery, collector disabled')
+    print('Log count DB integration passed: bounded SELECT, category sums, hourly accumulation, restart deduplication, next-hour separation, reload and failure isolation')
 
 
 if __name__ == '__main__':

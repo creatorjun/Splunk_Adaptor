@@ -13,7 +13,7 @@ def error_line(marker, suffix='', logger=False):
     prefix = '2026-10-29 12:34:56.789 ERROR '
     if logger:
         prefix += '[relay-worker] CollectorForAgent - '
-    return prefix + 'marker=' + marker + ' eqp_ip=192.0.2.1' + suffix + '\n'
+    return prefix + 'marker=' + marker + ' connection eqp_ip=192.0.2.1' + suffix + '\n'
 
 
 def append(path, contents):
@@ -59,12 +59,13 @@ def next_snapshot(output, seen, process, log, predicate=lambda item: True, timeo
             assert payload['config_status'] == 'ok', payload
             assert payload['process_profile'] == payload['role'], payload
             assert payload['processes'] == {}, payload
-            for component in ('collect_count', 'log_silence', 'log_volume'):
+            assert 'collect_count' not in payload and 'log_silence' not in payload, payload
+            for component in ('log_volume',):
                 assert payload[component]['status'] == 'disabled', payload
             relay = payload['relay_log']
             assert relay['error_count'] == len(relay['events']), relay
             assert isinstance(relay['backlog'], bool) and isinstance(relay['errors'], list), relay
-            if payload['role'] == 'relay':
+            if payload['role'] == 'prx':
                 assert 'processing_files' not in payload, payload
                 assert relay['status'] in ('ok', 'warning', 'error', 'partial'), relay
                 assert relay['checked_at'], relay
@@ -127,10 +128,10 @@ def main():
         log = root / 'daemon.log'
         settings = {
             'schema_version': 1,
-            'role': 'relay',
+            'role': 'prx',
             'collection': {'interval_seconds': 1, 'output_directory': str(output)},
             'retention': {'enabled': False, 'max_age_seconds': 3600},
-            'process_monitor': {'analyzer': [], 'collector': [], 'relay': []},
+            'process_monitor': {'anal': [], 'col': [], 'prx': []},
             'thresholds': {'cpu_usage_percent': 100, 'memory_usage_percent': 100, 'storage_usage_percent': 100},
             'relay_log': {'path': str(relay_path)},
             'mysql': {'host': '127.0.0.1', 'port': 1, 'database': 'deliberately-unavailable',
@@ -140,17 +141,21 @@ def main():
         seen = set()
         with daemon(binary, config, log) as process:
             payload = expect_empty(output, seen, process, log)
-            assert payload['role'] == 'relay' and payload['relay_log']['source'] == str(relay_path), payload
+            assert payload['role'] == 'prx' and payload['relay_log']['source'] == str(relay_path), payload
             evidence['initial_baseline'] = payload
             first = error_line('first-new-error',
                                ' java.net.ConnectException: Connection refused for http://192.0.2.1:8080/relay',
                                logger=True)
-            append(relay_path, '2026-10-29 12:34:56.789 INFO error and ERROR in message only\n'
+            append(relay_path, '2026-10-29 12:34:56.789 INFO connection error and ERROR in message only\n'
                    '2026-10-29 12:34:56.789 WARN connection warning\n'
+                   '2026-10-29 12:34:56.789 ERROR disk full without keyword\n'
                    '2026-10-29 12:34:56.789 ERRORS invalid level\n'
                    'ERROR missing timestamp\n'
                    '\tat relay.example.StackTrace.run(StackTrace.java:10)\n' + first)
-            evidence['new_error_warning'] = expect_lines(output, seen, process, log, [first])
+            mixed_case = error_line('mixed-case').replace(' connection ', ' CoNnEcTiOn ')
+            uppercase = error_line('uppercase').replace(' connection ', ' CONNECTION ')
+            append(relay_path, mixed_case + uppercase)
+            evidence['new_error_warning'] = expect_lines(output, seen, process, log, [first, mixed_case, uppercase])
             expect_empty(output, seen, process, log)
             partial = error_line('partial-error')
             append(relay_path, partial.rstrip('\n'))
@@ -203,15 +208,15 @@ def main():
             missing.write_text(created, encoding='utf-8')
             expect_lines(output, seen, process, log, [created])
             expect_empty(output, seen, process, log)
-            settings['role'] = 'collector'
+            settings['role'] = 'col'
             write_settings(config, settings)
             evidence['collector_disabled'] = next_snapshot(output, seen, process, log,
-                                                          lambda item: item['role'] == 'collector')
+                                                          lambda item: item['role'] == 'col')
             append(missing, error_line('inactive-role-history'))
-            next_snapshot(output, seen, process, log, lambda item: item['role'] == 'collector')
-            settings['role'] = 'relay'
+            next_snapshot(output, seen, process, log, lambda item: item['role'] == 'col')
+            settings['role'] = 'prx'
             write_settings(config, settings)
-            payload = next_snapshot(output, seen, process, log, lambda item: item['role'] == 'relay')
+            payload = next_snapshot(output, seen, process, log, lambda item: item['role'] == 'prx')
             assert payload['relay_log']['status'] == 'ok' and payload['relay_log']['events'] == [], payload
             evidence['reenabled_baseline'] = payload
             reenabled = error_line('reenabled-fresh-error')
@@ -221,7 +226,7 @@ def main():
     if evidence_path is not None:
         evidence_path.parent.mkdir(parents=True, exist_ok=True)
         evidence_path.write_text(json.dumps(evidence, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
-    print('Relay integration passed: startup EOF, exact ERROR filtering, acknowledged events without duplicates, partial lines, path/role reload, missing/create, copytruncate, old/new rotation tails, bounded long lines')
+    print('Relay integration passed: startup EOF, ERROR plus case-insensitive connection filtering, acknowledged events without duplicates, partial lines, path/role reload, missing/create, copytruncate, old/new rotation tails, bounded long lines')
 
 
 if __name__ == '__main__':

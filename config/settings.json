@@ -1,12 +1,8 @@
 {
   "schema_version": 1,
-  "role": "collector",
-  "analyzer": {
-    "collect_count_change_percent": 10.0,
-    "comparison_day": "yesterday"
-  },
+  "role": "col",
   "process_monitor": {
-    "analyzer": [
+    "anal": [
       "SearchEngine",
       "Normalizer",
       "CollectorForAgent",
@@ -20,7 +16,7 @@
       "pmsClient",
       "ProcessMonitor"
     ],
-    "collector": [
+    "col": [
       "SearchEngine",
       "Reducer",
       "Normalizer",
@@ -30,7 +26,7 @@
       "pmsClient",
       "ProcessMonitor"
     ],
-    "relay": [
+    "prx": [
       "CollectorForAgent"
     ]
   },
@@ -59,22 +55,13 @@
     "memory_usage_percent": 85.0,
     "storage_usage_percent": 90.0
   },
-  "log_volume": {
-    "mode": "interval",
-    "interval_seconds": 300,
-    "daily_at": "00:10"
-  },
-  "log_silence": {
-    "default_timeout_seconds": 300,
-    "overrides": []
-  },
   "relay_log": {
     "path": "/CloudESM/logs/CollectorForAgent.log"
   },
   "mysql": {
     "host": "127.0.0.1",
     "port": 3306,
-    "database": "monitoring",
+    "database": "CloudESM",
     "credentials_file": "/etc/resource-monitor/secrets/mysql.json",
     "connect_timeout_seconds": 3,
     "read_timeout_seconds": 3,

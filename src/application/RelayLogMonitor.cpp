@@ -12,7 +12,7 @@ void RelayLogMonitor::settings_changed() {
 
 RelayLogSnapshot RelayLogMonitor::collect() {
     const auto& settings = settings_.current();
-    return reader_.read(settings.role == ServerRole::relay, settings.relay_log.path);
+    return reader_.read(settings.role == ServerRole::prx, settings.relay_log.path);
 }
 
 void RelayLogMonitor::acknowledge() noexcept {

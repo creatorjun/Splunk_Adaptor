@@ -168,14 +168,15 @@ public:
     std::expected<void, Error> configure_output(const std::string&) override { return {}; }
 };
 
-class ReloadRecordingMonitor final : public ICollectCountMonitor {
+class ReloadRecordingMonitor final : public IProcessingFileMonitor {
 public:
     ReloadRecordingMonitor(const SettingsController& settings, const RecordingStore& store, int descriptor)
         : settings_(settings), store_(store), descriptor_(descriptor) {}
 
-    CollectCountAnalysis collect(std::chrono::system_clock::time_point) override { return {}; }
+    ProcessingFilesSnapshot collect() override { return {}; }
 
-    void settings_changed(std::chrono::system_clock::time_point) override {
+    void settings_changed() override {
+        if (!initialized_) { initialized_ = true; return; }
         const AnalysisReloadRecord record{settings_.current().collection_interval.count(), store_.calls};
         CHECK(::write(descriptor_, &record, sizeof(record)) == static_cast<ssize_t>(sizeof(record)));
     }
@@ -184,6 +185,7 @@ private:
     const SettingsController& settings_;
     const RecordingStore& store_;
     int descriptor_;
+    bool initialized_{};
 };
 
 class CapturedLogs {
@@ -359,7 +361,7 @@ void analysis_reload_before_collection_test() {
             FixtureReader reader;
             RecordingStore store;
             ReloadRecordingMonitor monitor(settings, store, writing.get());
-            CollectAndStore use_case(reader, store, settings, &monitor);
+            CollectAndStore use_case(reader, store, settings, nullptr, &monitor);
             const int result = run_daemon(use_case, {}, &settings);
             ::_exit(result);
         } catch (const std::exception& error) {

@@ -13,9 +13,9 @@ import time
 def write_config(path, output, interval, retention=None):
     settings = {
         'schema_version': 1,
-        'role': 'collector',
+        'role': 'col',
         'collection': {'interval_seconds': interval, 'output_directory': str(output)},
-        'process_monitor': {'analyzer': [], 'collector': []},
+        'process_monitor': {'anal': [], 'col': []},
         'thresholds': {'cpu_usage_percent': 100, 'memory_usage_percent': 100, 'storage_usage_percent': 100},
     }
     if retention is not None:

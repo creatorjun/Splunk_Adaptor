@@ -2,7 +2,7 @@
 %global debug_package %{nil}
 
 Name:           resource-monitor
-Version:        1.12.0
+Version:        0.9.0
 Release:        1%{?dist}
 Summary:        System resource snapshots with JSON settings
 License:        Proprietary
@@ -58,8 +58,8 @@ if [ -e "$migration_file" ] || [ -L "$migration_file" ]; then
     echo 'Settings migration file already exists: /etc/resource-monitor/.settings.json.migrate. Preserve and inspect it before retrying the installation.' >&2
     exit 1
 fi
-getent group resource-monitor >/dev/null || groupadd --system resource-monitor
-getent passwd resource-monitor >/dev/null || useradd --system --gid resource-monitor --home-dir /nonexistent --shell /sbin/nologin resource-monitor
+getent group resource-monitor >/dev/null || groupadd --system resource-monitor || exit 1
+getent passwd resource-monitor >/dev/null || useradd --system --gid resource-monitor --home-dir /nonexistent --shell /sbin/nologin resource-monitor || exit 1
 if [ -e "$settings_file" ] || [ -L "$settings_file" ]; then
     if [ ! -f "$settings_file" ] || [ -L "$settings_file" ]; then
         echo 'Existing settings.json must be a regular file and not a symbolic link' >&2

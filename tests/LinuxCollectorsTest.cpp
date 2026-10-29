@@ -161,6 +161,8 @@ void mounted_filesystems() {
         if (filesystem.device_id == actual_device) {
             found_actual = true;
             CHECK(filesystem.mount_points.size() == 2);
+            CHECK(filesystem.mount_points[0] == missing);
+            CHECK(filesystem.mount_points[1] == mounted.string());
             CHECK(filesystem.counters.value);
             CHECK(!filesystem.counters.error);
             struct statvfs expected {};
@@ -232,9 +234,10 @@ void anonymous_device_fallback() {
           mount_line(54, actual_device, mounted.string(), "nfs4", "/dev/network-looking-source") +
           mount_line(55, actual_device, mounted.string(), "unknown-network-fs", "/dev/network-looking-source"));
     std::vector<std::string> probed;
+    bool source_available = true;
     const monitor::MountReader reader(proc, sys, [&](const std::string& source) -> std::expected<std::string, monitor::Error> {
         probed.push_back(source);
-        if (source != "/dev/nvme0n1p2") {
+        if (!source_available || source != "/dev/nvme0n1p2") {
             return std::unexpected(monitor::Error{"filesystems", source, "device_lookup_error", "Source device inaccessible"});
         }
         return "511:12345";
@@ -242,7 +245,7 @@ void anonymous_device_fallback() {
     const auto result = reader.read();
     CHECK(!result.error);
     CHECK(result.filesystems.size() == 3);
-    CHECK(probed.size() == 4);
+    CHECK(probed.size() == 3);
     for (const auto& filesystem : result.filesystems) {
         if (filesystem.device_id == actual_device) {
             CHECK(filesystem.counters.value);
@@ -255,6 +258,17 @@ void anonymous_device_fallback() {
             CHECK(filesystem.counters.error);
             CHECK(filesystem.counters.error->code == "mount_changed");
         }
+    }
+    source_available = false;
+    probed.clear();
+    const auto refreshed = reader.read();
+    CHECK(!refreshed.error);
+    CHECK(probed.size() == 3);
+    CHECK(refreshed.filesystems.size() == 3);
+    for (const auto& filesystem : refreshed.filesystems) {
+        CHECK(!filesystem.counters.value);
+        CHECK(filesystem.counters.error);
+        CHECK(filesystem.counters.error->code == "device_lookup_error");
     }
     const auto regular_source = fixture.path / "regular-source";
     write(regular_source, "not a block device");
