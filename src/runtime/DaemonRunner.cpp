@@ -198,11 +198,13 @@ int run_daemon(CollectAndStore& use_case, const DaemonOptions& options,
                 return system_failure("read retention timer");
             }
         }
-        if ((descriptors[1].revents & POLLIN) == 0) {
+        const bool volume_updated = use_case.tick(std::chrono::system_clock::now());
+        const bool collection_due = (descriptors[1].revents & POLLIN) != 0;
+        if (!collection_due && (!volume_updated || options.once)) {
             continue;
         }
         std::uint64_t expirations{};
-        if (::read(timer.get(), &expirations, sizeof(expirations)) != sizeof(expirations)) {
+        if (collection_due && ::read(timer.get(), &expirations, sizeof(expirations)) != sizeof(expirations)) {
             if (errno == EAGAIN || errno == EINTR) {
                 continue;
             }

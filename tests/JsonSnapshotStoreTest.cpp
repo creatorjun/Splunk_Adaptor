@@ -217,6 +217,38 @@ void check_process_snapshots() {
     check_no_temporary_files(directory.path);
 }
 
+void check_log_volume_snapshots() {
+    ScopedTimezone zone("KST-9");
+    TemporaryDirectory directory;
+    monitor::JsonSnapshotStore store(directory.path);
+    auto snapshot = make_snapshot();
+    snapshot.log_volume.status = monitor::LogVolumeStatus::ok;
+    snapshot.log_volume.mode = monitor::LogVolumeMode::daily;
+    snapshot.log_volume.window = monitor::LogVolumeWindow{monitor::LogVolumeMode::daily, 20261013, 20261014,
+        std::chrono::sys_days{std::chrono::year{2026}/10/13} - std::chrono::hours{9},
+        std::chrono::sys_days{std::chrono::year{2026}/10/14} - std::chrono::hours{9}};
+    snapshot.log_volume.queried_at = snapshot.timestamp;
+    snapshot.log_volume.equipment = {{"192.0.2.1", 9007199254740993ULL}, {"192.0.2.2", 0}};
+    CHECK(store.save(snapshot));
+    const auto volume = read_json(directory.path / "20261014T213400+0900.json")["log_volume"];
+    CHECK(volume["source"] == "CloudESM.SUM_COLLECT_INFO_1DAY");
+    CHECK(volume["mode"] == "daily" && volume["status"] == "ok");
+    CHECK(volume["window_start"] == "2026-10-13T00:00:00.000+09:00");
+    CHECK(volume["window_end_exclusive"] == "2026-10-14T00:00:00.000+09:00");
+    CHECK(volume["equipment_count"] == 2);
+    CHECK(volume["equipment"][0]["count"].get<std::uint64_t>() == 9007199254740993ULL);
+    CHECK(volume["equipment"][1]["count"] == 0);
+    CHECK(volume["error"].is_null());
+    snapshot.log_volume = {};
+    snapshot.log_volume.status = monitor::LogVolumeStatus::error;
+    snapshot.log_volume.error = monitor::Error{"log_volume", "query", "2013", "Query failed"};
+    CHECK(store.save(snapshot));
+    const auto failure = read_json(directory.path / "20261014T213400+0900_1.json")["log_volume"];
+    CHECK(failure["status"] == "error");
+    CHECK(failure["equipment"].empty() && failure["window_start"].is_null());
+    CHECK(failure["queried_at"].is_null() && failure["error"]["code"] == "2013");
+}
+
 void check_log_silence_snapshots() {
     ScopedTimezone scoped_zone("KST-9");
     TemporaryDirectory directory;
@@ -682,6 +714,7 @@ int main() {
         check_collect_count_snapshots();
         check_process_snapshots();
         check_log_silence_snapshots();
+        check_log_volume_snapshots();
         check_processing_files_snapshots();
     });
 }

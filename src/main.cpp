@@ -4,11 +4,13 @@
 #include "application/JavaProcessMonitor.hpp"
 #include "application/LogSilenceMonitor.hpp"
 #include "application/ProcessingFileMonitor.hpp"
+#include "application/LogVolumeMonitor.hpp"
 #include "application/SnapshotRetention.hpp"
 #include "infrastructure/linux/DirectoryProcessingFileScanner.hpp"
 #include "infrastructure/linux/ProcessingFileReader.hpp"
 #include "infrastructure/linux/ProcJavaProcessReader.hpp"
 #include "infrastructure/linux/LocalDayWindow.hpp"
+#include "infrastructure/linux/LocalLogVolumeCalendar.hpp"
 #include "application/SettingsController.hpp"
 #include "infrastructure/config/JsonSettingsReader.hpp"
 #include "infrastructure/config/JsonMySqlCredentialsReader.hpp"
@@ -42,7 +44,7 @@ int main(int argc, char* argv[]) {
                 return 0;
             }
             if (argument == "--version") {
-                std::cout << "resource-monitor 1.10.0\n";
+                std::cout << "resource-monitor 1.11.0\n";
                 return 0;
             }
             if (argument == "--once") {
@@ -111,7 +113,8 @@ int main(int argc, char* argv[]) {
         monitor::MariaDbConnectionFactory database_factory;
         monitor::MySqlConfiguration database{credentials, database_factory};
         monitor::MySqlConfiguration silence_database{credentials, database_factory};
-        monitor::SettingsController settings{config, store, overrides, &database, &silence_database};
+        monitor::MySqlConfiguration volume_database{credentials, database_factory};
+        monitor::SettingsController settings{config, store, overrides, &database, &silence_database, &volume_database};
         if (const auto initialized = settings.initialize(); !initialized) {
             monitor::log_error(initialized.error());
             return initialized.error().component == "settings_config" ? 78 : 1;
@@ -125,8 +128,10 @@ int main(int argc, char* argv[]) {
         monitor::DirectoryProcessingFileScanner file_scanner;
         monitor::ProcessingFileReader file_reader{file_scanner};
         monitor::ProcessingFileMonitor processing_files{file_reader, settings};
+        monitor::LocalLogVolumeCalendar volume_calendar;
+        monitor::LogVolumeMonitor log_volume{volume_database, settings, volume_calendar};
         monitor::CollectAndStore use_case{reader, store, settings, &collect_count, &processes, &log_silence,
-            &processing_files};
+            &processing_files, &log_volume};
         monitor::SnapshotRetention retention{store};
         return monitor::run_daemon(use_case, options, &settings, &retention);
     } catch (const std::exception& error) {

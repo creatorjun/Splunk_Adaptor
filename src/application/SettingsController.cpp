@@ -16,9 +16,10 @@ Error not_initialized() {
 }
 
 SettingsController::SettingsController(ISettingsReader& reader, IOutputDirectory& output,
-    SettingsOverrides overrides, IMySqlConfiguration* mysql, IMySqlConfiguration* log_silence_mysql)
+    SettingsOverrides overrides, IMySqlConfiguration* mysql, IMySqlConfiguration* log_silence_mysql,
+    IMySqlConfiguration* log_volume_mysql)
     : reader_(reader), output_(output), overrides_(std::move(overrides)), mysql_(mysql),
-      log_silence_mysql_(log_silence_mysql) {}
+      log_silence_mysql_(log_silence_mysql), log_volume_mysql_(log_volume_mysql) {}
 
 std::expected<void, Error> SettingsController::initialize() {
     if (settings_) {
@@ -88,7 +89,8 @@ std::expected<bool, Error> SettingsController::load_and_apply() {
     }
     bool database_changed{};
     dependency_errors_.clear();
-    const std::array databases{mysql_, log_silence_mysql_};
+    const std::array databases{mysql_, log_silence_mysql_, log_volume_mysql_};
+    const std::array targets{"collect_count.connection", "log_silence.connection", "log_volume.connection"};
     for (std::size_t index = 0; index < databases.size(); ++index) {
         auto* database = databases[index];
         if (!database) continue;
@@ -98,8 +100,8 @@ std::expected<bool, Error> SettingsController::load_and_apply() {
         } else {
             auto error = prepared ? Error{"mysql", "connection", "connection_pending",
                 "Database connection validation is pending"} : prepared.error();
-            if (log_silence_mysql_ && error.component == "mysql" && error.target == "connection") {
-                error.target = index == 0 ? "collect_count.connection" : "log_silence.connection";
+            if ((log_silence_mysql_ || log_volume_mysql_) && error.component == "mysql" && error.target == "connection") {
+                error.target = targets[index];
             }
             dependency_errors_.push_back(std::move(error));
         }

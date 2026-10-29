@@ -183,9 +183,15 @@ public:
             silence_completed_at.reset();
             silence_at = Clock::time_point{};
         }
+        ++volume_revision;
+        if (!same_identity || !active_identity->settings.enabled) {
+            volume_result = {};
+            volume_at = Clock::time_point{};
+        }
         if (!active_identity->settings.enabled) {
             desired_window.reset();
             silence_enabled = false;
+            volume_window.reset();
         }
         failure.reset();
         retry_delay = std::min(retry_interval, maximum_retry_interval);
@@ -310,6 +316,32 @@ public:
             return result;
         }
         return silence_result;
+    }
+
+    LogVolumeReading read_log_volume(const LogVolumeWindow& window) {
+        std::lock_guard lock(mutex);
+        if (!volume_window || *volume_window != window) {
+            volume_window = window;
+            ++volume_revision;
+            volume_result = {};
+            volume_result.window = window;
+            volume_at = Clock::time_point{};
+        }
+        wake.notify_one();
+        if (volume_result.status == LogVolumeReadStatus::ready) return volume_result;
+        if (!active || !active_healthy) {
+            LogVolumeReading result;
+            result.window = window;
+            result.queried_at = volume_result.queried_at;
+            if (volume_result.error || failure || (active && !active_healthy)) {
+                result.status = LogVolumeReadStatus::error;
+                result.error = volume_result.error ? volume_result.error : failure;
+                if (!result.error) result.error = Error{"log_volume", "connection", "connection_unavailable",
+                    "Database log volume connection is unavailable"};
+            }
+            return result;
+        }
+        return volume_result;
     }
 
     void run() {
@@ -455,10 +487,45 @@ public:
                 lock.lock();
                 continue;
             }
+            if (active && active_healthy && volume_window && Clock::now() >= volume_at) {
+                auto session = active;
+                const auto revision = active_revision;
+                const auto selected_revision = volume_revision;
+                const auto window = *volume_window;
+                lock.unlock();
+                auto result = query_volume(*session, window);
+                const auto queried_at = std::chrono::system_clock::now();
+                lock.lock();
+                if (!stopping && revision == active_revision && selected_revision == volume_revision
+                    && volume_window && *volume_window == window) {
+                    volume_result.window = window;
+                    if (result) {
+                        volume_result.status = LogVolumeReadStatus::ready;
+                        volume_result.equipment = std::move(*result);
+                        volume_result.error.reset();
+                        volume_result.queried_at = queried_at;
+                        volume_at = Clock::time_point::max();
+                    } else {
+                        volume_result.status = LogVolumeReadStatus::error;
+                        volume_result.equipment.clear();
+                        if (!volume_result.error) {
+                            volume_result.error = std::move(result.error());
+                            volume_result.queried_at = queried_at;
+                        }
+                        volume_at = Clock::now() + retry_interval;
+                        health_at = Clock::now();
+                    }
+                }
+                lock.unlock();
+                session.reset();
+                lock.lock();
+                continue;
+            }
             if (active && active_healthy) {
                 auto deadline = health_at;
                 if (desired_window) deadline = std::min(deadline, query_at);
                 if (silence_enabled) deadline = std::min(deadline, silence_at);
+                if (volume_window) deadline = std::min(deadline, volume_at);
                 wake.wait_until(lock, deadline);
             } else {
                 wake.wait(lock);
@@ -520,6 +587,16 @@ public:
         }
     }
 
+    static std::expected<std::vector<EquipmentLogVolume>, Error> query_volume(
+        IMySqlSession& session, const LogVolumeWindow& window) {
+        try {
+            return session.read_log_volume(window);
+        } catch (...) {
+            return std::unexpected(Error{"log_volume", "query", "query_failure",
+                "Database log volume query failed"});
+        }
+    }
+
     IMySqlCredentialsReader& credentials;
     IMySqlConnectionFactory& factory;
     std::chrono::milliseconds retry_interval;
@@ -559,6 +636,10 @@ public:
     LogSilenceReading silence_result;
     std::optional<Clock::time_point> silence_completed_at;
     Clock::time_point silence_at{};
+    std::optional<LogVolumeWindow> volume_window;
+    std::uint64_t volume_revision{};
+    LogVolumeReading volume_result;
+    Clock::time_point volume_at{};
 };
 
 MySqlConfiguration::MySqlConfiguration(IMySqlCredentialsReader& credentials,
@@ -584,6 +665,10 @@ CollectCountReading MySqlConfiguration::read_daily_counts(const DailyCountWindow
 LogSilenceReading MySqlConfiguration::read_last_received(bool enabled,
     std::chrono::seconds refresh_interval) {
     return state_->read_last_received(enabled, refresh_interval);
+}
+
+LogVolumeReading MySqlConfiguration::read_log_volume(const LogVolumeWindow& window) {
+    return state_->read_log_volume(window);
 }
 
 }

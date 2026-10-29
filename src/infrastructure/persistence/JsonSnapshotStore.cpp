@@ -309,6 +309,16 @@ nlohmann::json serialize(const ResourceSnapshot& snapshot, const std::string& ti
         silence_error = {{"component", error.component}, {"target", error.target},
             {"code", error.code}, {"message", error.message}};
     }
+    auto volume_equipment = nlohmann::json::array();
+    for (const auto& equipment : snapshot.log_volume.equipment) {
+        volume_equipment.push_back({{"eqp_ip", equipment.eqp_ip}, {"count", equipment.count}});
+    }
+    nlohmann::json volume_error = nullptr;
+    if (snapshot.log_volume.error) {
+        const auto& error = *snapshot.log_volume.error;
+        volume_error = {{"component", error.component}, {"target", error.target},
+            {"code", error.code}, {"message", error.message}};
+    }
     auto filesystems = nlohmann::json::array();
     for (const auto& filesystem : snapshot.filesystems) {
         filesystems.push_back({
@@ -375,6 +385,18 @@ nlohmann::json serialize(const ResourceSnapshot& snapshot, const std::string& ti
             {"equipment_count", snapshot.log_silence.equipment.size()},
             {"equipment", std::move(silent_equipment)},
             {"error", std::move(silence_error)}
+        }},
+        {"log_volume", {
+            {"source", snapshot.log_volume.mode == LogVolumeMode::daily
+                ? "CloudESM.SUM_COLLECT_INFO_1DAY" : "CloudESM.SUM_COLLECT_INFO"},
+            {"status", to_string(snapshot.log_volume.status)},
+            {"mode", to_string(snapshot.log_volume.mode)},
+            {"window_start", snapshot.log_volume.window ? nullable_time(snapshot.log_volume.window->start) : nlohmann::json(nullptr)},
+            {"window_end_exclusive", snapshot.log_volume.window ? nullable_time(snapshot.log_volume.window->end) : nlohmann::json(nullptr)},
+            {"queried_at", nullable_time(snapshot.log_volume.queried_at)},
+            {"equipment_count", snapshot.log_volume.equipment.size()},
+            {"equipment", std::move(volume_equipment)},
+            {"error", std::move(volume_error)}
         }},
         {"errors", std::move(errors)}
     };

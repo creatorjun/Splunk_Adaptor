@@ -7,6 +7,7 @@
 #include "domain/JavaProcessSnapshot.hpp"
 #include "domain/LogSilenceAnalysis.hpp"
 #include "domain/ProcessingFilesSnapshot.hpp"
+#include "domain/LogVolume.hpp"
 
 namespace monitor {
 
@@ -56,6 +57,7 @@ struct ResourceSnapshot {
     JavaProcessSnapshot java_processes;
     LogSilenceAnalysis log_silence;
     ProcessingFilesSnapshot processing_files;
+    LogVolumeAnalysis log_volume;
 };
 
 }

@@ -56,6 +56,11 @@
     "memory_usage_percent": 85.0,
     "storage_usage_percent": 90.0
   },
+  "log_volume": {
+    "mode": "interval",
+    "interval_seconds": 300,
+    "daily_at": "00:10"
+  },
   "log_silence": {
     "default_timeout_seconds": 300,
     "overrides": []

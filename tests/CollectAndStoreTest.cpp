@@ -916,6 +916,36 @@ void accepted_settings_survive_later_failure_test() {
     }
 }
 
+void log_volume_snapshot_test() {
+    struct Volume final : ILogVolumeMonitor {
+        LogVolumeAnalysis next;
+        unsigned ticks{};
+        bool tick(std::chrono::system_clock::time_point) override { ++ticks; return true; }
+        LogVolumeAnalysis collect() override { return next; }
+    } volume;
+    Reader reader;
+    Store store;
+    Config config;
+    CollectAndStore use_case{reader, store, config, nullptr, nullptr, nullptr, nullptr, &volume};
+    CHECK(use_case.initialize());
+    CHECK(volume.ticks == 1);
+    CHECK(use_case.tick(sample(1).timestamp));
+    CHECK(volume.ticks == 2);
+    volume.next.status = LogVolumeStatus::ok;
+    volume.next.equipment = {{"192.0.2.1", 1234}};
+    reader.next = sample(1);
+    const auto normal = use_case.run();
+    CHECK(normal && normal->log_volume.equipment.front().count == 1234);
+    CHECK(normal->collection_status == CollectionStatus::ok && normal->status == MetricStatus::ok);
+    volume.next = {};
+    volume.next.status = LogVolumeStatus::error;
+    volume.next.error = Error{"log_volume", "query", "2013", "Query failed"};
+    reader.next = sample(2);
+    const auto failed = use_case.run();
+    CHECK(failed && failed->log_volume.equipment.empty() && has_error(*failed, "2013"));
+    CHECK(failed->collection_status == CollectionStatus::ok && failed->status == MetricStatus::unknown);
+}
+
 }
 
 int main() {
@@ -925,6 +955,7 @@ int main() {
         process_monitor_tests();
         log_silence_tests();
         processing_file_tests();
+        log_volume_snapshot_test();
         database_dependency_error_test();
         reload_tests();
         partial_failure_tests();

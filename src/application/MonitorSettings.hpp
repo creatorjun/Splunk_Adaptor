@@ -5,6 +5,7 @@
 #include "application/AnalyzerSettings.hpp"
 #include "application/ProcessMonitorSettings.hpp"
 #include "application/LogSilenceSettings.hpp"
+#include "application/LogVolumeSettings.hpp"
 #include "application/ProcessingFileSettings.hpp"
 #include "application/SnapshotRetentionSettings.hpp"
 #include "domain/ThresholdPolicy.hpp"
@@ -25,6 +26,7 @@ struct MonitorSettings {
     LogSilenceSettings log_silence{};
     ProcessingFileSettings processing_files{};
     SnapshotRetentionSettings retention{};
+    LogVolumeSettings log_volume{};
 
     bool operator==(const MonitorSettings&) const = default;
 };

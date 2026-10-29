@@ -79,6 +79,39 @@ bool valid_log_silence_timeout(const nlohmann::json& timeout) {
             : timeout.get<std::int64_t>() >= 60 && timeout.get<std::int64_t>() <= 604800);
 }
 
+bool read_log_volume(const nlohmann::json& value, LogVolumeSettings& destination) {
+    if (!value.is_object()) return false;
+    for (const auto& [key, setting] : value.items()) {
+        if (key == "mode") {
+            if (!setting.is_string() || (setting != "interval" && setting != "daily")) return false;
+            destination.mode = setting == "interval" ? LogVolumeMode::interval : LogVolumeMode::daily;
+        } else if (key == "interval_seconds") {
+            if (!setting.is_number_integer()) return false;
+            if (setting.is_number_unsigned()) {
+                const auto seconds = setting.get<std::uint64_t>();
+                if (seconds < 60 || seconds > 86400 || seconds % 60 != 0) return false;
+            } else {
+                const auto seconds = setting.get<std::int64_t>();
+                if (seconds < 60 || seconds > 86400 || seconds % 60 != 0) return false;
+            }
+            destination.interval_seconds = setting.get<unsigned int>();
+        } else if (key == "daily_at") {
+            if (!setting.is_string()) return false;
+            const auto& time = setting.get_ref<const std::string&>();
+            if (time.size() != 5 || time[2] != ':' || time[0] < '0' || time[0] > '9' ||
+                time[1] < '0' || time[1] > '9' || time[3] < '0' || time[3] > '9' ||
+                time[4] < '0' || time[4] > '9') return false;
+            const auto hour = static_cast<unsigned int>((time[0] - '0') * 10 + time[1] - '0');
+            const auto minute = static_cast<unsigned int>((time[3] - '0') * 10 + time[4] - '0');
+            if (hour >= 24 || minute >= 60) return false;
+            destination.daily_at_minutes = hour * 60 + minute;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool read_retention(const nlohmann::json& value, SnapshotRetentionSettings& destination) {
     if (!value.is_object()) return false;
     for (const auto& [key, setting] : value.items()) {
@@ -214,10 +247,10 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::read_settings() {
         const auto json = nlohmann::json::parse(document, callback);
         if (!json.is_object() || !json.contains("schema_version") ||
             !json.contains("thresholds")) {
-            return std::unexpected(config_error(path_, "invalid_schema", "Expected schema_version, thresholds, and optional is_analyzer, analyzer, process_monitor, processing_files, log_silence, collection, retention and mysql"));
+            return std::unexpected(config_error(path_, "invalid_schema", "Expected schema_version, thresholds, and optional is_analyzer, analyzer, process_monitor, processing_files, log_silence, log_volume, collection, retention and mysql"));
         }
         for (const auto& [key, value] : json.items()) {
-            if (key != "schema_version" && key != "thresholds" && key != "collection" && key != "mysql" && key != "is_analyzer" && key != "analyzer" && key != "process_monitor" && key != "processing_files" && key != "log_silence" && key != "retention") {
+            if (key != "schema_version" && key != "thresholds" && key != "collection" && key != "mysql" && key != "is_analyzer" && key != "analyzer" && key != "process_monitor" && key != "processing_files" && key != "log_silence" && key != "log_volume" && key != "retention") {
                 return std::unexpected(config_error(path_, "invalid_schema", "Unknown configuration key"));
             }
         }
@@ -246,6 +279,10 @@ std::expected<MonitorSettings, Error> JsonSettingsReader::read_settings() {
             return std::unexpected(std::move(error));
         }
         MonitorSettings settings{policy};
+        if (json.contains("log_volume") && !read_log_volume(json["log_volume"], settings.log_volume)) {
+            return std::unexpected(config_error(path_, "invalid_log_volume",
+                "Log volume requires mode interval or daily, interval_seconds between 60 and 86400 in multiples of 60, and daily_at in HH:MM format"));
+        }
         if (json.contains("retention") && !read_retention(json["retention"], settings.retention)) {
             return std::unexpected(config_error(path_, "invalid_retention",
                 "Retention must contain only enabled (boolean) and max_age_seconds (integer between 60 and 31536000)"));

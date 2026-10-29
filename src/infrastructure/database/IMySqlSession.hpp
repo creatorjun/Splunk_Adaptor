@@ -5,6 +5,7 @@
 #include "application/ports/IMySqlCredentialsReader.hpp"
 #include "domain/CollectCountAnalysis.hpp"
 #include "domain/LogSilenceAnalysis.hpp"
+#include "domain/LogVolume.hpp"
 
 #include <expected>
 #include <memory>
@@ -22,6 +23,10 @@ public:
     virtual std::expected<LogReceiptBatch, Error> read_last_received() {
         return std::unexpected(Error{"log_silence", "CloudESM.SUM_COLLECT_INFO", "unsupported",
             "Last log receipt queries are unavailable"});
+    }
+    virtual std::expected<std::vector<EquipmentLogVolume>, Error> read_log_volume(const LogVolumeWindow&) {
+        return std::unexpected(Error{"log_volume", "query", "unsupported",
+            "Windowed log volume queries are unavailable"});
     }
 };
 

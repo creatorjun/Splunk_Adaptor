@@ -147,6 +147,68 @@ void processing_files_settings_tests() {
     }
 }
 
+void log_volume_settings_tests() {
+    TemporaryDirectory directory;
+    const auto path = directory.path / "settings.json";
+    monitor::JsonSettingsReader reader(path);
+    const auto document = [](const std::string& volume, const std::string& analyzer = "false") {
+        return R"({"schema_version":1,"thresholds":{"cpu_usage_percent":80,"memory_usage_percent":85,"storage_usage_percent":90},"mysql":{"database":"monitoring","tls_mode":"disabled"},"is_analyzer":)"
+            + analyzer + ",\"log_volume\":" + volume + "}";
+    };
+    write_file(path, document("{}"));
+    auto settings = reader.read_settings();
+    CHECK(settings && settings->log_volume == monitor::LogVolumeSettings{});
+    CHECK(settings->log_volume.mode == monitor::LogVolumeMode::interval);
+    CHECK(settings->log_volume.interval_seconds == 300);
+    CHECK(settings->log_volume.daily_at_minutes == 10);
+    for (const auto* role : {"false", "true"}) {
+        for (const auto* mode : {"interval", "daily"}) {
+            for (const unsigned seconds : {60U, 300U, 3600U, 86400U}) {
+                write_file(path, document(nlohmann::json{
+                    {"mode", mode}, {"interval_seconds", seconds}, {"daily_at", "23:59"}}.dump(), role));
+                settings = reader.read_settings();
+                CHECK(settings);
+                CHECK(settings->log_volume.mode == (std::string_view{mode} == "daily"
+                    ? monitor::LogVolumeMode::daily : monitor::LogVolumeMode::interval));
+                CHECK(settings->log_volume.interval_seconds == seconds);
+                CHECK(settings->log_volume.daily_at_minutes == 1439);
+            }
+        }
+        for (const auto* invalid : {"null", "true", "[]", "300", "\"interval\"",
+            R"({"mode":"today"})", R"({"mode":"Interval"})", R"({"mode":1})", R"({"mode":null})",
+            R"({"interval_seconds":0})", R"({"interval_seconds":59})", R"({"interval_seconds":61})",
+            R"({"interval_seconds":86401})", R"({"interval_seconds":-60})", R"({"interval_seconds":300.0})",
+            R"({"interval_seconds":true})", R"({"interval_seconds":"300"})", R"({"interval_seconds":null})",
+            R"({"interval_seconds":18446744073709551615})", R"({"interval_seconds":-9223372036854775808})",
+            R"({"daily_at":"0:10"})", R"({"daily_at":"00:1"})", R"({"daily_at":"24:00"})",
+            R"({"daily_at":"00:60"})", R"({"daily_at":"00:10:00"})", R"({"daily_at":"00:10Z"})",
+            R"({"daily_at":"-1:10"})", R"({"daily_at":"12.10"})", R"({"daily_at":10})",
+            R"({"daily_at":null})", R"({"daily_at":" 00:10"})", R"({"daily_at":"00:10\n"})",
+            R"({"enabled":true})", R"({"redaction-marker":1})"}) {
+            write_file(path, document(invalid, role));
+            const auto rejected = reader.read_settings();
+            CHECK(!rejected && rejected.error().code == "invalid_log_volume");
+            CHECK(rejected.error().message.find("redaction-marker") == std::string::npos);
+        }
+    }
+    for (const auto* invalid : {
+        R"({"mode":"interval","mode":"daily"})",
+        R"({"interval_seconds":60,"interval_seconds":300})",
+        R"({"daily_at":"00:10","daily_at":"00:20"})",
+        R"({"interval_seconds":18446744073709551616})"}) {
+        write_file(path, document(invalid));
+        check_failure(reader, path);
+    }
+    write_file(path, document(R"({"mode":"daily","daily_at":"00:00"})"));
+    settings = reader.read_settings();
+    CHECK(settings && settings->log_volume.mode == monitor::LogVolumeMode::daily);
+    CHECK(settings->log_volume.daily_at_minutes == 0 && settings->log_volume.interval_seconds == 300);
+    write_file(path, document(R"({"mode":"interval","interval_seconds":120})"));
+    settings = reader.read_settings();
+    CHECK(settings && settings->log_volume.mode == monitor::LogVolumeMode::interval);
+    CHECK(settings->log_volume.interval_seconds == 120 && settings->log_volume.daily_at_minutes == 10);
+}
+
 void retention_settings_tests() {
     TemporaryDirectory directory;
     const auto path = directory.path / "settings.json";
@@ -685,6 +747,7 @@ int main() {
         monitor::JsonSettingsReader pipe_reader(pipe);
         check_failure(pipe_reader, pipe);
         processing_files_settings_tests();
+        log_volume_settings_tests();
         retention_settings_tests();
     });
 }

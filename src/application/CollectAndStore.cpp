@@ -10,9 +10,10 @@ namespace monitor {
 CollectAndStore::CollectAndStore(IResourceReader& reader, ISnapshotStore& store,
     IThresholdConfigReader& config, ICollectCountMonitor* collect_count,
     IJavaProcessMonitor* java_processes, ILogSilenceMonitor* log_silence,
-    IProcessingFileMonitor* processing_files)
+    IProcessingFileMonitor* processing_files, ILogVolumeMonitor* log_volume)
     : reader_(reader), store_(store), config_(config), collect_count_(collect_count),
-      java_processes_(java_processes), log_silence_(log_silence), processing_files_(processing_files) {
+      java_processes_(java_processes), log_silence_(log_silence), processing_files_(processing_files),
+      log_volume_(log_volume) {
 }
 
 std::expected<void, Error> CollectAndStore::initialize() {
@@ -31,6 +32,7 @@ std::expected<void, Error> CollectAndStore::initialize() {
     if (collect_count_) collect_count_->collect(sample.timestamp);
     if (log_silence_) log_silence_->collect(sample.timestamp);
     if (processing_files_) processing_files_->settings_changed();
+    if (log_volume_) log_volume_->tick(sample.timestamp);
     if (sample.cpu.value && !sample.cpu.error) {
         previous_cpu_ = *sample.cpu.value;
         previous_cpu_time_ = sample.cpu_observed_at;
@@ -42,6 +44,10 @@ void CollectAndStore::settings_changed(std::chrono::system_clock::time_point tim
     if (policy_ && collect_count_) collect_count_->settings_changed(timestamp);
     if (policy_ && log_silence_) log_silence_->settings_changed(timestamp);
     if (policy_ && processing_files_) processing_files_->settings_changed();
+}
+
+bool CollectAndStore::tick(std::chrono::system_clock::time_point timestamp) {
+    return policy_ && log_volume_ && log_volume_->tick(timestamp);
 }
 
 std::expected<ResourceSnapshot, Error> CollectAndStore::run(std::uint64_t missed_intervals) {
@@ -172,6 +178,14 @@ std::expected<ResourceSnapshot, Error> CollectAndStore::run(std::uint64_t missed
             snapshot.status = MetricStatus::warning;
         } else if (snapshot.log_silence.status != LogSilenceStatus::ok &&
             snapshot.log_silence.status != LogSilenceStatus::disabled && snapshot.status == MetricStatus::ok) {
+            snapshot.status = MetricStatus::unknown;
+        }
+    }
+    if (log_volume_) {
+        snapshot.log_volume = log_volume_->collect();
+        if (snapshot.log_volume.error) snapshot.errors.push_back(*snapshot.log_volume.error);
+        if (snapshot.log_volume.status != LogVolumeStatus::ok &&
+            snapshot.log_volume.status != LogVolumeStatus::disabled && snapshot.status == MetricStatus::ok) {
             snapshot.status = MetricStatus::unknown;
         }
     }

@@ -52,12 +52,16 @@ struct Control {
     bool silence_blocked{};
     bool fail_silence{};
     bool throw_silence{};
+    bool volume_blocked{};
+    bool fail_volume{};
+    bool throw_volume{};
     std::string silence_error_code{"query_failed"};
     std::chrono::system_clock::time_point last_receipt{std::chrono::seconds{1792380600}};
     std::uint64_t current_count{110};
     std::vector<Attempt> attempts;
     std::vector<QueryAttempt> queries;
     std::vector<std::size_t> silence_queries;
+    std::vector<LogVolumeWindow> volume_queries;
     std::vector<std::chrono::steady_clock::time_point> silence_query_times;
     std::set<std::size_t> live;
     std::set<std::size_t> closed;
@@ -113,6 +117,16 @@ struct Session final : IMySqlSession {
                 state.silence_error_code, "Last log receipt query failed"});
         }
         return LogReceiptBatch{received + 300s, {{"192.0.2.1", received}}};
+    }
+
+    std::expected<std::vector<EquipmentLogVolume>, Error> read_log_volume(const LogVolumeWindow& window) override {
+        std::unique_lock lock(state.mutex);
+        state.volume_queries.push_back(window);
+        const auto count = state.current_count;
+        state.wake.wait_for(lock, 15s, [&] { return !state.volume_blocked; });
+        if (state.throw_volume) throw std::runtime_error("sensitive volume exception");
+        if (state.fail_volume) return std::unexpected(Error{"log_volume", "table", "2013", "Query failed"});
+        return std::vector<EquipmentLogVolume>{{"192.0.2.1", count}};
     }
 
     Control& state;
@@ -877,6 +891,80 @@ void independent_channels_isolation_tests() {
     CHECK(daily_factory.inspect([](const Control& state) { return state.attempts.size() == 1; }));
 }
 
+void volume_window_cache_tests() {
+    Reader credentials;
+    Factory factory;
+    MySqlConfiguration configuration(credentials, factory, 30ms, 5s);
+    const auto settings = enabled_settings();
+    wait_ready(configuration, settings);
+    CHECK(configuration.commit());
+    LogVolumeWindow window{LogVolumeMode::interval, 202610291000ULL, 202610291005ULL,
+        std::chrono::sys_days{std::chrono::year{2026}/10/29} + 10h,
+        std::chrono::sys_days{std::chrono::year{2026}/10/29} + 10h + 5min};
+    wait_for([&] { return configuration.read_log_volume(window).status == LogVolumeReadStatus::ready; });
+    const auto first = configuration.read_log_volume(window);
+    CHECK(first.window == window && first.equipment.front().count == 110);
+    factory.inspect([](Control& state) { state.current_count = 999; });
+    for (int index = 0; index < 20; ++index) {
+        const auto repeated = configuration.read_log_volume(window);
+        CHECK(repeated.queried_at == first.queried_at && repeated.equipment == first.equipment);
+    }
+    CHECK(factory.inspect([](const Control& state) { return state.volume_queries.size() == 1; }));
+    window.start_bucket += 5;
+    window.end_bucket += 5;
+    window.start += 5min;
+    window.end += 5min;
+    wait_for([&] { return configuration.read_log_volume(window).status == LogVolumeReadStatus::ready; });
+    CHECK(configuration.read_log_volume(window).equipment.front().count == 999);
+    CHECK(factory.inspect([](const Control& state) { return state.volume_queries.size() == 2; }));
+    auto rotated = settings;
+    rotated.database = "other_database";
+    factory.inspect([](Control& state) { state.current_count = 123; });
+    wait_ready(configuration, rotated);
+    CHECK(configuration.commit());
+    wait_for([&] { return configuration.read_log_volume(window).status == LogVolumeReadStatus::ready; });
+    CHECK(configuration.read_log_volume(window).equipment.front().count == 123);
+    auto disabled = rotated;
+    disabled.enabled = false;
+    CHECK(configuration.prepare(disabled).value());
+    CHECK(configuration.commit());
+    CHECK(configuration.read_log_volume(window).status == LogVolumeReadStatus::pending);
+    CHECK(configuration.read_log_volume(window).equipment.empty());
+}
+
+void volume_error_and_stale_request_tests() {
+    Reader credentials;
+    Factory factory;
+    MySqlConfiguration configuration(credentials, factory, 40ms, 5s);
+    const auto settings = enabled_settings();
+    wait_ready(configuration, settings);
+    CHECK(configuration.commit());
+    LogVolumeWindow first{LogVolumeMode::daily, 20261028, 20261029,
+        std::chrono::sys_days{std::chrono::year{2026}/10/28},
+        std::chrono::sys_days{std::chrono::year{2026}/10/29}};
+    factory.inspect([](Control& state) { state.volume_blocked = true; });
+    configuration.read_log_volume(first);
+    wait_for([&] { return factory.inspect([](const Control& state) { return state.volume_queries.size() == 1; }); });
+    auto second = first;
+    ++second.start_bucket;
+    ++second.end_bucket;
+    second.start += 24h;
+    second.end += 24h;
+    CHECK(configuration.read_log_volume(second).status == LogVolumeReadStatus::pending);
+    factory.inspect([](Control& state) { state.fail_volume = true; state.volume_blocked = false; });
+    factory.state.wake.notify_all();
+    wait_for([&] { return configuration.read_log_volume(second).status == LogVolumeReadStatus::error; });
+    const auto failed = configuration.read_log_volume(second);
+    CHECK(failed.window == second && failed.equipment.empty() && failed.error->code == "2013");
+    factory.inspect([](Control& state) { state.fail_volume = false; state.current_count = 22; });
+    wait_for([&] { return configuration.read_log_volume(second).status == LogVolumeReadStatus::ready; });
+    CHECK(configuration.read_log_volume(second).equipment.front().count == 22);
+    CHECK(!configuration.read_log_volume(second).error);
+    factory.inspect([](Control& state) { state.throw_volume = true; });
+    wait_for([&] { return configuration.read_log_volume(first).status == LogVolumeReadStatus::error; });
+    CHECK(configuration.read_log_volume(first).error->message.find("sensitive") == std::string::npos);
+}
+
 }
 
 int main() {
@@ -906,5 +994,7 @@ int main() {
         silence_changed_identity_clears_error_tests();
         initial_credentials_failure_tests();
         independent_channels_isolation_tests();
+        volume_window_cache_tests();
+        volume_error_and_stale_request_tests();
     });
 }

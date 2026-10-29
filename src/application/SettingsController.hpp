@@ -20,7 +20,8 @@ class SettingsController final : public IThresholdConfigReader, public IMonitorS
 public:
     SettingsController(ISettingsReader& reader, IOutputDirectory& output,
         SettingsOverrides overrides = {}, IMySqlConfiguration* mysql = nullptr,
-        IMySqlConfiguration* log_silence_mysql = nullptr);
+        IMySqlConfiguration* log_silence_mysql = nullptr,
+        IMySqlConfiguration* log_volume_mysql = nullptr);
     std::expected<void, Error> initialize();
     std::expected<bool, Error> reload();
     const MonitorSettings& current() const override;
@@ -36,6 +37,7 @@ private:
     SettingsOverrides overrides_;
     IMySqlConfiguration* mysql_;
     IMySqlConfiguration* log_silence_mysql_;
+    IMySqlConfiguration* log_volume_mysql_;
     std::optional<MonitorSettings> settings_;
     std::optional<Error> last_error_;
     std::vector<Error> dependency_errors_;

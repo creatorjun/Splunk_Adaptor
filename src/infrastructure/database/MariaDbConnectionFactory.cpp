@@ -2,6 +2,7 @@
 #include "infrastructure/database/MariaDbConnectionFactory.hpp"
 #include "infrastructure/database/CollectCountQuery.hpp"
 #include "infrastructure/database/LogSilenceQuery.hpp"
+#include "infrastructure/database/LogVolumeQuery.hpp"
 
 #include <mysql.h>
 
@@ -155,6 +156,39 @@ public:
         if (::mysql_errno(connection_.get()) != 0) {
             return std::unexpected(database_error(connection_.get(), "Last log receipt result read failed",
                 "log_silence", "CloudESM.SUM_COLLECT_INFO"));
+        }
+        return std::move(decoded).take();
+    }
+
+    std::expected<std::vector<EquipmentLogVolume>, Error> read_log_volume(
+        const LogVolumeWindow& window) override {
+        const auto query = make_log_volume_query(window);
+        if (!query) return std::unexpected(query.error());
+        const auto* target = window.mode == LogVolumeMode::daily
+            ? "CloudESM.SUM_COLLECT_INFO_1DAY" : "CloudESM.SUM_COLLECT_INFO";
+        if (::mysql_real_query(connection_.get(), query->data(), static_cast<unsigned long>(query->size())) != 0) {
+            return std::unexpected(database_error(connection_.get(), "Log volume query failed", "log_volume", target));
+        }
+        std::unique_ptr<MYSQL_RES, FreeResult> result(::mysql_use_result(connection_.get()));
+        if (!result || ::mysql_num_fields(result.get()) != LogVolumeQueryRow{}.size()) {
+            if (::mysql_errno(connection_.get()) != 0) {
+                return std::unexpected(database_error(connection_.get(), "Log volume result failed", "log_volume", target));
+            }
+            return std::unexpected(Error{"log_volume", target, "invalid_query_result", "Log volume result was invalid"});
+        }
+        LogVolumeQueryResult decoded;
+        while (const auto row = ::mysql_fetch_row(result.get())) {
+            const auto lengths = ::mysql_fetch_lengths(result.get());
+            if (!lengths) return std::unexpected(Error{"log_volume", target, "invalid_query_result",
+                "Log volume result was invalid"});
+            LogVolumeQueryRow fields;
+            for (std::size_t index = 0; index < fields.size(); ++index) {
+                if (row[index]) fields[index] = std::string_view{row[index], lengths[index]};
+            }
+            if (const auto appended = decoded.append(fields); !appended) return std::unexpected(appended.error());
+        }
+        if (::mysql_errno(connection_.get()) != 0) {
+            return std::unexpected(database_error(connection_.get(), "Log volume result read failed", "log_volume", target));
         }
         return std::move(decoded).take();
     }
